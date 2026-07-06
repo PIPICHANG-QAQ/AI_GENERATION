@@ -1,0 +1,60 @@
+flowchart LR
+  User["本地使用者<br/>教师 / 运营 / 开发联调"]:::actor
+  LocalPlatform["local-platform<br/>Vite React 本地小平台<br/>只用于演示、验收和闭环验证"]:::local
+
+  ImportPage["题目导入<br/>创建任务 / 原文件预览 / OCR 工作台 / 复合人工校验"]:::page
+  BankPage["题库中心<br/>筛选 / 预览 / 复合编辑 / 题图 / AI 解析"]:::page
+  PaperPage["组卷中心<br/>按小问选题 / subSelections / 排序 / 卷头 / 预览 / 导出"]:::page
+  KnowledgePage["知识点库<br/>搜索 / 新增 / 编辑 / 删除"]:::page
+
+  JavaBackend["backend Java 主后端<br/>Spring Boot 3.3.5 / Java 17<br/>本地默认入口 :8018"]:::java
+  CompatibilityApi["本地页面兼容 API<br/>/api/import-tasks<br/>/api/question-bank/questions<br/>/api/papers<br/>/api/knowledge-points"]:::api
+  CapabilityApi["能力 API 可选调用<br/>/api/capabilities/*<br/>/api/engine"]:::api
+
+  JavaDb[("本地 Java 数据层<br/>H2 文件库<br/>可切 MySQL profile")]:::store
+  JavaFiles[("Java 文件存储<br/>backend/storage/java_files<br/>可切 MinIO")]:::store
+  PythonWorker["Python worker<br/>OCR / AI / LaTeX 分隔符修复 / Pandoc 执行<br/>本地端口 :8000"]:::worker
+  WorkerApi["内部 worker API<br/>/worker/ocr<br/>/worker/ai/*<br/>/worker/export"]:::worker
+  LegacyApi["兼容期 legacy /api/*<br/>只为本地页面平滑迁移保留"]:::legacy
+
+  OcrProvider["OCR provider<br/>默认 MinerU CLI<br/>可替换其它 OCR 引擎"]:::worker
+  Llm["大模型 API<br/>DeepSeek / OpenAI 兼容接口"]:::external
+  ExportRuntime["导出运行时<br/>Markdown / Pandoc / XeLaTeX"]:::worker
+
+  User --> LocalPlatform
+  LocalPlatform --> ImportPage
+  LocalPlatform --> BankPage
+  LocalPlatform --> PaperPage
+  LocalPlatform --> KnowledgePage
+
+  ImportPage --> CompatibilityApi
+  BankPage --> CompatibilityApi
+  PaperPage --> CompatibilityApi
+  KnowledgePage --> CompatibilityApi
+  LocalPlatform -. 本地调试能力目录 .-> CapabilityApi
+
+  CompatibilityApi --> JavaBackend
+  CapabilityApi --> JavaBackend
+  JavaBackend --> JavaDb
+  JavaBackend --> JavaFiles
+  JavaBackend --> WorkerApi
+  JavaBackend -. 兼容迁移兜底 .-> LegacyApi
+  WorkerApi --> PythonWorker
+  LegacyApi --> PythonWorker
+
+  PythonWorker --> OcrProvider
+  PythonWorker --> Llm
+  PythonWorker --> ExportRuntime
+  OcrProvider --> PythonWorker
+  Llm --> PythonWorker
+  ExportRuntime --> PythonWorker
+
+  classDef actor fill:#f8fafc,stroke:#64748b,color:#334155,stroke-width:1px;
+  classDef local fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;
+  classDef page fill:#ecfccb,stroke:#65a30d,color:#365314,stroke-width:1px;
+  classDef java fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1px;
+  classDef api fill:#e0f2fe,stroke:#0284c7,color:#075985,stroke-width:1px;
+  classDef worker fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-width:1px;
+  classDef legacy fill:#f1f5f9,stroke:#94a3b8,color:#475569,stroke-width:1px,stroke-dasharray: 4 4;
+  classDef store fill:#fef9c3,stroke:#ca8a04,color:#713f12,stroke-width:1px;
+  classDef external fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:1px;

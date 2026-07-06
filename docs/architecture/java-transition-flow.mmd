@@ -1,0 +1,34 @@
+flowchart LR
+  Browser["浏览器 / Vite React\nReplit 原型迁移前端"]
+  Platform["公司教育生态平台 / 其它应用\nOpenAPI / SDK / 嵌入式工作台"]
+  Capability["题目加工能力 API\n/api/capabilities/question-processing\nProcessingJob / question-package.v1"]
+  Java["Java 主后端\nSpring Boot 3.3.5 / Java 17\nCapabilities API\n知识点 / 题库题目 / 试卷 CRUD\n导入任务状态机 bridge\n导入题/题图/原文件存储与预览 + 入库 bridge\nAI job 编排与候选返回\n/api/java/* + /api/* 代理兜底"]
+  Python["Python Worker\nFastAPI OCR / AI / LaTeX 分隔符修复 / 导出执行\nlegacy /api/* + internal /worker/*"]
+  MinerU["MinerU CLI"]
+  DashScope["DeepSeek / OpenAI 兼容 LLM"]
+  JsonStore["历史 JSON 数据\nlibrary_store.json"]
+  JavaDb["Java 数据层\nH2 本地库 / MySQL profile\nimportTasks + 状态机 / OCR status / failureReason\nimportQuestions / importQuestionImages\nstorageFiles\nquestions / papers / knowledgePoints"]
+  JavaFileStore["Java 文件存储\njava-storage.local-root / MinIO\n试卷/答案原文件副本\nsource 预览 / 下载"]
+  LocalStore["Python 本地文件存储\nbackend/storage"]
+  FutureDeps["企业化依赖入口\nRedis / MinIO / MQ / Prometheus\n默认本地不强制连接"]
+
+  Browser -->|默认 API 入口 8018| Java
+  Browser -->|本地小平台调用能力| Capability
+  Platform -->|平台集成稳定边界| Capability
+  Capability --> Java
+  Java -->|/api/java/* 运维接口| Java
+  Java -->|标准题目包输出| Capability
+  Java -->|CRUD: knowledge-points / questions / papers| JavaDb
+  Java -->|import task manage + 状态机 sync| JavaDb
+  Java -->|import questions + images sync| JavaDb
+  Java -->|upload files metadata sync| JavaDb
+  Java -->|创建导入前保存原文件副本\nsource 预览优先读取| JavaFileStore
+  Java -->|import bank bridge sync| JavaDb
+  Java -->|启动幂等迁移| JsonStore
+  Java -->|导入入库先调用 Python| Python
+  Java -->|未迁移接口代理 / 后续 worker 调用| Python
+  Python --> MinerU
+  Python --> DashScope
+  Python --> JsonStore
+  Python --> LocalStore
+  Java -. 后续迁移 .-> FutureDeps

@@ -1,0 +1,75 @@
+flowchart LR
+  PlatformApps["公司教育生态平台应用<br/>教研 / 作业 / 资源中心 / 管理后台"]:::platform
+  PlatformCore["平台主系统<br/>用户 / 权限 / 组织 / 审核流 / 最终题库 / 文件中心"]:::platform
+
+  OpenApi["question-engine OpenAPI<br/>question-engine.v1.yaml<br/>能力契约优先，不绑定本地页面"]:::contract
+  TsSdk["TypeScript SDK<br/>generated/typescript<br/>Web 应用 / 管理端调用"]:::sdk
+  JavaSdk["Java SDK<br/>generated/java<br/>平台服务端调用"]:::sdk
+  EmbeddedWorkbench["可嵌入 review-workbench<br/>人工校验编辑工作台"]:::sdk
+
+  EngineGateway["backend Java question-engine<br/>统一能力入口 :8018<br/>平台集成时由网关或内网服务暴露"]:::engine
+  CapabilityCatalog["能力目录<br/>/api/capabilities<br/>/api/engine"]:::engine
+
+  OcrFlow["ocr-flow<br/>试卷/答案文件解析<br/>provider contract"]:::capability
+  QuestionProcessing["question-processing<br/>ProcessingJob<br/>question-package.v1"]:::capability
+  ReviewFlow["review-workbench<br/>人工校验数据与嵌入页面契约"]:::capability
+  AiFlow["ai-flow<br/>标准化候选 / 解析 / 答案解析匹配<br/>LaTeX 分隔符修复"]:::capability
+  ExportFlow["export-flow<br/>Markdown / DOCX / PDF 导出"]:::capability
+  FileFlow["file-flow<br/>原文件 / 题图 / OCR 产物 / 导出文件"]:::capability
+  CallbackFlow["callback-flow<br/>状态回调 / 签名 / 重试 / 幂等键"]:::capability
+
+  EngineDb[("engine 元数据<br/>任务 / job / 文件 / callback 事件<br/>本地 H2 或企业 MySQL")]:::store
+  ObjectStorage[("对象存储协议<br/>本地文件或 MinIO<br/>平台可替换为文件中心")]:::store
+  InternalWorker["Python 内部 worker<br/>只执行 OCR / AI / 公式分隔符修复 / 导出<br/>不直接暴露前端业务 API"]:::worker
+  OcrProvider["OCR provider<br/>默认 MinerU<br/>未来替换其它 OCR 引擎只改 provider 层"]:::worker
+  AiProvider["AI provider<br/>DeepSeek / OpenAI 兼容模型"]:::external
+  ExportProvider["导出 provider<br/>Pandoc / XeLaTeX"]:::worker
+
+  PlatformApps --> TsSdk
+  PlatformApps --> EmbeddedWorkbench
+  PlatformCore --> JavaSdk
+  PlatformCore --> OpenApi
+  TsSdk --> OpenApi
+  JavaSdk --> OpenApi
+  EmbeddedWorkbench --> OpenApi
+
+  OpenApi --> EngineGateway
+  EngineGateway --> CapabilityCatalog
+  CapabilityCatalog --> OcrFlow
+  CapabilityCatalog --> QuestionProcessing
+  CapabilityCatalog --> ReviewFlow
+  CapabilityCatalog --> AiFlow
+  CapabilityCatalog --> ExportFlow
+  CapabilityCatalog --> FileFlow
+  CapabilityCatalog --> CallbackFlow
+
+  OcrFlow --> EngineDb
+  QuestionProcessing --> EngineDb
+  ReviewFlow --> EngineDb
+  AiFlow --> EngineDb
+  ExportFlow --> EngineDb
+  FileFlow --> EngineDb
+  CallbackFlow --> EngineDb
+
+  FileFlow --> ObjectStorage
+  EngineGateway --> InternalWorker
+  InternalWorker --> OcrProvider
+  InternalWorker --> AiProvider
+  InternalWorker --> ExportProvider
+  OcrProvider --> InternalWorker
+  AiProvider --> InternalWorker
+  ExportProvider --> InternalWorker
+
+  PlatformCore -. 提供主数据与治理 .-> OpenApi
+  PlatformCore -. 最终入库 / 权限 / 审核 / 长期归档 .-> PlatformApps
+  CallbackFlow -. 回调平台任务状态 .-> PlatformCore
+  QuestionProcessing -. 输出标准题目包 .-> PlatformCore
+
+  classDef platform fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1px;
+  classDef contract fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1px;
+  classDef sdk fill:#e0f2fe,stroke:#0284c7,color:#075985,stroke-width:1px;
+  classDef engine fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;
+  classDef capability fill:#ecfccb,stroke:#65a30d,color:#365314,stroke-width:1px;
+  classDef worker fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-width:1px;
+  classDef store fill:#fef9c3,stroke:#ca8a04,color:#713f12,stroke-width:1px;
+  classDef external fill:#ffedd5,stroke:#ea580c,color:#7c2d12,stroke-width:1px;

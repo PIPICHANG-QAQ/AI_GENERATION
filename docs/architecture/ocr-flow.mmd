@@ -1,0 +1,90 @@
+flowchart TD
+  LegendLocal["绿色：本地算力 / 本地存储"]:::local
+  LegendExternal["黄色：外部 API 算力"]:::external
+  LegendMixed["蓝色：混合编排 / 本地兜底"]:::mixed
+
+  Start(["新建导入任务<br/>填写标题、学段、学科、年级、地区、年份"]):::local
+  Validate["后端校验必填项与任务标题查重<br/>拒绝同名任务"]:::local
+  Upload["保存试卷文件与可选答案文件<br/>backend/storage/import_uploads"]:::local
+  Jobs["创建试卷 / 答案 OCR-Flow job<br/>写入 jobs JSON"]:::local
+  JavaSnapshot["Java 持久快照<br/>java_import_tasks / java_import_questions / java_import_question_images"]:::local
+  WorkerSafeStore["worker 兼容 store<br/>原子写入 + .bak 备份回退"]:::local
+  FlowConfig["OCR-Flow 配置<br/>OCR_FLOW_PROVIDER / OCR_FLOW_EXTENSIONS"]:::local
+  Provider["OCR provider<br/>默认 MinerU，可替换"]:::local
+  OcrPaper["provider 解析试卷<br/>输出 Markdown、JSON、图片资源"]:::local
+  OcrAnswer["可选：provider 解析答案文件<br/>作为答案与解析上下文"]:::local
+  Collect["收集 OCR 产物<br/>统一图片路径与原文件预览资源"]:::local
+  ImageLibrary["建立本导入任务题图库<br/>OCR 图片进入 imageLibrary"]:::local
+  LocalBoundary["local-boundary-detect<br/>本地候选边界：大题、题号、小问、选项、题图"]:::local
+
+  LlmAvailable{"DeepSeek / OpenAI 兼容 API<br/>是否已配置且可用？"}:::mixed
+  LlmBoundary["llm-boundary-refine<br/>外部 API 只确认 start/end、label、path<br/>禁止生成题干、答案、解析"]:::external
+  BuildByEvidence["question-structure-build<br/>按 OCR 原文边界切片生成题目结构"]:::local
+  SubSplit["sub-question-split<br/>大题内小问写入 subQuestions/children"]:::local
+  ChoiceBlankProtect["choice-blank-structure-protect<br/>选项边界、____ 占位、题图回收"]:::mixed
+  VisualRepair["visual-repair<br/>题目 crop、横线检测、可选 Pix2Text"]:::mixed
+  StructureValidate{"structure-validate<br/>选项、小问、题图和证据回溯是否通过？"}:::mixed
+  RuleFallback["旧版规则拆题兜底<br/>模型不可用或结构校验失败时使用"]:::local
+
+  MathNormalize["本地公式标准化与校验<br/>修复常见 LaTeX 边界与风险标记"]:::local
+  LatexDelimiter["确定性 LaTeX 分隔符修复<br/>展示公式嵌套 $ / 行内公式被运算符切断"]:::mixed
+  SemanticRisk{"是否命中高置信<br/>语义 OCR 风险？"}:::mixed
+  SemanticApi["外部 API：AI 语义修复<br/>只处理本地检测出的高置信风险"]:::external
+  SemanticVerify["本地复核 AI 修复结果<br/>低置信则保留原文并标记需复核"]:::mixed
+
+  MetadataDecision{"是否可调用模型补全<br/>答案、解析与元数据？"}:::mixed
+  MetadataApi["外部 API：题目元数据补全<br/>题型、答案、解析、知识点、难度、分值<br/>按 subQuestions 归属答案/解析"]:::external
+  MetadataFallback["本地默认元数据<br/>保留空答案/解析，难度 medium"]:::local
+  BuildQuestions["生成待校验导入题目<br/>状态：待校验，保留 images、options、subQuestions"]:::local
+  SubQuestionNormalize["小问结构归一化<br/>children 与 subQuestions 双字段<br/>父题答案/解析为空"]:::local
+  DetailRecovery{"详情轮询发现<br/>worker task 缺失或陈旧？"}:::mixed
+  RecoverFromOcr["Java 触发 worker 恢复<br/>按 OCR job 快照重建题目并回写 Java"]:::mixed
+
+  Workbench["导入 OCR 工作台<br/>左侧原文件预览，右侧复合人工校验"]:::local
+  ManualEdit["复合编辑器<br/>大题题干 + 小问题干/答案/解析/分值/知识点"]:::local
+  AddImages["题图维护<br/>从本卷题图库导入或本地多图上传<br/>AI 解析跳过无效图片"]:::local
+  KnowledgePick["知识点库联动搜索多选<br/>保存 id 与名称"]:::local
+  SubAiStandardize["小问级 AI 标准化<br/>当前小问候选源码/预览<br/>人工应用后只更新该小问"]:::external
+  AiAnalysis["外部 API：AI 解析<br/>根据题干、答案、题型、知识点生成解析草稿<br/>含小问时返回 subQuestions 解析"]:::external
+  SubAiAnalysis["小问级 AI 解析<br/>大题材料 + 当前小问 + 题图<br/>只回填当前小问答案/解析"]:::external
+  SaveReview["保存校验结果<br/>PUT /api/import-tasks/{taskId}/questions/{questionId}<br/>写回 subQuestions"]:::local
+  BankDedup["题目入库查重<br/>重复题跳过或拒绝，避免重复入库"]:::local
+  Bank["写入题库中心 bankQuestions<br/>保留 children/subQuestions 双字段"]:::local
+  PaperSelect["组卷中心按小问选择<br/>试卷层 subSelections"]:::local
+  PaperPreview["预览/导出只渲染所选小问<br/>缺失/空/失效视为全选"]:::local
+
+  Start --> Validate --> Upload --> Jobs
+  Jobs --> JavaSnapshot
+  Jobs --> WorkerSafeStore
+  Jobs --> FlowConfig --> Provider
+  Provider --> OcrPaper --> Collect
+  Provider --> OcrAnswer --> Collect
+  Collect --> ImageLibrary --> LocalBoundary --> LlmAvailable
+  LlmAvailable -- "可用" --> LlmBoundary --> BuildByEvidence
+  LlmAvailable -- "不可用 / 失败" --> BuildByEvidence
+  BuildByEvidence --> SubSplit --> ChoiceBlankProtect --> VisualRepair --> StructureValidate
+  StructureValidate -- "通过" --> MathNormalize
+  StructureValidate -- "失败" --> RuleFallback --> MathNormalize
+  MathNormalize --> LatexDelimiter --> SemanticRisk
+  SemanticRisk -- "是" --> SemanticApi --> SemanticVerify --> MathNormalize
+  SemanticRisk -- "否" --> MetadataDecision
+  MathNormalize --> MetadataDecision
+  MetadataDecision -- "可用" --> MetadataApi --> BuildQuestions
+  MetadataDecision -- "不可用 / 失败" --> MetadataFallback --> BuildQuestions
+  BuildQuestions --> SubQuestionNormalize
+  SubQuestionNormalize --> JavaSnapshot
+  SubQuestionNormalize --> WorkerSafeStore
+  SubQuestionNormalize --> DetailRecovery
+  DetailRecovery -- "是" --> RecoverFromOcr --> JavaSnapshot --> Workbench
+  DetailRecovery -- "否" --> Workbench
+  Workbench --> ManualEdit
+  ManualEdit --> AddImages --> SaveReview
+  ManualEdit --> KnowledgePick --> SaveReview
+  ManualEdit --> SubAiStandardize --> SaveReview
+  ManualEdit --> AiAnalysis --> SaveReview
+  ManualEdit --> SubAiAnalysis --> SaveReview
+  SaveReview --> BankDedup --> Bank --> PaperSelect --> PaperPreview
+
+  classDef local fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;
+  classDef external fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1px;
+  classDef mixed fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1px;

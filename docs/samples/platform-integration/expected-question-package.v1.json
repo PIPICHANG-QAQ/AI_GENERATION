@@ -1,0 +1,54 @@
+{
+  "packageVersion": "question-package.v1",
+  "capability": "question-processing",
+  "job": {
+    "jobId": "import_task_example",
+    "title": "脱敏数学样卷",
+    "stage": "高中",
+    "subject": "数学",
+    "grade": "高一",
+    "region": "示例",
+    "year": "2026",
+    "status": "待校验",
+    "processingStatus": "WAITING_REVIEW",
+    "failureReason": "",
+    "questionCount": 3
+  },
+  "questions": [
+    {
+      "questionId": "question_example_1",
+      "sourceQuestionId": "raw_1",
+      "number": 1,
+      "status": "待校验",
+      "type": "single_choice",
+      "stemMarkdown": "已知 $x+1=2$，求 $x$。",
+      "originalStemMarkdown": "1. 已知 $x+1=2$，求 $x$。",
+      "answer": "B",
+      "analysis": "由 $x+1=2$ 得 $x=1$。",
+      "options": [
+        {"label": "A", "contentMarkdown": "0"},
+        {"label": "B", "contentMarkdown": "1"},
+        {"label": "C", "contentMarkdown": "2"},
+        {"label": "D", "contentMarkdown": "3"}
+      ],
+      "children": [],
+      "images": [],
+      "knowledgePointIdCandidates": [],
+      "knowledgePointCandidates": [],
+      "difficulty": "easy",
+      "score": 5,
+      "mathValidation": {
+        "status": "ok",
+        "warnings": []
+      },
+      "sourceEvidence": [
+        {
+          "type": "ocr_markdown",
+          "text": "1. 已知 $x+1=2$，求 $x$。"
+        }
+      ],
+      "warnings": []
+    }
+  ],
+  "warnings": []
+}

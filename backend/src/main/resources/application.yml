@@ -1,0 +1,192 @@
+# HTTP 服务配置：Java backend 默认跑在 8018，支持优雅停机和大文件上传。
+server:
+  port: ${SERVER_PORT:8018}
+  shutdown: graceful
+  tomcat:
+    connection-timeout: 300s
+    max-swallow-size: 200MB
+
+# Spring 基础配置：应用名、默认 profile、上传限制、JSON 时间格式、数据源和 Nacos 开关。
+spring:
+  application:
+    name: ai-question-bank-java
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:test}
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+      enabled: true
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    date-format: yyyy-MM-dd HH:mm:ss
+    default-property-inclusion: non_null
+  datasource:
+    driver-class-name: ${DB_DRIVER:org.h2.Driver}
+    url: ${DB_URL:jdbc:h2:file:./storage/java_library;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE}
+    username: ${DB_USERNAME:sa}
+    password: ${DB_PASSWORD:}
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+  cloud:
+    nacos:
+      discovery:
+        # 本地默认不注册 Nacos；企业环境可通过环境变量开启发现和注册。
+        enabled: ${NACOS_DISCOVERY_ENABLED:false}
+        register-enabled: ${NACOS_REGISTER_ENABLED:false}
+      config:
+        enabled: ${NACOS_CONFIG_ENABLED:false}
+
+# Actuator 暴露健康、指标和 Prometheus 指标，供平台监控或网关探活使用。
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  health:
+    elasticsearch:
+      enabled: false
+    neo4j:
+      enabled: false
+    redis:
+      enabled: ${REDIS_HEALTH_ENABLED:false}
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# MyBatis-Plus 使用下划线转驼峰，并由业务代码显式生成主键。
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: input
+
+# OpenAPI/Swagger UI 配置，作为平台 SDK 生成和接口调试入口。
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_ENABLED:true}
+  swagger-ui:
+    persistAuthorization: true
+    deepLinking: true
+
+# Knife4j 文档增强配置，默认启用中文界面。
+knife4j:
+  enable: ${KNIFE4J_ENABLED:true}
+  setting:
+    language: zh_cn
+
+# smart-rag-stack 版本清单：通过 /api/java/system/versions 暴露给前端和部署排查使用。
+smart-rag-stack:
+  versions:
+    java: "17"
+    spring-boot: "3.3.5"
+    spring-cloud: "2023.0.3"
+    spring-cloud-alibaba: "2023.0.1.2"
+    spring-ai: "1.0.0"
+    spring-ai-alibaba: "1.0.0.2"
+    openfeign: "4.1.3"
+    mybatis-spring-boot-starter: "2.3.2"
+    mybatis-plus: "3.5.5"
+    pagehelper: "1.4.7"
+    rocketmq-spring-boot: "2.3.1"
+    rocketmq-client: "5.3.1"
+    elasticsearch-java: "9.3.3"
+    milvus-sdk-java: "2.3.4"
+    neo4j-java-driver: "5.23.0"
+    minio: "8.5.11"
+    okhttp: "4.12.0"
+    pdfbox: "3.0.3"
+    poi-ooxml: "5.3.0"
+    easyexcel: "3.1.1"
+    flexmark-all: "0.64.8"
+    jsoup: "1.17.2"
+    fastjson2: "2.0.53"
+    knife4j: "4.4.0"
+    hutool: "5.8.11"
+    commons-io: "2.19.0"
+    jtokkit: "0.6.1"
+    lombok: "1.18.34"
+
+# Python worker 连接配置：Java 通过该地址调用 OCR、AI 和导出 worker。
+python-worker:
+  enabled: ${PYTHON_WORKER_ENABLED:true}
+  api-proxy-enabled: ${PYTHON_WORKER_API_PROXY_ENABLED:true}
+  base-url: ${PYTHON_WORKER_BASE_URL:http://127.0.0.1:8000}
+  health-path: ${PYTHON_WORKER_HEALTH_PATH:/api/health}
+  connect-timeout-ms: ${PYTHON_WORKER_CONNECT_TIMEOUT_MS:2000}
+  read-timeout-ms: ${PYTHON_WORKER_READ_TIMEOUT_MS:300000}
+
+# 平台生产接入安全兜底校验：本地默认关闭，生产可开启并要求平台上下文 header。
+platform:
+  security:
+    context-validation-enabled: ${PLATFORM_SECURITY_CONTEXT_VALIDATION_ENABLED:false}
+    authorization-required: ${PLATFORM_SECURITY_AUTHORIZATION_REQUIRED:true}
+    required-headers: ${PLATFORM_SECURITY_REQUIRED_HEADERS:X-Tenant-Id,X-Operator-Id}
+    excluded-path-prefixes: ${PLATFORM_SECURITY_EXCLUDED_PATH_PREFIXES:/actuator,/v3/api-docs,/swagger-ui,/doc.html,/webjars,/favicon.ico,/api/java/health,/api/java/worker,/api/java/stack,/api/java/enterprise}
+
+# 企业部署开关：MySQL/Redis/MinIO/MQ 可按环境逐步接入，本地默认关闭外部依赖。
+enterprise:
+  mysql:
+    enabled: ${ENTERPRISE_MYSQL_ENABLED:false}
+  redis:
+    enabled: ${ENTERPRISE_REDIS_ENABLED:false}
+    host: ${REDIS_HOST:127.0.0.1}
+    port: ${REDIS_PORT:6379}
+  minio:
+    enabled: ${ENTERPRISE_MINIO_ENABLED:false}
+    endpoint: ${MINIO_ENDPOINT:http://127.0.0.1:9000}
+    bucket: ${MINIO_BUCKET:ai-generation}
+    access-key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret-key: ${MINIO_SECRET_KEY:minioadmin}
+  mq:
+    enabled: ${ENTERPRISE_MQ_ENABLED:false}
+    provider: ${ENTERPRISE_MQ_PROVIDER:rocketmq}
+    name-server: ${ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+
+# Java 文件存储根目录；MinIO 未启用时，导入原文件、题图和导出文件都落在这里。
+java-storage:
+  local-root: ${JAVA_STORAGE_LOCAL_ROOT:storage/java_files}
+
+# 历史本地 JSON 存储迁移配置，用于从 library_store.json 迁移到 Java domain 表。
+java-domain:
+  migration:
+    enabled: ${JAVA_DOMAIN_MIGRATION_ENABLED:true}
+    library-store-path: ${JAVA_DOMAIN_LIBRARY_STORE_PATH:storage/library_store.json}
+
+# test profile：使用内存库/本地调试日志，关闭不必要的外部组件噪声。
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+
+logging:
+  level:
+    root: info
+    com.aigeneration.questionbank: ${APP_LOG_LEVEL:info}
+    com.alibaba.nacos.common.remote.client: 'OFF'
+    com.alibaba.nacos.client.config.impl.ClientWorker: 'OFF'
+    com.alibaba.nacos.common.remote.client.grpc.GrpcClient: 'OFF'
+    com.alibaba.nacos.client.auth.impl.process.HttpLoginProcessor: 'OFF'
+    com.alibaba.nacos.client.naming: 'OFF'
+
+# mysql profile：企业或联调环境使用 MySQL 数据源。
+---
+spring:
+  config:
+    activate:
+      on-profile: mysql
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/ai_generation?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${DB_USERNAME:ai_generation}
+    password: ${DB_PASSWORD:ai_generation}

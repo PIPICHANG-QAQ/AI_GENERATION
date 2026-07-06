@@ -1,0 +1,1160 @@
+openapi: 3.0.3
+info:
+  title: Question Engine API
+  version: 1.0.0
+  description: >
+    question-engine 本期稳定能力契约。该契约面向公司教育生态平台，
+    覆盖能力目录、题目加工任务、标准题目包、OCR/AI/导出/file/callback
+    运行时入口；本地小平台页面兼容 API 不属于本契约主路径。
+servers:
+  - url: http://localhost:8018
+    description: Local Java backend
+tags:
+  - name: catalog
+    description: 能力目录
+  - name: question-processing
+    description: 试卷到标准题目包加工能力
+  - name: runtime
+    description: OCR/AI/导出/文件运行时摘要
+  - name: review-workbench
+    description: 可嵌入人工校验工作台接口
+  - name: ai-flow
+    description: AI 标准化候选、AI 解析和答案解析写回
+  - name: file-flow
+    description: 原文件、题图、OCR 产物和导出文件访问
+  - name: callback-flow
+    description: 平台回调事件
+security:
+  - PlatformBearerAuth: []
+    TenantHeader: []
+    OperatorHeader: []
+paths:
+  /api/capabilities:
+    get:
+      tags: [catalog]
+      operationId: listCapabilities
+      summary: 获取能力总目录
+      responses:
+        "200":
+          description: 能力列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CapabilitySummary"
+  /api/engine:
+    get:
+      tags: [catalog]
+      operationId: getEngineCatalog
+      summary: 获取 question-engine 能力目录
+      responses:
+        "200":
+          description: Engine catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EngineCatalog"
+  /api/engine/interfaces:
+    get:
+      tags: [catalog]
+      operationId: getEngineInterfaces
+      summary: 获取 question-engine 接口清单
+      description: 返回面向平台集成的 Java API 扁平清单，用于对接评审、SDK 覆盖检查和接口交付验收。
+      responses:
+        "200":
+          description: Engine interface list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EngineInterfaceDescriptor"
+  /api/engine/delivery-boundary:
+    get:
+      tags: [catalog]
+      operationId: getDeliveryBoundary
+      summary: 获取交付边界
+      responses:
+        "200":
+          description: Delivery boundary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryBoundary"
+  /api/capabilities/question-processing:
+    get:
+      tags: [question-processing]
+      operationId: getQuestionProcessingCapability
+      summary: 获取题目加工能力描述
+      responses:
+        "200":
+          description: Capability descriptor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionProcessingDescriptor"
+  /api/capabilities/question-processing/jobs:
+    get:
+      tags: [question-processing]
+      operationId: listProcessingJobs
+      summary: 获取题目加工任务列表
+      responses:
+        "200":
+          description: Processing jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProcessingJob"
+    post:
+      tags: [question-processing]
+      operationId: createProcessingJob
+      summary: 创建题目加工任务
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/CreateProcessingJobRequest"
+      responses:
+        "200":
+          description: Created processing job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessingJob"
+  /api/capabilities/question-processing/jobs/{jobId}:
+    get:
+      tags: [question-processing]
+      operationId: getProcessingJob
+      summary: 获取题目加工任务
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Processing job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessingJob"
+  /api/capabilities/question-processing/jobs/{jobId}/question-package:
+    get:
+      tags: [question-processing]
+      operationId: getQuestionPackage
+      summary: 获取 question-package.v1 标准题目包
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Question package
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionPackage"
+  /api/capabilities/ocr-flow:
+    get:
+      tags: [runtime]
+      operationId: getOcrFlowCapability
+      summary: 获取 OCR-Flow 能力描述
+      responses:
+        "200":
+          description: OCR capability
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/capabilities/ocr-flow/runtime:
+    get:
+      tags: [runtime]
+      operationId: getOcrFlowRuntime
+      summary: 获取 OCR-Flow 运行时
+      responses:
+        "200":
+          description: OCR runtime
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/capabilities/ai-flow/runtime:
+    get:
+      tags: [runtime]
+      operationId: getAiFlowRuntime
+      summary: 获取 AI-flow 运行时
+      responses:
+        "200":
+          description: AI runtime
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/capabilities/export-flow/runtime:
+    get:
+      tags: [runtime]
+      operationId: getExportFlowRuntime
+      summary: 获取 export-flow 运行时
+      responses:
+        "200":
+          description: Export runtime
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/capabilities/file-flow/runtime:
+    get:
+      tags: [runtime]
+      operationId: getFileFlowRuntime
+      summary: 获取 file-flow 运行时
+      responses:
+        "200":
+          description: File runtime
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/import-tasks/{jobId}/image-library:
+    get:
+      tags: [review-workbench, file-flow]
+      operationId: getImportTaskImageLibrary
+      summary: 获取本次导入任务生成的题图库
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Import task image library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionImageLibrary"
+  /api/import-tasks/{jobId}/questions/{questionId}/images:
+    post:
+      tags: [review-workbench, file-flow]
+      operationId: uploadImportQuestionImages
+      summary: 给导入题本地上传题图
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/QuestionId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        "200":
+          description: Updated question images
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionImageMutationResult"
+  /api/import-tasks/{jobId}/questions/{questionId}/images/select:
+    post:
+      tags: [review-workbench, file-flow]
+      operationId: selectImportQuestionImages
+      summary: 从任务题图库选择图片挂到当前题
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/QuestionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectQuestionImagesRequest"
+      responses:
+        "200":
+          description: Updated question images
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionImageMutationResult"
+  /api/import-tasks/{jobId}/questions/{questionId}/images/{imageId}:
+    get:
+      tags: [review-workbench, file-flow]
+      operationId: getImportQuestionImage
+      summary: 读取导入题题图文件
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/QuestionId"
+        - name: imageId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Image binary
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+  /api/import-tasks/{jobId}/questions/{questionId}/standardize/ai:
+    post:
+      tags: [review-workbench, ai-flow]
+      operationId: standardizeImportQuestion
+      summary: AI 标准化导入题并返回修复候选
+      description: Java 编排 Python worker；默认只返回修复候选，不覆盖当前导入题。仅当请求显式传入 writeResult=true 或 apply=true，且候选非低置信、无严重 LaTeX 风险时，才允许写回当前题。
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/QuestionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiStandardizeRequest"
+      responses:
+        "200":
+          description: AI standardize result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiStandardizeResult"
+  /api/import-tasks/{jobId}/questions/{questionId}/analysis:
+    post:
+      tags: [review-workbench, ai-flow]
+      operationId: analyzeImportQuestion
+      summary: AI 解析导入题，并写回答案和解析
+      description: Java 编排 Python worker，结合题干、答案、知识点和题图生成或修正解析。
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/QuestionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiAnalysisRequest"
+      responses:
+        "200":
+          description: AI analysis result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiAnalysisResult"
+  /api/question-bank/questions/{questionId}/image-library:
+    get:
+      tags: [review-workbench, file-flow]
+      operationId: getBankQuestionImageLibrary
+      summary: 获取题库题可复用题图库
+      parameters:
+        - $ref: "#/components/parameters/QuestionId"
+      responses:
+        "200":
+          description: Bank question image library
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionImageLibrary"
+  /api/question-bank/questions/{questionId}/images:
+    post:
+      tags: [review-workbench, file-flow]
+      operationId: uploadBankQuestionImages
+      summary: 给题库题本地上传题图
+      parameters:
+        - $ref: "#/components/parameters/QuestionId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        "200":
+          description: Updated bank question images
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionImageMutationResult"
+  /api/question-bank/questions/{questionId}/images/{imageId}:
+    get:
+      tags: [review-workbench, file-flow]
+      operationId: getBankQuestionImage
+      summary: 读取题库题题图文件
+      parameters:
+        - $ref: "#/components/parameters/QuestionId"
+        - name: imageId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Image binary
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+  /api/question-bank/questions/{questionId}/standardize/ai:
+    post:
+      tags: [review-workbench, ai-flow]
+      operationId: standardizeBankQuestion
+      summary: AI 标准化题库题并返回修复候选
+      description: Java 编排 Python worker；默认只返回修复候选，不覆盖当前题库题。仅当请求显式传入 writeResult=true 或 apply=true，且候选非低置信、无严重 LaTeX 风险时，才允许写回当前题。
+      parameters:
+        - $ref: "#/components/parameters/QuestionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiStandardizeRequest"
+      responses:
+        "200":
+          description: AI standardize result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiStandardizeResult"
+  /api/question-bank/questions/{questionId}/analysis:
+    post:
+      tags: [review-workbench, ai-flow]
+      operationId: analyzeBankQuestion
+      summary: AI 解析题库题，并写回答案和解析
+      description: Java 编排 Python worker，结合题库题已保存题图和上下文生成或修正解析。
+      parameters:
+        - $ref: "#/components/parameters/QuestionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiAnalysisRequest"
+      responses:
+        "200":
+          description: AI analysis result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiAnalysisResult"
+  /api/capabilities/callback-flow/runtime:
+    get:
+      tags: [callback-flow]
+      operationId: getCallbackFlowRuntime
+      summary: 获取 callback-flow 运行时
+      responses:
+        "200":
+          description: Callback runtime
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/capabilities/callback-flow/events:
+    get:
+      tags: [callback-flow]
+      operationId: listCallbackEvents
+      summary: 查询回调事件
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Callback events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallbackEventList"
+  /api/capabilities/callback-flow/test:
+    post:
+      tags: [callback-flow]
+      operationId: createCallbackTestEvent
+      summary: 创建并发送测试回调事件
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCallbackEventRequest"
+      responses:
+        "200":
+          description: Callback event
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallbackEvent"
+  /api/capabilities/callback-flow/events/{eventId}/retry:
+    post:
+      tags: [callback-flow]
+      operationId: retryCallbackEvent
+      summary: 手动重试回调事件
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                secret:
+                  type: string
+      responses:
+        "200":
+          description: Callback event
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallbackEvent"
+  /api/capabilities/callback-flow/events/retry-due:
+    post:
+      tags: [callback-flow]
+      operationId: retryDueCallbackEvents
+      summary: 扫描并重试到期失败回调，超过次数进入 dead_letter
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                secret:
+                  type: string
+      responses:
+        "200":
+          description: Retry summary
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+components:
+  securitySchemes:
+    PlatformBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 生产环境由平台网关或平台服务注入；本地开发可省略。
+    TenantHeader:
+      type: apiKey
+      in: header
+      name: X-Tenant-Id
+      description: 平台租户或机构上下文，生产环境必填。
+    OperatorHeader:
+      type: apiKey
+      in: header
+      name: X-Operator-Id
+      description: 平台操作者或服务账号上下文，生产环境必填。
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+    QuestionId:
+      name: questionId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    CapabilitySummary:
+      type: object
+      required: [code, name]
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        boundary:
+          type: string
+      additionalProperties: true
+    EngineCatalog:
+      type: object
+      required: [code, modules, supplementalCapabilities]
+      properties:
+        code:
+          type: string
+          example: question-engine
+        modules:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        supplementalCapabilities:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        deliveryBoundary:
+          $ref: "#/components/schemas/DeliveryBoundary"
+      additionalProperties: true
+    DeliveryBoundary:
+      type: object
+      properties:
+        includePaths:
+          type: array
+          items:
+            type: string
+        excludePaths:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    EngineInterfaceDescriptor:
+      type: object
+      required: [groupCode, groupName, method, path, audience, source]
+      properties:
+        groupCode:
+          type: string
+          example: question-import
+        groupName:
+          type: string
+          example: 题目导入能力
+        method:
+          type: string
+          example: POST
+        path:
+          type: string
+          example: /api/capabilities/question-processing/jobs
+        description:
+          type: string
+        audience:
+          type: string
+          example: platform-api
+        source:
+          type: string
+          example: engine-module
+    QuestionProcessingDescriptor:
+      type: object
+      required: [code, packageVersion, endpoints]
+      properties:
+        code:
+          type: string
+          example: question-processing
+        name:
+          type: string
+        boundary:
+          type: string
+        packageVersion:
+          type: string
+          example: question-package.v1
+        endpoints:
+          type: object
+          additionalProperties:
+            type: string
+      additionalProperties: true
+    CreateProcessingJobRequest:
+      type: object
+      required: [paperFile]
+      properties:
+        paperFile:
+          type: string
+          format: binary
+        answerFile:
+          type: string
+          format: binary
+        stage:
+          type: string
+        subject:
+          type: string
+        grade:
+          type: string
+        region:
+          type: string
+        year:
+          type: string
+        title:
+          type: string
+    ProcessingJob:
+      type: object
+      required: [jobId, status, processingStatus]
+      properties:
+        jobId:
+          type: string
+        title:
+          type: string
+        stage:
+          type: string
+        subject:
+          type: string
+        grade:
+          type: string
+        region:
+          type: string
+        year:
+          type: string
+        status:
+          type: string
+        processingStatus:
+          type: string
+          enum: [PROCESSING, WAITING_REVIEW, PARTIAL_COMPLETED, COMPLETED, FAILED, RETRYABLE, UNKNOWN]
+        failureReason:
+          type: string
+        questionCount:
+          type: integer
+        sourceFiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/SourceFile"
+        paperOcr:
+          $ref: "#/components/schemas/OcrStatus"
+        answerOcr:
+          $ref: "#/components/schemas/OcrStatus"
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+    SourceFile:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [paper, answer]
+        filename:
+          type: string
+        previewUrl:
+          type: string
+    OcrStatus:
+      type: object
+      properties:
+        kind:
+          type: string
+        jobId:
+          type: string
+        status:
+          type: string
+        raw:
+          type: object
+          additionalProperties: true
+    QuestionPackage:
+      type: object
+      required: [packageVersion, capability, job, questions, warnings]
+      properties:
+        packageVersion:
+          type: string
+          example: question-package.v1
+        capability:
+          type: string
+          example: question-processing
+        job:
+          $ref: "#/components/schemas/ProcessingJob"
+        questions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessedQuestion"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessingWarning"
+    ProcessedQuestion:
+      type: object
+      required: [questionId, stemMarkdown, images, options, children, mathValidation, sourceEvidence]
+      properties:
+        questionId:
+          type: string
+        sourceQuestionId:
+          type: string
+        number:
+          type: integer
+        status:
+          type: string
+        type:
+          type: string
+        stemMarkdown:
+          type: string
+        originalStemMarkdown:
+          type: string
+        answer:
+          type: string
+        analysis:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionOption"
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionChild"
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+        writeResult:
+          type: boolean
+          description: 显式请求写回开关；默认 false，仅返回候选。
+        apply:
+          type: boolean
+          description: writeResult 的兼容别名；默认 false。
+        knowledgePointIdCandidates:
+          type: array
+          items:
+            type: string
+        knowledgePointCandidates:
+          type: array
+          items:
+            type: string
+        difficultyCandidate:
+          type: string
+        scoreCandidate:
+          type: number
+        mathValidation:
+          $ref: "#/components/schemas/MathValidation"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessingWarning"
+        sourceEvidence:
+          $ref: "#/components/schemas/SourceEvidence"
+        raw:
+          type: object
+          additionalProperties: true
+    QuestionOption:
+      type: object
+      properties:
+        label:
+          type: string
+        contentMarkdown:
+          type: string
+        raw:
+          type: object
+          additionalProperties: true
+    QuestionChild:
+      type: object
+      properties:
+        childId:
+          type: string
+        sourceQuestionId:
+          type: string
+        number:
+          type: integer
+        stemMarkdown:
+          type: string
+        answer:
+          type: string
+        analysis:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionOption"
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+        raw:
+          type: object
+          additionalProperties: true
+    QuestionImage:
+      type: object
+      properties:
+        id:
+          type: string
+        imageId:
+          type: string
+        index:
+          type: integer
+        imageIndex:
+          type: integer
+        name:
+          type: string
+        path:
+          type: string
+        url:
+          type: string
+        source:
+          type: string
+        type:
+          type: string
+        size:
+          type: integer
+          format: int64
+        storageFileId:
+          type: string
+        questionId:
+          type: string
+        raw:
+          type: object
+          additionalProperties: true
+    QuestionImageLibrary:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+    SelectQuestionImagesRequest:
+      type: object
+      properties:
+        imageIds:
+          type: array
+          items:
+            type: string
+        images:
+          type: array
+          description: 可传完整图片对象；服务端会按 imageId/id/url/path 从任务题图库匹配。
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+    QuestionImageMutationResult:
+      type: object
+      required: [images]
+      properties:
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+        uploaded:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+        selected:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+        question:
+          type: object
+          additionalProperties: true
+        task:
+          type: object
+          additionalProperties: true
+    AiStandardizeRequest:
+      type: object
+      required: [markdown]
+      properties:
+        markdown:
+          type: string
+          description: OCR 或人工编辑后的题干 Markdown。
+        rawOcrText:
+          type: string
+          description: 可选 OCR 原文；导入题接口会优先使用 Java 已保存的 OCR 原文上下文。
+        rawOcrContext:
+          type: string
+          description: OCR 原始上下文，用于提升 LaTeX、答案和解析拆分精度。
+        structuredHints:
+          type: object
+          additionalProperties: true
+        questionType:
+          type: string
+        answer:
+          type: string
+        analysis:
+          type: string
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+      additionalProperties: true
+    AiStandardizeResult:
+      type: object
+      required: [aiJobId, writeResult, markdown]
+      properties:
+        aiJobId:
+          type: string
+        writeResult:
+          type: boolean
+          description: 为 true 时表示 Java 已把 markdown/answer/analysis 写回目标题；默认标准化返回 false，表示候选等待人工应用保存。
+        writeSkippedReason:
+          type: string
+          description: writeResult=false 时的原因，例如候选等待人工应用，或候选低置信/仍有严重 LaTeX 风险。
+        markdown:
+          type: string
+        standardizedMarkdown:
+          type: string
+        answer:
+          type: string
+        suggestedAnswer:
+          type: string
+        analysis:
+          type: string
+        explanation:
+          type: string
+        standardizer:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+        question:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    AiAnalysisRequest:
+      type: object
+      properties:
+        manualMarkdown:
+          type: string
+          description: 人工校验或 OCR 后的题干 Markdown。
+        answer:
+          type: string
+          description: 已知答案，可作为解析生成约束。
+        type:
+          type: string
+          description: 题型。
+        knowledgePoints:
+          type: array
+          items:
+            type: string
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImage"
+      additionalProperties: true
+    AiAnalysisResult:
+      allOf:
+        - $ref: "#/components/schemas/AiStandardizeResult"
+    MathValidation:
+      type: object
+      properties:
+        status:
+          type: string
+        summary:
+          type: string
+        issues:
+          type: array
+          items:
+            $ref: "#/components/schemas/MathValidationIssue"
+        raw:
+          type: object
+          additionalProperties: true
+    MathValidationIssue:
+      type: object
+      properties:
+        code:
+          type: string
+        severity:
+          type: string
+        message:
+          type: string
+        field:
+          type: string
+    SourceEvidence:
+      type: object
+      properties:
+        processingJobId:
+          type: string
+        sourceQuestionId:
+          type: string
+        answerEvidence:
+          nullable: true
+        analysisEvidence:
+          nullable: true
+        rawOcrContextUsed:
+          type: boolean
+          nullable: true
+        raw:
+          type: object
+          additionalProperties: true
+    ProcessingWarning:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        targetId:
+          type: string
+    CreateCallbackEventRequest:
+      type: object
+      required: [callbackUrl]
+      properties:
+        callbackUrl:
+          type: string
+        eventType:
+          type: string
+        aggregateType:
+          type: string
+        aggregateId:
+          type: string
+        idempotencyKey:
+          type: string
+        maxRetryCount:
+          type: integer
+        secret:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+    CallbackEventList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CallbackEvent"
+        total:
+          type: integer
+    CallbackEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        eventType:
+          type: string
+        aggregateType:
+          type: string
+        aggregateId:
+          type: string
+        status:
+          type: string
+          enum: [pending, sent, failed, dead_letter]
+        callbackUrl:
+          type: string
+        idempotencyKey:
+          type: string
+        retryCount:
+          type: integer
+        maxRetryCount:
+          type: integer
+        nextRetryAt:
+          type: string
+          nullable: true
+        failureReason:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        response:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+        updatedAt:
+          type: string

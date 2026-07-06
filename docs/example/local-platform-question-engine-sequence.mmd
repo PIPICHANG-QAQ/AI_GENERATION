@@ -1,0 +1,89 @@
+sequenceDiagram
+  autonumber
+  actor User as "使用者"
+  participant LP as "local-platform 页面"
+  participant Adapter as "src/lib/api.ts 本地 adapter"
+  participant SDK as "QuestionEngineClient / OpenAPI client"
+  participant Java as "question-engine Java backend"
+  participant Worker as "Python worker"
+  participant DemoStore as "本地 H2 / 本地文件"
+  participant Platform as "未来平台服务"
+
+  Note over LP,Java: "[需配置] VITE_API_BASE_URL / Java backend / Python worker / OCR provider / LLM key / file-flow storage"
+
+  rect rgb(235, 248, 240)
+    User->>LP: "题目导入：上传试卷和答案"
+    LP->>Adapter: "createImportTask(FormData)"
+    Adapter->>Java: "[本地演示] POST /api/import-tasks"
+    Note over Adapter,SDK: "正式平台建议替换为 [封装能力] SDK.createProcessingJob(...)"
+    SDK->>Java: "[封装能力] POST /api/capabilities/question-processing/jobs"
+    Java->>DemoStore: "[本地演示] 保存任务和文件元数据"
+    Java->>Worker: "[封装能力] OCR / 拆题 / AI worker 调用"
+    Worker-->>Java: "OCR 产物、题目、题图、状态"
+    Java-->>LP: "ProcessingJob / ImportTask view"
+  end
+
+  rect rgb(235, 242, 255)
+    LP->>Adapter: "打开导入工作台并轮询"
+    Adapter->>Java: "[本地演示] GET /api/import-tasks/{id}"
+    Note over LP,SDK: "正式平台可用 [封装能力] SDK.getProcessingJob(jobId)"
+    LP->>Adapter: "原文件预览"
+    Adapter->>Java: "[封装能力] GET /api/import-tasks/{id}/source/{paper|answer}"
+    LP->>Adapter: "获取任务题图库"
+    Adapter->>Java: "[封装能力] GET /api/import-tasks/{id}/image-library"
+    LP->>Adapter: "选择/上传题图"
+    Adapter->>Java: "[封装能力] /images/select 或 /images"
+    LP->>Adapter: "AI 标准化"
+    Adapter->>Java: "[封装能力] /standardize/ai"
+    Java->>Worker: "[封装能力] LaTeX 分隔符修复 + OCR 上下文 + 可选 LLM"
+    Worker-->>Java: "候选 Markdown、风险诊断、可选答案/解析"
+    Java-->>LP: "标准化候选；默认不写回"
+    LP->>LP: "用户预览候选并应用"
+    LP->>Adapter: "AI 解析"
+    Adapter->>Java: "[封装能力] /analysis"
+    Java->>Worker: "[需配置] LLM + 题图输入"
+    Worker-->>Java: "答案、解析"
+    Java-->>LP: "解析写回后的题目"
+    LP->>Adapter: "保存复合题：大题题干 + subQuestions"
+    Adapter->>Java: "[本地演示] PUT /api/import-tasks/{id}/questions/{qid}"
+    Java->>DemoStore: "持久化 children/subQuestions 双字段"
+  end
+
+  rect rgb(255, 250, 230)
+    User->>LP: "题库中心：查询、编辑、删除题目"
+    LP->>Adapter: "getQuestions / createQuestion / updateQuestion / deleteQuestion"
+    Adapter->>Java: "[本地演示] /api/question-bank/questions"
+    Java->>DemoStore: "题库题保留完整 subQuestions，父题答案/解析为空"
+    Note over Platform: "[平台自研] 题库主表、搜索、版本、审核、发布、权限"
+    LP->>Adapter: "题库题图 / AI 标准化 / AI 解析"
+    Adapter->>Java: "[封装能力] question-bank image-library / standardize / analysis"
+  end
+
+  rect rgb(250, 238, 255)
+    User->>LP: "组卷中心：按小问选题、排序、赋分、发布、导出"
+    LP->>Adapter: "getQuestions / getPapers / createPaper / updatePaper"
+    Adapter->>Java: "[本地演示] /api/papers 和 /api/question-bank/questions"
+    LP->>Adapter: "paper.create/update 携带 subSelections"
+    Adapter->>Java: "[本地演示] POST/PUT /api/papers"
+    Java->>DemoStore: "subSelections 只保存在试卷层，不改题库原题"
+    Note over Platform: "[平台自研] 组卷规则、试卷库、发布流、权限、长期下载"
+    LP->>Adapter: "Word / PDF 导出"
+    Adapter->>Java: "[封装能力] export-flow via /api/papers/{id}/export"
+    Java->>Worker: "[需配置] Pandoc / XeLaTeX / fonts"
+    Worker-->>Java: "DOCX / PDF 文件"
+  end
+
+  rect rgb(245, 245, 245)
+    User->>LP: "知识点库：CRUD 和筛选"
+    LP->>Adapter: "getKnowledgePoints / create / update / delete"
+    Adapter->>Java: "[本地演示] /api/knowledge-points"
+    Note over Platform: "[平台自研] 知识点主数据、树结构、版本、别名、引用校验"
+  end
+
+  rect rgb(235, 248, 240)
+    Platform->>SDK: "正式入库前获取标准题目包"
+    SDK->>Java: "[封装能力] getQuestionPackage(jobId)"
+    Java-->>SDK: "question-package.v1"
+    SDK-->>Platform: "标准题目包"
+    Platform->>Platform: "[平台自研] 写平台题库、图片、知识点映射、审计"
+  end

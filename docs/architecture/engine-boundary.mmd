@@ -1,0 +1,50 @@
+flowchart LR
+  Platform["公司教育生态平台<br/>用户 / 权限 / 组织 / 审核 / 最终题库 / 文件中心"]:::platform
+  Engine["question-engine<br/>题库能力发动机<br/>Java 能力 API"]:::engine
+  LocalAdmin["local-admin 本地小平台<br/>Vite React 页面<br/>仅用于演示和闭环验证"]:::local
+  Python["Python worker<br/>OCR / AI / LaTeX / Pandoc"]:::worker
+
+  Import["question-import<br/>题目导入"]:::module
+  Bank["question-bank<br/>题库能力"]:::module
+  Paper["paper-assembly<br/>组卷能力<br/>按小问选题 / subSelections"]:::module
+  Knowledge["knowledge-base<br/>知识点能力"]:::module
+  OcrFlow["ocr-flow<br/>provider contract"]:::worker
+  Review["review-workbench<br/>可嵌入人工校验"]:::capability
+  AiFlow["ai-flow<br/>标准化候选 / 解析 / 匹配<br/>LaTeX 分隔符修复"]:::capability
+  ExportFlow["export-flow<br/>Markdown / DOCX / PDF"]:::capability
+  FileFlow["file-flow<br/>原文件 / 题图 / 产物"]:::capability
+  CallbackFlow["callback-flow<br/>完成 / 失败 / 可重试回调"]:::capability
+  SdkOpenapi["sdk-openapi<br/>OpenAPI / SDK"]:::capability
+
+  Platform -->|OpenAPI / SDK / 嵌入工作台| Engine
+  LocalAdmin -->|本地演示调用| Engine
+  Engine --> Import
+  Engine --> Bank
+  Engine --> Paper
+  Engine --> Knowledge
+  Engine --> Review
+  Engine --> AiFlow
+  Engine --> ExportFlow
+  Engine --> FileFlow
+  Engine --> CallbackFlow
+  Engine --> SdkOpenapi
+  Import --> OcrFlow --> Python
+  Import --> Review
+  Import --> AiFlow
+  Import --> FileFlow
+  Import --> CallbackFlow
+  Bank --> Knowledge
+  Bank --> AiFlow
+  Bank --> FileFlow
+  Paper -->|完整题目 + 所选小问过滤| Bank
+  Paper --> ExportFlow --> Python
+  ExportFlow --> FileFlow
+  AiFlow --> Python
+  FileFlow --> Python
+
+  classDef platform fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1px;
+  classDef engine fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1px;
+  classDef local fill:#f1f5f9,stroke:#64748b,color:#334155,stroke-width:1px;
+  classDef module fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;
+  classDef capability fill:#e0f2fe,stroke:#0284c7,color:#075985,stroke-width:1px;
+  classDef worker fill:#ede9fe,stroke:#7c3aed,color:#4c1d95,stroke-width:1px;

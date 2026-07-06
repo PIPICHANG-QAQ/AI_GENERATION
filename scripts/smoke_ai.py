@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""AI smoke check for a deployed local question-engine."""
+
+from __future__ import annotations
+
+import json
+import mimetypes
+import os
+import tempfile
+import time
+import urllib.request
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+BASE_URL = os.environ.get("AI_GENERATION_BASE_URL", "http://localhost:8018").rstrip("/")
+
+
+def request(method: str, path: str, payload: bytes | dict[str, Any] | None = None, headers: dict[str, str] | None = None, timeout: int = 90) -> Any:
+    body: bytes | None
+    merged_headers = dict(headers or {})
+    if isinstance(payload, bytes):
+        body = payload
+    elif payload is None:
+        body = None
+    else:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        merged_headers.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(BASE_URL + path, data=body, headers=merged_headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        if "application/json" in resp.headers.get("content-type", ""):
+            return json.loads(raw.decode("utf-8") or "{}")
+        return raw
+
+
+def multipart(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, str]:
+    boundary = "----ai-smoke-" + uuid.uuid4().hex
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        chunks.append(value.encode("utf-8"))
+        chunks.append(b"\r\n")
+    for name, path in files.items():
+        content_type = mimetypes.guess_type(path.name)[0] or "text/markdown"
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(f'Content-Disposition: form-data; name="{name}"; filename="{path.name}"\r\n'.encode())
+        chunks.append(f"Content-Type: {content_type}\r\n\r\n".encode())
+        chunks.append(path.read_bytes())
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def ok(name: str, condition: bool, detail: Any = "") -> None:
+    if not condition:
+        raise AssertionError(f"{name} failed: {detail}")
+    print(f"OK {name}")
+
+
+def wait_import_ready(task_id: str) -> dict[str, Any]:
+    last: dict[str, Any] = {}
+    for _ in range(30):
+        detail = request("GET", f"/api/import-tasks/{task_id}", timeout=30)
+        last = detail
+        status = str(detail.get("status", ""))
+        if status not in {"处理中", "processing", ""}:
+            return detail
+        time.sleep(1)
+    return last
+
+
+def main() -> None:
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as file:
+        file.write("# AI 冒烟试卷\n\n1. 已知 $x+1=2$，求 $x$。\n\nA. 0\nB. 1\nC. 2\nD. 3\n")
+        paper_path = Path(file.name)
+    try:
+        body, content_type = multipart(
+            {
+                "stage": "高中",
+                "subject": "数学",
+                "grade": "高一",
+                "region": "本地",
+                "year": "2026",
+                "title": "AiSmoke_" + uuid.uuid4().hex[:8],
+            },
+            {"paperFile": paper_path},
+        )
+        task = request("POST", "/api/import-tasks", body, {"Content-Type": content_type}, timeout=60)
+        task_id = str(task.get("id") or "")
+        ok("ai task create", bool(task_id), task)
+    finally:
+        paper_path.unlink(missing_ok=True)
+
+    detail = wait_import_ready(task_id)
+    questions = detail.get("questions") or []
+    ok("ai task questions", len(questions) >= 1, detail)
+
+    question = questions[0]
+    question_id = str(question.get("id") or "")
+    markdown = str(question.get("manualMarkdown") or question.get("stemMarkdown") or "")
+    standardized = request(
+        "POST",
+        f"/api/import-tasks/{task_id}/questions/{question_id}/standardize/ai",
+        {"markdown": markdown},
+        timeout=90,
+    )
+    ok("ai standardize", "markdown" in standardized, standardized)
+
+    analysis = request(
+        "POST",
+        f"/api/import-tasks/{task_id}/questions/{question_id}/analysis",
+        {"manualMarkdown": markdown, "answer": "B", "type": question.get("type", "")},
+        timeout=90,
+    )
+    ok("ai analysis", "analysis" in analysis, analysis)
+    print("ai smoke passed")
+
+
+if __name__ == "__main__":
+    main()

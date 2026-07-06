@@ -1,0 +1,282 @@
+import unittest
+
+from app.question_boundary import (
+    build_structure_from_boundaries,
+    detect_local_boundaries,
+    validate_structure,
+)
+
+
+class QuestionBoundaryTest(unittest.TestCase):
+    def test_detects_sub_questions_inside_parent_question(self):
+        markdown = """## 三、解答题
+21. 已知函数 $f(x)=x^3-3x+1$。
+(1) 求 $f(x)$ 的单调区间；
+(2) 求 $f(x)$ 在 $[-2,2]$ 上的最大值与最小值。
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        validation = validate_structure(structured, markdown, [])
+        parent = structured["sections"][0]["questions"][0]
+
+        self.assertTrue(validation["valid"])
+        self.assertEqual(1, len(structured["questions"]))
+        self.assertIn("已知函数", parent["stemMarkdown"])
+        self.assertEqual("", parent["answer"])
+        self.assertEqual("", parent["analysis"])
+        self.assertEqual(2, len(parent["subQuestions"]))
+        self.assertEqual("(1)", parent["subQuestions"][0]["label"])
+        self.assertIn("单调区间", parent["subQuestions"][0]["stemMarkdown"])
+        self.assertIn("最大值", parent["subQuestions"][1]["stemMarkdown"])
+
+    def test_does_not_treat_function_argument_as_sub_question(self):
+        markdown = """三、解答题
+21. 已知函数 $f(x)=x^2$。
+(1) 求 $f(2)$；
+(2) 求函数的单调区间。
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        parent = structured["sections"][0]["questions"][0]
+
+        self.assertEqual(2, len(parent["subQuestions"]))
+        self.assertEqual(["(1)", "(2)"], [item["label"] for item in parent["subQuestions"]])
+        self.assertIn("f(2)", parent["subQuestions"][0]["stemMarkdown"])
+
+    def test_splits_choice_options_without_putting_options_in_stem(self):
+        markdown = """## 一、选择题
+1. 已知二次函数 $f(x)=x^2-2x-3$，则它的零点是（ ）
+A. $x=1$ 或 $x=3$
+B. $x=-1$ 或 $x=3$
+C. $x=-1$ 或 $x=-3$
+D. $x=1$ 或 $x=-3$
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        question = structured["sections"][0]["questions"][0]
+
+        self.assertEqual("choice", question["type"])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in question["options"]])
+        self.assertNotIn("A.", question["stemMarkdown"])
+        self.assertIn("零点", question["stemMarkdown"])
+
+    def test_splits_inline_choice_options_after_closing_parenthesis(self):
+        markdown = """一、选择题
+1. 下列6个数中：-3，$\\frac{5}{19}$，-$\\pi$，$\\sqrt[3]{2}$，0.1237，-0.5050050005...，其中是无理数的有()A. 2个 B. 3个 C. 4个 D. 5个
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        question = structured["sections"][0]["questions"][0]
+
+        self.assertEqual("choice", question["type"])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in question["options"]])
+        self.assertEqual(["2个", "3个", "4个", "5个"], [option["content"] for option in question["options"]])
+        self.assertIn("有()", question["stemMarkdown"])
+        self.assertNotIn("A.", question["stemMarkdown"])
+
+    def test_splits_full_width_and_colon_choice_markers(self):
+        markdown = """一、选择题
+1. 下列说法正确的是（ ）Ａ．甲 Ｂ．乙 Ｃ．丙 Ｄ．丁
+2. 下列说法错误的是（ ）A: 甲 B: 乙 C: 丙 D: 丁
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        first, second = structured["sections"][0]["questions"]
+
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in first["options"]])
+        self.assertEqual(["甲", "乙", "丙", "丁"], [option["content"] for option in first["options"]])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in second["options"]])
+        self.assertEqual(["甲", "乙", "丙", "丁"], [option["content"] for option in second["options"]])
+
+    def test_splits_bare_choice_markers_only_at_line_start(self):
+        markdown = """一、选择题
+1. 下列说法正确的是（ ）
+A 甲
+B 乙
+C 丙
+D 丁
+2. 如图，设 A 为点，B 为点，C 为点，D 为点，则结论正确的是（ ）
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        first, second = structured["sections"][0]["questions"]
+
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in first["options"]])
+        self.assertEqual([], second["options"])
+        self.assertIn("设 A 为点", second["stemMarkdown"])
+
+    def test_keeps_trailing_question_image_out_of_last_choice_option(self):
+        markdown = """一、选择题
+1. 如图，$OE$ 平分 $\\angle AOC$，$OD$ 平分 $\\angle BOC$，下列结论不一定正确的是（ ）
+A. $\\angle AOD = \\angle BOC$ B. $\\angle AOC = \\angle AOE$
+C. $\\angle AOE + \\angle BOD = 90^{\\circ}$ D.
+$\\angle AOD + \\angle BOD = 180^{\\circ}$
+![](图1)
+"""
+
+        boundaries = detect_local_boundaries(markdown, [{"name": "图1", "path": "图1", "url": "/图1.png"}])
+        structured = build_structure_from_boundaries(markdown, boundaries, [{"name": "图1", "path": "图1", "url": "/图1.png"}])
+        question = structured["sections"][0]["questions"][0]
+
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in question["options"]])
+        self.assertIn("![](图1)", question["stemMarkdown"])
+        self.assertIn("180", question["options"][-1]["content"])
+        self.assertNotIn("![]", question["options"][-1]["content"])
+
+    def test_completion_fill_blank_keeps_placeholders_and_image(self):
+        markdown = """三、解答题
+22. （8分）完成推理填空
+
+如图，已知 $\\angle B = \\angle D , \\angle B A E = \\angle E$ .将证明 $\\angle A F C + \\angle D A E = 1 8 0 ^ { \\circ }$ 的过程填写完整.
+
+证明： $\\because \\angle B A E = \\angle E$
+
+11 C ).
+
+$\\therefore \\angle B = \\angle$ ( \\_).
+
+又： $\\angle B = \\angle D$
+
+$\\therefore \\angle D = \\angle$ (等量代换).
+
+$\\therefore A D / / B C ($ ).
+
+![](images/proof.png)
+"""
+        assets = [{"name": "proof.png", "path": "images/proof.png", "url": "/proof.png"}]
+
+        boundaries = detect_local_boundaries(markdown, assets)
+        structured = build_structure_from_boundaries(markdown, boundaries, assets)
+        question = structured["sections"][0]["questions"][0]
+
+        self.assertEqual("fill_blank", question["type"])
+        self.assertEqual([], question["subQuestions"])
+        self.assertIn("____", question["stemMarkdown"])
+        self.assertNotIn("11 C", question["stemMarkdown"])
+        self.assertEqual(["images/proof.png"], [image["path"] for image in question["images"]])
+
+    def test_blank_slot_task_normalization_is_cue_based(self):
+        markdown = """三、解答题
+22. （8分）补全下列证明过程
+
+证明：由已知可得
+
+I B ).
+
+$\\therefore \\angle A = \\angle$ ( $ ).
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        question = structured["sections"][0]["questions"][0]
+
+        self.assertEqual("fill_blank", question["type"])
+        self.assertIn("____", question["stemMarkdown"])
+        self.assertNotIn("I B", question["stemMarkdown"])
+        self.assertIn("$\\therefore \\angle A = \\angle$ (____)", question["stemMarkdown"])
+
+    def test_factorization_fill_blank_restores_missing_equal_placeholders(self):
+        markdown = """三、解答题
+24.（8分）（1）分解下列因式，将结果直接写在横线上：
+
+$x ^ { 2 } + 4 x + 4 =$ $1 6 x ^ { 2 } + 2 4 x + 9 =$ $9 x ^ { 2 } - 1 2 x + 4 =$
+
+(2) 观察以上三个多项式的系数，有 $4 ^ { 2 } = 4 \\times 1 \\times 4$。
+①请你用数学式子表示a、b、c之间的关系；
+②解决问题：若多项式 $x ^ { 2 } - 2 ( m - 3 ) x + ( 1 0 - 6 m )$ 是一个完全平方式，求m的值。
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        parent = structured["sections"][0]["questions"][0]
+
+        self.assertEqual("fill_blank", parent["type"])
+        self.assertGreaterEqual(parent["stemMarkdown"].count("____"), 3)
+        self.assertIn("$x ^ { 2 } + 4 x + 4 =$ ____", parent["stemMarkdown"])
+
+    def test_assigns_image_refs_inside_sub_question_to_child(self):
+        markdown = """## 三、解答题
+21. 阅读材料。
+(1) 如图回答问题。
+![](images/sub1.png)
+(2) 说明理由。
+"""
+        assets = [{"name": "sub1.png", "path": "images/sub1.png", "url": "/sub1.png"}]
+
+        boundaries = detect_local_boundaries(markdown, assets)
+        structured = build_structure_from_boundaries(markdown, boundaries, assets)
+        parent = structured["sections"][0]["questions"][0]
+
+        self.assertEqual([], parent["images"])
+        self.assertEqual(["images/sub1.png"], [image["path"] for image in parent["subQuestions"][0]["images"]])
+        self.assertEqual([], parent["subQuestions"][1]["images"])
+
+    def test_trims_overlapping_llm_child_boundaries(self):
+        markdown = """## 三、解答题
+21. 已知条件。
+(1) 第一问。
+(2) 第二问。
+"""
+        boundaries = detect_local_boundaries(markdown, [])
+        first_child = boundaries["questions"][0]["subQuestions"][0]
+        first_child["end"] = boundaries["questions"][0]["end"]
+
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        parent = structured["sections"][0]["questions"][0]
+
+        self.assertNotIn("(2) 第二问", parent["subQuestions"][0]["stemMarkdown"])
+        self.assertIn("第二问", parent["subQuestions"][1]["stemMarkdown"])
+
+    def test_plain_ocr_section_heading_sets_question_type(self):
+        markdown = """一、选择题
+1. 下列说法正确的是（ ）
+A. 甲
+B. 乙
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        question = structured["sections"][0]["questions"][0]
+
+        self.assertEqual("choice", structured["sections"][0]["type"])
+        self.assertEqual("choice", question["type"])
+        self.assertIn("下列说法", question["stemMarkdown"])
+        self.assertNotIn("一、选择题", question["stemMarkdown"])
+
+    def test_choice_question_circled_statement_numbers_are_not_sub_questions(self):
+        markdown = """一、选择题
+1. 已知下列命题：① 甲正确；② 乙正确；③ 丙正确。正确的是（ ）
+A. ①②
+B. ②③
+C. ①③
+D. ①②③
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        question = structured["sections"][0]["questions"][0]
+
+        self.assertEqual("choice", question["type"])
+        self.assertEqual([], question["subQuestions"])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in question["options"]])
+        self.assertIn("① 甲正确", question["stemMarkdown"])
+
+    def test_rejects_unknown_image_paths(self):
+        markdown = "1. 如图，求角度。\n\n![](images/a.png)"
+        boundaries = detect_local_boundaries(markdown, [{"name": "a.png", "path": "images/a.png", "url": "/a.png"}])
+        boundaries["questions"][0]["images"] = [{"path": "images/not-exist.png", "start": 8, "end": 20}]
+        structured = build_structure_from_boundaries(markdown, boundaries, [{"name": "a.png", "path": "images/a.png", "url": "/a.png"}])
+        validation = validate_structure(structured, markdown, [{"name": "a.png", "path": "images/a.png", "url": "/a.png"}])
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any("未知题图" in error for error in validation["errors"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

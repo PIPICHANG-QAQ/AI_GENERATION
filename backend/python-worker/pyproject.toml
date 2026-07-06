@@ -1,0 +1,24 @@
+[project]
+name = "question-engine-python-worker"
+version = "0.1.0"
+description = "Python OCR, AI, LaTeX and export worker for the Java question engine backend."
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "fastapi>=0.115.0",
+  "httpx[socks]>=0.28.0",
+  "pillow>=10.0.0",
+  "python-docx>=1.1.0",
+  "python-multipart>=0.0.9",
+  "reportlab>=4.0.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

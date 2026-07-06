@@ -1,0 +1,83 @@
+flowchart TD
+  LegendLocal["绿色：本地算力 / 本地存储"]:::local
+  LegendExternal["黄色：外部 API 算力"]:::external
+  LegendMixed["蓝色：混合编排 / 本地兜底"]:::mixed
+
+  Start(["用户进入题库中心<br/>导入 OCR 工作台"]):::local
+  Create["填写导入标题、学段、学科、年级、地区、年份<br/>上传试卷文件，可选上传答案文件"]:::local
+  Required["必填项校验与缺失项提示<br/>标题、学科、年级、年份、试卷文件等"]:::local
+  NameDedup["导入任务标题查重<br/>不允许创建同名任务"]:::local
+  Post["POST /api/import-tasks<br/>Java 接收表单与文件"]:::mixed
+  Persist["写入 Java 文件/任务元数据<br/>java_storage_files、java_import_tasks"]:::mixed
+  ReturnTask["返回处理中导入任务<br/>前端选中任务并进入工作台"]:::local
+  TaskManage["历史任务列表<br/>支持重命名、删除、选择进入工作台"]:::local
+
+  PaperOcr["本地 MinerU 解析试卷<br/>mineru -p paper -o output -b pipeline"]:::local
+  AnswerOcr["可选：本地 MinerU 解析答案文件"]:::local
+  Poll["前端轮询 GET /api/import-tasks/{taskId}<br/>展示试卷/答案 OCR 状态"]:::local
+  Collect["收集本地 OCR 产物<br/>Markdown、JSON、图片 assets"]:::local
+  ImageLibrary["建立本卷题图库<br/>OCR 扫描图片自动进入 imageLibrary"]:::local
+  RuleSplit["本地规则拆题参考<br/>题号、题型粗判、选项、题图归属、小问候选"]:::local
+
+  LlmSplit{"大模型拆题是否启用且可用？"}:::mixed
+  SplitApi["外部 API：大模型结构化拆题<br/>输入 OCR Markdown、图片资源、本地参考<br/>识别大题与 subQuestions"]:::external
+  SplitNormalize["本地归一化模型结果<br/>校验 JSON、保留 Markdown/LaTeX、校正题图路径"]:::mixed
+  RuleFallback["本地规则兜底拆题<br/>模型未配置、超时或返回非法 JSON 时使用"]:::local
+
+  MathNormalize["本地公式标准化与校验<br/>math_normalizer.py 多轮修复与风险标记"]:::local
+  LatexDelimiter["确定性 LaTeX 分隔符修复<br/>展示公式嵌套 $ / 行内公式被运算符切断"]:::mixed
+  SemanticRisk{"是否命中高置信语义 OCR 风险？<br/>例如 5&quot; 疑似 5^n"}:::mixed
+  SemanticApi["外部 API：AI 语义修复<br/>仅处理本地检测出的高置信风险"]:::external
+  SemanticVerify["本地复核 AI 修复结果<br/>低置信或仍有风险则不写回"]:::mixed
+
+  MetadataFlow{"题目元数据补全<br/>答案 OCR 上下文是否可用？"}:::mixed
+  MetadataApi["外部 API：补全题型、答案、解析、知识点、难度、分值<br/>按 subQuestions 归属答案/解析"]:::external
+  MetadataFallback["本地默认元数据<br/>答案/解析/知识点为空，难度 medium"]:::local
+
+  BuildImport["生成导入题目<br/>状态：待校验，保留 images、options、subQuestions"]:::local
+  SubQuestionNormalize["小问结构归一化<br/>children 与 subQuestions 双字段<br/>父题答案/解析为空"]:::local
+  Workbench["前端工作台展示<br/>左侧原文件预览，右侧复合校验"]:::local
+  FigureModule["题图独立模块<br/>题图与题干分离，多图预览和移除"]:::local
+  ImportImages["题图来源<br/>从本卷题图库导入或本地多图上传<br/>AI 解析跳过无效图片"]:::local
+  KnowledgePick["知识点库联动选择<br/>GET /api/knowledge-points，本地筛选搜索"]:::local
+  ManualEdit["复合编辑器<br/>大题题干 + 小问题干/答案/解析/分值/知识点"]:::local
+  AiStandardize["AI 标准化候选<br/>分隔符修复 + OCR 上下文 + 风险闸门<br/>人工应用后保存"]:::mixed
+  AiAnalysis["外部 API：AI 解析<br/>POST /api/import-tasks/{taskId}/questions/{questionId}/analysis<br/>含小问时返回 subQuestions 解析"]:::external
+  SaveReview["保存校验结果<br/>PUT /api/import-tasks/{taskId}/questions/{questionId}<br/>写回 subQuestions"]:::local
+  BankDedup["题目入库查重<br/>重复题目跳过或拒绝"]:::local
+  Bank["单题/批量入库<br/>写入 bankQuestions，保留 subQuestions"]:::local
+  BankEdit["题库中心复合编辑<br/>大题题干 + 小问答案/解析 + AI 解析"]:::local
+  PaperSubSelect["组卷中心按小问选择<br/>subSelections 只保存在试卷层"]:::local
+  PaperExport["组卷中心引用题目<br/>仅渲染所选小问，导出 DOCX/PDF"]:::local
+  End(["题库中心可搜索、编辑、组卷引用"]):::local
+
+  Start --> Create --> Required --> NameDedup --> Post --> Persist --> ReturnTask
+  Start --> TaskManage --> ReturnTask
+  Persist --> PaperOcr
+  Persist --> AnswerOcr
+  ReturnTask --> Poll
+  PaperOcr --> Collect
+  AnswerOcr --> Collect
+  Poll --> Collect
+  Collect --> ImageLibrary --> RuleSplit --> LlmSplit
+  LlmSplit -- "可用" --> SplitApi --> SplitNormalize
+  LlmSplit -- "不可用/失败" --> RuleFallback
+  SplitNormalize --> MathNormalize
+  RuleFallback --> MathNormalize
+  MathNormalize --> LatexDelimiter --> SemanticRisk
+  SemanticRisk -- "是" --> SemanticApi --> SemanticVerify --> MathNormalize
+  SemanticRisk -- "否" --> MetadataFlow
+  MetadataFlow -- "API 可用" --> MetadataApi --> BuildImport
+  MetadataFlow -- "API 不可用/失败" --> MetadataFallback --> BuildImport
+  BuildImport --> SubQuestionNormalize --> Workbench
+  Workbench --> FigureModule --> ImportImages --> SaveReview
+  Workbench --> KnowledgePick
+  Workbench --> ManualEdit
+  ManualEdit --> AiStandardize --> SaveReview
+  ManualEdit --> AiAnalysis --> SaveReview
+  KnowledgePick --> SaveReview
+  SaveReview --> BankDedup --> Bank --> BankEdit --> PaperSubSelect --> PaperExport --> End
+
+  classDef local fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;
+  classDef external fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1px;
+  classDef mixed fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1px;

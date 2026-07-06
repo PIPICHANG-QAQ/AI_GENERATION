@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""Check that question-engine contract, SDK, and docs stay in sync.
+
+This script is intentionally dependency-free so it can run in local development,
+CI, or a delivery packaging step before a full OpenAPI generator is introduced.
+"""
+
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+CHECKS = {
+    "question-engine/openapi/question-engine.v1.yaml": [
+        "securitySchemes",
+        "PlatformBearerAuth",
+        "TenantHeader",
+        "OperatorHeader",
+        "/api/import-tasks/{jobId}/image-library",
+        "/api/import-tasks/{jobId}/questions/{questionId}/images/select",
+        "/api/import-tasks/{jobId}/questions/{questionId}/standardize/ai",
+        "/api/import-tasks/{jobId}/questions/{questionId}/analysis",
+        "/api/question-bank/questions/{questionId}/image-library",
+        "/api/question-bank/questions/{questionId}/standardize/ai",
+        "/api/question-bank/questions/{questionId}/analysis",
+        "QuestionImageLibrary",
+        "SelectQuestionImagesRequest",
+        "AiStandardizeRequest",
+        "AiStandardizeResult",
+        "writeSkippedReason",
+        "writeResult",
+        "AiAnalysisRequest",
+        "AiAnalysisResult",
+    ],
+    "question-engine/sdk/generated/typescript/QuestionEngineClient.ts": [
+        "getImportTaskImageLibrary",
+        "selectImportQuestionImages",
+        "standardizeImportQuestion",
+        "analyzeImportQuestion",
+        "getBankQuestionImageLibrary",
+        "standardizeBankQuestion",
+        "analyzeBankQuestion",
+    ],
+    "question-engine/sdk/generated/typescript/models.ts": [
+        "QuestionImageLibrary",
+        "SelectQuestionImagesInput",
+        "QuestionImageMutationResult",
+        "AiStandardizeInput",
+        "AiStandardizeResult",
+        "writeSkippedReason",
+        "AiAnalysisInput",
+        "AiAnalysisResult",
+    ],
+    "question-engine/sdk/generated/java/src/main/java/com/aigeneration/questionengine/sdk/QuestionEngineClient.java": [
+        "getImportTaskImageLibrary",
+        "selectImportQuestionImages",
+        "standardizeImportQuestion",
+        "getBankQuestionImageLibrary",
+        "standardizeBankQuestion",
+    ],
+    "question-engine/sdk/generated/java/src/main/java/com/aigeneration/questionengine/sdk/QuestionEngineModels.java": [
+        "QuestionImageLibrary",
+        "SelectQuestionImagesRequest",
+        "QuestionImageMutationResult",
+        "AiStandardizeRequest",
+        "AiStandardizeResult",
+        "AiAnalysisRequest",
+        "AiAnalysisResult",
+    ],
+    "docs/delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md": [
+        "/api/import-tasks/{jobId}/image-library",
+        "/api/import-tasks/{jobId}/questions/{questionId}/images/select",
+        "standardizeImportQuestion",
+        "standardizeBankQuestion",
+        "writeResult=false",
+        "latexDelimiterRepaired",
+        "candidateSevereIssues",
+        "question-engine/sdk/USAGE.md",
+        "docs/product/LOCAL_PLATFORM_AS_EXAMPLE.md",
+    ],
+    "question-engine/sdk/README.md": [
+        "USAGE.md",
+        "RELEASE.md",
+        "LOCAL_PLATFORM_AS_EXAMPLE.md",
+        "../../examples/platform-integration",
+    ],
+    "question-engine/sdk/RELEASE.md": [
+        "OpenAPI",
+        "MAJOR.MINOR.PATCH",
+        "question-package.v1",
+        "breaking",
+        "python question-engine/sdk/generate-sdk.py",
+    ],
+    "question-engine/sdk/USAGE.md": [
+        "QuestionEngineClient",
+        "createProcessingJob",
+        "getQuestionPackage",
+        "writeResult 默认是 false",
+        "writeSkippedReason",
+        "latexDelimiterRepaired",
+        "question-package.v1",
+        "local-platform",
+        "接入前提",
+        "TypeScript 接入",
+        "Java 接入",
+        "processingStatus",
+        "回调和异步",
+        "排错清单",
+        "接入验收清单",
+        "不要直接调用 Python worker",
+    ],
+    "docs/product/LOCAL_PLATFORM_AS_EXAMPLE.md": [
+        "local-platform",
+        "QuestionEngineClient",
+        "题目导入",
+        "题库中心",
+        "组卷中心",
+        "知识点库",
+        "[封装能力]",
+        "[平台自研]",
+        "[需配置]",
+        "docs/example/local-platform-question-engine-sequence.svg",
+        "docs/example/local-platform-business-flow.svg",
+        "](../example/local-platform-question-engine-sequence.svg)",
+        "](../example/local-platform-business-flow.svg)",
+        "/api/import-tasks",
+        "/api/capabilities/question-processing/jobs/{jobId}/question-package",
+        "question-package.v1",
+    ],
+    "docs/example/README.md": [
+        "](local-platform-question-engine-sequence.svg)",
+        "](local-platform-business-flow.svg)",
+        "local-platform-question-engine-sequence.svg",
+        "local-platform-question-engine-sequence.mmd",
+        "local-platform-business-flow.svg",
+        "local-platform-business-flow.mmd",
+        "[封装能力]",
+        "[平台自研]",
+        "[需配置]",
+    ],
+    "docs/example/local-platform-question-engine-sequence.mmd": [
+        "QuestionEngineClient",
+        "[封装能力]",
+        "[本地演示]",
+        "[平台自研]",
+        "[需配置]",
+        "getQuestionPackage",
+    ],
+    "docs/example/local-platform-question-engine-sequence.svg": [
+        "<svg",
+        "QuestionEngineClient",
+        "getQuestionPackage",
+    ],
+    "docs/example/local-platform-business-flow.mmd": [
+        "模块一：题目导入",
+        "模块二：题库中心",
+        "模块三：组卷中心",
+        "模块四：知识点库",
+        "question-package.v1",
+        "classDef packaged",
+    ],
+    "docs/example/local-platform-business-flow.svg": [
+        "<svg",
+        "模块一：题目导入",
+        "question-package.v1",
+    ],
+    "docs/README.md": [
+        "development/DEVELOPMENT_GUIDE.md",
+        "development/CONTRIBUTING.md",
+        "delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md",
+        "delivery/DELIVERY_PACKAGE.md",
+        "delivery/OPERATIONS_GUIDE.md",
+        "delivery/ACCEPTANCE.md",
+        "product/LOCAL_PLATFORM_AS_EXAMPLE.md",
+        "architecture/ENGINE_DELIVERY_BOUNDARY.md",
+        "architecture/decisions/README.md",
+        "samples/",
+    ],
+    "docs/development/DEVELOPMENT_GUIDE.md": [
+        "../delivery/DELIVERY_PACKAGE.md",
+        "../delivery/SECURITY_AND_INTEGRATION_CONTRACT.md",
+        "../delivery/OPERATIONS_GUIDE.md",
+        "../delivery/ERROR_AND_STATUS_GUIDE.md",
+        "../delivery/ACCEPTANCE.md",
+        "../delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md",
+        "../product/OCR_PHASE_1_SPEC.md",
+        "../architecture/ENGINE_DELIVERY_BOUNDARY.md",
+        "CONTRIBUTING.md",
+        "../../question-engine/sdk/USAGE.md",
+    ],
+    "docs/development/CONTRIBUTING.md": [
+        "新增或改变 `question-engine` 能力",
+        "新增能力变更模板",
+        "OCR Provider 插件开发模板",
+        "SDK 发布和升级模板",
+        "测试分层要求",
+        "question-engine/openapi/question-engine.v1.yaml",
+        "question-engine/sdk/generated/typescript",
+        "question-engine/sdk/generated/java",
+        "examples/platform-integration/",
+        "docs/delivery/SECURITY_AND_INTEGRATION_CONTRACT.md",
+        "docs/delivery/ACCEPTANCE.md",
+    ],
+    ".env.example": [
+        "PLATFORM_SECURITY_CONTEXT_VALIDATION_ENABLED",
+        "PLATFORM_SECURITY_AUTHORIZATION_REQUIRED",
+        "PLATFORM_SECURITY_REQUIRED_HEADERS",
+    ],
+    "backend/src/main/java/com/aigeneration/questionbank/common/PlatformSecurityContextFilter.java": [
+        "Missing required platform security headers",
+        "Authorization",
+    ],
+    "backend/src/main/java/com/aigeneration/questionbank/config/PlatformSecurityProperties.java": [
+        "X-Tenant-Id",
+        "X-Operator-Id",
+        "excludedPathPrefixes",
+    ],
+    "backend/src/test/java/com/aigeneration/questionbank/PlatformSecurityContextFilterTest.java": [
+        "platform.security.context-validation-enabled=true",
+        "rejectsCapabilityRequestWithoutPlatformHeaders",
+        "allowsCapabilityRequestWithPlatformHeaders",
+    ],
+    "docs/delivery/DELIVERY_PACKAGE.md": [
+        "backend/storage/",
+        "backend/target/",
+        "backend/python-worker/.venv/",
+        "backend/python-worker/tests/",
+        "protocal/",
+        "scripts/deploy_local.sh",
+        "scripts/smoke_deploy_basic.py",
+        "scripts/smoke_ocr.py",
+        "scripts/smoke_ai.py",
+        "scripts/package_question_engine_delivery.py",
+        "scripts/acceptance_question_engine_plugin.py",
+    ],
+    "protocal/README.md": [
+        "历史 Replit UI 原型",
+        "Do Not Ship",
+        "正式交付包必须排除整个 `protocal/` 目录",
+        "question-engine/openapi/question-engine.v1.yaml",
+    ],
+    "docs/delivery/SECURITY_AND_INTEGRATION_CONTRACT.md": [
+        "X-Tenant-Id",
+        "X-Operator-Id",
+        "X-Question-Engine-Signature",
+        "PLATFORM_SECURITY_CONTEXT_VALIDATION_ENABLED=true",
+        "PYTHON_WORKER_API_PROXY_ENABLED",
+        "HMAC-SHA256",
+    ],
+    "docs/delivery/OPERATIONS_GUIDE.md": [
+        "Java backend",
+        "Python worker",
+        "./scripts/deploy_local.sh",
+        "--with-mineru",
+        "--with-ai",
+        ".run/deploy.env",
+        ".run/logs/",
+        "SPRING_PROFILES_ACTIVE",
+        "PYTHON_WORKER_API_PROXY_ENABLED=false",
+        "MINERU_COMMAND",
+        "DASHSCOPE_API_KEY",
+        "OCR provider",
+        "DashScope",
+        "Pandoc",
+        "MinIO",
+        "callback",
+        "数据保留与清理策略",
+        "large-file-mb",
+        "OCR 并发",
+        "SLA",
+        "基准测试",
+    ],
+    "docs/delivery/ERROR_AND_STATUS_GUIDE.md": [
+        "PROCESSING",
+        "WAITING_REVIEW",
+        "COMPLETED",
+        "UNSUPPORTED_FILE_TYPE",
+        "OCR_PROVIDER_UNAVAILABLE",
+        "CALLBACK_DELIVERY_FAILED",
+    ],
+    "docs/delivery/ACCEPTANCE.md": [
+        "./scripts/deploy_local.sh",
+        "--with-mineru",
+        "--with-ai",
+        ".run/deploy.env",
+        "--dev-reload",
+        "scripts/acceptance_question_engine_plugin.py",
+        "question-package.v1",
+        "非法文件",
+        "callback",
+        "large-file-mb",
+    ],
+    "docs/architecture/decisions/README.md": [
+        "0001-java-main-backend.md",
+        "0002-python-worker-boundary.md",
+        "0003-mineru-default-ocr-provider.md",
+        "0004-local-h2-dev-mode.md",
+    ],
+    "docs/samples/platform-integration/README.md": [
+        "paper.md",
+        "answer.md",
+        "expected-question-package.v1.json",
+    ],
+    "docs/samples/platform-integration/expected-question-package.v1.json": [
+        "question-package.v1",
+        "WAITING_REVIEW",
+        "stemMarkdown",
+        "sourceEvidence",
+    ],
+    "examples/platform-integration/README.md": [
+        "TypeScript",
+        "Java",
+        "QUESTION_ENGINE_BASE_URL",
+        "docs/samples/platform-integration/",
+    ],
+    "examples/platform-integration/typescript/src/index.ts": [
+        "QuestionEngineClient",
+        "X-Tenant-Id",
+        "getQuestionPackage",
+    ],
+    "examples/platform-integration/java/src/main/java/com/aigeneration/examples/PlatformIntegrationExample.java": [
+        "QuestionEngineClient",
+        "X-Tenant-Id",
+        "getQuestionPackage",
+    ],
+    "scripts/acceptance_question_engine_plugin.py": [
+        "/api/capabilities/question-processing/jobs",
+        "question-package.v1",
+        "callback-flow/test",
+        "callback signature hmac",
+        "source_preview_check",
+        "invalid file rejected",
+    ],
+    "scripts/deploy_local.sh": [
+        "--with-mineru",
+        "--with-ai",
+        "--strict-ports",
+        "--dev-reload",
+        ".run",
+        "smoke_deploy_basic.py",
+        "smoke_ocr.py",
+        "smoke_ai.py",
+    ],
+    "scripts/smoke_deploy_basic.py": [
+        "basic deployment smoke",
+        "/api/java/worker",
+        "/api/capabilities",
+    ],
+    "scripts/smoke_ocr.py": [
+        "ocr provider executable",
+        "/api/capabilities/ocr-flow/runtime",
+        "/api/import-tasks",
+    ],
+    "scripts/smoke_ai.py": [
+        "ai standardize",
+        "ai analysis",
+        "/standardize/ai",
+    ],
+    "scripts/package_question_engine_delivery.py": [
+        "REQUIRED_IN_PACKAGE",
+        "storage",
+        "protocal",
+        "question-engine/openapi/question-engine.v1.yaml",
+    ],
+}
+
+SOURCE_ONLY_CHECKS = {
+    "protocal/README.md",
+}
+
+
+def main() -> None:
+    failures: list[str] = []
+    for relative_path, expected_items in CHECKS.items():
+        path = ROOT / relative_path
+        if not path.exists():
+            if relative_path in SOURCE_ONLY_CHECKS:
+                continue
+            failures.append(f"missing file: {relative_path}")
+            continue
+        content = path.read_text(encoding="utf-8")
+        for item in expected_items:
+            if item not in content:
+                failures.append(f"{relative_path}: missing {item}")
+    if failures:
+        for failure in failures:
+            print(failure)
+        raise SystemExit(1)
+    print("question-engine contract, SDK, and docs are in sync.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <rect width="1280" height="760" fill="#f4f6f8"/>
+  <rect x="0" y="0" width="1280" height="68" fill="#ffffff" stroke="#dce2ea"/>
+  <rect x="24" y="16" width="36" height="36" rx="8" fill="#164b8f"/>
+  <text x="34" y="39" font-family="Arial" font-size="14" font-weight="700" fill="#ffffff">AI</text>
+  <text x="76" y="29" font-family="Arial" font-size="17" font-weight="700" fill="#1d2433">题库 OCR 工作台</text>
+  <text x="76" y="49" font-family="Arial" font-size="13" fill="#647084">上传试卷后开始解析</text>
+  <rect x="1000" y="16" width="92" height="36" rx="7" fill="#164b8f"/>
+  <text x="1020" y="39" font-family="Arial" font-size="13" fill="#ffffff">开始 OCR</text>
+  <rect x="0" y="68" width="1280" height="42" fill="#f9fafb" stroke="#dce2ea"/>
+  <rect x="22" y="76" width="72" height="26" rx="13" fill="#e9edf2"/>
+  <text x="40" y="94" font-family="Arial" font-size="12" fill="#394558">ready</text>
+  <rect x="108" y="76" width="98" height="26" rx="13" fill="#fde8e8"/>
+  <text x="122" y="94" font-family="Arial" font-size="12" fill="#9b1c1c">MinerU 未安装</text>
+  <rect x="220" y="76" width="132" height="26" rx="13" fill="#fde8e8"/>
+  <text x="236" y="94" font-family="Arial" font-size="12" fill="#9b1c1c">大模型拆题未配置</text>
+  <rect x="0" y="110" width="640" height="650" fill="#ffffff" stroke="#dce2ea"/>
+  <rect x="640" y="110" width="640" height="650" fill="#ffffff" stroke="#dce2ea"/>
+  <rect x="0" y="110" width="640" height="46" fill="#ffffff" stroke="#e1e6ee"/>
+  <rect x="640" y="110" width="640" height="46" fill="#ffffff" stroke="#e1e6ee"/>
+  <text x="16" y="139" font-family="Arial" font-size="14" font-weight="700" fill="#1d2433">原文件</text>
+  <rect x="656" y="116" width="254" height="34" rx="8" fill="#edf1f5"/>
+  <rect x="660" y="119" width="96" height="28" rx="6" fill="#ffffff"/>
+  <text x="686" y="138" font-family="Arial" font-size="13" fill="#164b8f">题目</text>
+  <text x="780" y="138" font-family="Arial" font-size="13" fill="#4c586c">JSON</text>
+  <text x="846" y="138" font-family="Arial" font-size="13" fill="#4c586c">图片</text>
+  <rect x="18" y="174" width="604" height="568" fill="#eef2f6"/>
+  <rect x="164" y="204" width="310" height="510" fill="#ffffff" stroke="#cfd7e3"/>
+  <text x="256" y="450" font-family="Arial" font-size="16" fill="#68768b">PDF / 图片预览</text>
+  <rect x="668" y="174" width="540" height="34" rx="8" fill="#f4f8ff" stroke="#b8d5ff"/>
+  <text x="686" y="196" font-family="Arial" font-size="13" fill="#164b8f">拆题来源：大模型 qwen-plus / 本地规则兜底</text>
+  <rect x="668" y="216" width="540" height="34" rx="8" fill="#f3fbf6" stroke="#b7dfc4"/>
+  <text x="686" y="238" font-family="Arial" font-size="13" fill="#17663a">公式校验：已自动修复 1 题，0 个风险</text>
+  <rect x="668" y="268" width="540" height="22" fill="#ffffff"/>
+  <text x="668" y="286" font-family="Arial" font-size="18" font-weight="700" fill="#1f2937">一. 选择题</text>
+  <rect x="668" y="306" width="540" height="160" rx="8" fill="#ffffff" stroke="#dce2ea"/>
+  <text x="686" y="334" font-family="Arial" font-size="14" font-weight="700" fill="#1f2937">第 1 题</text>
+  <rect x="744" y="318" width="72" height="24" rx="12" fill="#e9f7ef"/>
+  <text x="758" y="335" font-family="Arial" font-size="12" fill="#17663a">已修复</text>
+  <text x="686" y="362" font-family="Arial" font-size="13" fill="#164b8f">题干 + 渲染公式</text>
+  <rect x="686" y="384" width="110" height="28" rx="14" fill="#164b8f"/>
+  <text x="728" y="403" font-family="Arial" font-size="12" fill="#ffffff">A</text>
+  <rect x="810" y="384" width="110" height="28" rx="14" fill="#164b8f"/>
+  <text x="852" y="403" font-family="Arial" font-size="12" fill="#ffffff">B</text>
+  <rect x="668" y="488" width="540" height="210" rx="8" fill="#ffffff" stroke="#dce2ea"/>
+  <text x="686" y="516" font-family="Arial" font-size="14" font-weight="700" fill="#1f2937">第 6 题</text>
+  <text x="686" y="546" font-family="Arial" font-size="13" fill="#164b8f">题干</text>
+  <rect x="686" y="564" width="170" height="90" rx="6" fill="#f6f8fb" stroke="#dce2ea"/>
+  <text x="742" y="615" font-family="Arial" font-size="13" fill="#68768b">题图</text>
+  <rect x="880" y="564" width="260" height="70" rx="6" fill="#fbfcfe" stroke="#e1e6ee"/>
+  <text x="900" y="590" font-family="Arial" font-size="12" font-weight="700" fill="#1d2433">子题 1</text>
+  <text x="900" y="616" font-family="Arial" font-size="12" fill="#68768b">（1）子问内容</text>
+</svg>

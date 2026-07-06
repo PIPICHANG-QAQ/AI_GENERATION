@@ -1,0 +1,45 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: ai-generation-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${LOCAL_MYSQL_ROOT_PASSWORD:-ai_generation_root}
+      MYSQL_DATABASE: ${LOCAL_MYSQL_DATABASE:-ai_generation}
+      MYSQL_USER: ${LOCAL_MYSQL_USER:-ai_generation}
+      MYSQL_PASSWORD: ${LOCAL_MYSQL_PASSWORD:-ai_generation}
+    ports:
+      - "${LOCAL_MYSQL_PORT:-3306}:3306"
+    volumes:
+      - ai_generation_mysql:/var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: ai-generation-redis
+    restart: unless-stopped
+    ports:
+      - "${LOCAL_REDIS_PORT:-6379}:6379"
+    volumes:
+      - ai_generation_redis:/data
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: ai-generation-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${LOCAL_MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${LOCAL_MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${LOCAL_MINIO_API_PORT:-9000}:9000"
+      - "${LOCAL_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - ai_generation_minio:/data
+    command: server /data --console-address ":9001"
+
+volumes:
+  ai_generation_mysql:
+  ai_generation_redis:
+  ai_generation_minio:

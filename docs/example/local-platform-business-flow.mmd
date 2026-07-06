@@ -1,0 +1,113 @@
+flowchart TD
+  Legend1["[封装能力]<br/>question-engine / SDK 已提供"]:::packaged
+  Legend2["[本地演示]<br/>local-platform demo 闭环"]:::demo
+  Legend3["[平台自研]<br/>公司平台应自己实现"]:::platform
+  Legend4["[需配置]<br/>部署、存储、模型、回调等配置"]:::config
+
+  subgraph Config["运行配置"]
+    C1["VITE_API_BASE_URL / VITE_API_BASE"]:::config
+    C2["Java backend 8018"]:::config
+    C3["Python worker"]:::config
+    C4["OCR provider / MinerU"]:::config
+    C5["LLM provider / API key"]:::config
+    C6["file-flow local storage / MinIO"]:::config
+    C7["callback secret / retry policy"]:::config
+  end
+
+  subgraph Import["模块一：题目导入"]
+    I1["新建 OCR 任务<br/>标题、学段、学科、年级、地区、年份"]:::demo
+    I2["上传试卷和答案文件"]:::packaged
+    I3["OCR / 拆题 / 题图抽取"]:::packaged
+    I4["原文件预览"]:::packaged
+    I5["复合人工复核<br/>大题题干 + 小问题干/答案/解析/分值/知识点"]:::demo
+    I6["任务题图库"]:::packaged
+    I7["选择/上传题图"]:::packaged
+    I8["AI 标准化候选<br/>LaTeX 分隔符修复 / OCR 上下文 / 风险闸门"]:::packaged
+    I9["AI 解析"]:::packaged
+    I10["标记已校验"]:::demo
+    I11["单题/批量入本地题库"]:::demo
+    I12["question-package.v1 标准题目包"]:::packaged
+  end
+
+  subgraph Bank["模块二：题库中心"]
+    B1["题目列表、分页、筛选"]:::platform
+    B2["查看题目<br/>含 N 小问徽标和逐小问解析"]:::platform
+    B3["新建/编辑/删除题目<br/>复合编辑器"]:::platform
+    B4["Markdown + LaTeX 实时预览"]:::demo
+    B5["题库题图库 / 题图上传"]:::packaged
+    B6["题库题 AI 标准化候选"]:::packaged
+    B7["题库题 AI 解析"]:::packaged
+    B8["题目版本、审核、发布、权限"]:::platform
+  end
+
+  subgraph Paper["模块三：组卷中心"]
+    P1["从题库选题<br/>含小问题默认全选"]:::platform
+    P9["按小问选择<br/>subSelections 试卷层保存"]:::platform
+    P2["试卷头信息"]:::platform
+    P3["拖拽排序"]:::platform
+    P4["每题赋分"]:::platform
+    P5["预览并发布<br/>只渲染所选小问"]:::platform
+    P6["试卷列表、编辑、删除"]:::platform
+    P7["Word / PDF 导出"]:::packaged
+    P8["导出文件存储和下载权限"]:::platform
+  end
+
+  subgraph Knowledge["模块四：知识点库"]
+    K1["知识点列表、搜索"]:::platform
+    K2["新建/编辑/删除/批量删除"]:::platform
+    K3["题目筛选和编辑时选择知识点"]:::platform
+    K4["AI 候选知识点映射"]:::packaged
+    K5["知识树、版本、别名、引用校验"]:::platform
+  end
+
+  C1 --> I1
+  C2 --> I2
+  C3 --> I3
+  C4 --> I3
+  C5 --> I8
+  C5 --> I9
+  C6 --> I4
+  C6 --> I6
+  C6 --> P7
+  C7 --> I12
+
+  I1 --> I2 --> I3 --> I5
+  I3 --> I4
+  I3 --> I6
+  I6 --> I7 --> I5
+  I5 --> I8 --> I10
+  I5 --> I9 --> I10
+  I10 --> I11
+  I10 --> I12
+
+  I12 --> B1
+  I11 --> B1
+  B1 --> B2
+  B1 --> B3
+  B3 --> B4
+  B3 --> B5
+  B3 --> B6
+  B3 --> B7
+  B3 --> B8
+
+  K1 --> K3
+  K2 --> K1
+  K4 --> K3
+  K5 --> K1
+  K3 --> B1
+  K3 --> I5
+
+  B1 --> P1
+  P1 --> P9
+  P9 --> P2
+  P2 --> P3
+  P3 --> P4
+  P4 --> P5
+  P5 --> P6
+  P6 --> P7
+  P7 --> P8
+
+  classDef packaged fill:#e8f7ed,stroke:#2f855a,color:#12351f;
+  classDef demo fill:#f4f4f5,stroke:#71717a,color:#27272a;
+  classDef platform fill:#eaf2ff,stroke:#2563eb,color:#172554;
+  classDef config fill:#fff7e6,stroke:#d97706,color:#451a03;

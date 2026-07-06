@@ -1,0 +1,43 @@
+services:
+  question-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVER_BASE_IMAGE: ${SERVER_BASE_IMAGE:-nvcr.io/nvidia/tensorrt:23.09-py3}
+    image: ai-generation-question-engine:latest
+    restart: unless-stopped
+    gpus: all
+    env_file:
+      - .env
+    environment:
+      SERVER_PORT: "8018"
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-test}
+      PYTHON_WORKER_ENABLED: "true"
+      PYTHON_WORKER_API_PROXY_ENABLED: ${PYTHON_WORKER_API_PROXY_ENABLED:-true}
+      PYTHON_WORKER_BASE_URL: http://127.0.0.1:8000
+      PYTHON_WORKER_STORAGE_ROOT: /data
+      APP_CORS_ALLOWED_ORIGIN_PATTERNS: "${APP_CORS_ALLOWED_ORIGIN_PATTERNS:-http://localhost:*,http://127.0.0.1:*,http://192.168.1.148:*,http://120.211.112.121:*,https://*.pinggy-free.link,https://*.free.pinggy.net,https://*.lhr.life}"
+      DB_URL: ${DB_URL:-jdbc:h2:file:/data/java_library;MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE}
+      JAVA_STORAGE_LOCAL_ROOT: /data/java_files
+      JAVA_DOMAIN_LIBRARY_STORE_PATH: /data/library_store.json
+      OCR_FLOW_PROVIDER: mineru
+      MINERU_COMMAND: ${HOST_MINERU_VENV:-/aa/AI_GENERATION_TOGO/backend/python-worker/.venv}/bin/mineru
+      MINERU_TIMEOUT_SECONDS: ${MINERU_TIMEOUT_SECONDS:-1800}
+      MINERU_VERSION_TIMEOUT_SECONDS: ${MINERU_VERSION_TIMEOUT_SECONDS:-30}
+      ENABLE_LLM_SPLIT: ${ENABLE_LLM_SPLIT:-true}
+      PANDOC_CJK_FONT: ${PANDOC_CJK_FONT:-Noto Sans CJK SC}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    ports:
+      - "${APP_HTTP_PORT:-80}:8080"
+      - "${APP_JAVA_PORT:-8018}:8018"
+    volumes:
+      - ./server-data:/data
+      - ${HOST_MINERU_VENV:-/aa/AI_GENERATION_TOGO/backend/python-worker/.venv}:${HOST_MINERU_VENV:-/aa/AI_GENERATION_TOGO/backend/python-worker/.venv}:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/java/health >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
