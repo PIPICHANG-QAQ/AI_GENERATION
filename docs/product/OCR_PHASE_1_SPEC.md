@@ -16,7 +16,7 @@ OCR-Flow 是 `question-engine` 的核心底层能力：它负责把试卷/答案
 - 保护选择题和空位题结构：选项、空位占位、小问和题图都必须按 OCR 证据归属，不能靠模型补写。
 - 对低置信空位题执行题目级视觉修复：使用 OCR bbox 裁出 question crop，检测长横线，并可选调用 Pix2Text 做二次 OCR。
 - 对 Markdown + LaTeX 做本地标准化和风险检测。
-- 在大模型已配置时执行结构化拆题、AI 标准化、AI 解析和答案解析匹配。
+- 在大模型已配置时执行低置信边界确认、人工触发 AI 标准化、AI 解析和答案解析匹配。
 - 生成适合人工校验的题目草稿。
 - 为 `question-package.v1` 提供题目、图片、答案、解析、候选知识点和 source evidence。
 
@@ -99,13 +99,15 @@ OCR 成功后必须形成以下结构：
 - `sections`：大题列表，每个大题包含标题、题型和题目数组。
 - `questions`：扁平题目列表。
 - `splitter`：拆题来源，说明使用大模型、规则兜底或其它 provider。
+- `boundaryConfidence`：本地边界置信度和是否跳过 AI 边界确认的原因。
 - `mathValidation`：整卷公式校验汇总。
 - `autoSemanticRepair`：自动 AI 语义修复的启用、跳过和应用情况。
+- `llmMetrics`：LLM 调用次数、总耗时和单次调用耗时明细；不得包含 prompt、密钥、完整 OCR 文本或图片 base64。
 
 每道题至少包含：
 
 - `id`
-- `number`
+- `number`：OCR 结构内候选题号；导入工作台展示编号必须按平台导入顺序重新生成。
 - `type`
 - `stemMarkdown`
 - `manualMarkdown`
@@ -122,7 +124,7 @@ OCR 成功后必须形成以下结构：
 - `autoSemanticRepair`
 - `aiMetadata`
 
-题图必须保留在 `images` 结构化字段中。OCR 产物和历史 Markdown 图片引用需要归一到题图模块；保存、入库、题库编辑和组卷导出都不得丢失题图。
+题图必须同时保留 `images` 结构化字段和题干 Markdown 图片引用。`images` 提供图片元数据、访问地址和 AI 解析可用性，Markdown 引用决定题图在题干预览、题库查看、组卷预览和导出中的位置；用户手动删除某个图片引用后，预览不得继续渲染该图，也不得自动补回引用。
 
 空位题、补全题、横线题和证明过程填空题必须在 `stemMarkdown` / `manualMarkdown` 中保留可编辑占位，统一使用 `____` 或 `(____)`。占位只是题干结构，不等价于答案；答案仍进入 `answer` 或小问 `answer` 字段。
 
@@ -130,17 +132,19 @@ OCR 成功后必须形成以下结构：
 
 ## 拆题与答案解析匹配
 
-拆题优先使用大模型。输入包括：
+拆题以 OCR 原文和本地边界证据为主。OCR 主链路只保证 `markdown/json/assets/sections/questions/mathValidation` 等可人工校验产物；本地边界高置信时直接跳过 AI 边界确认，低置信时才按题段分片调用大模型确认边界。输入包括：
 
 - 试卷 OCR Markdown。
 - 图片资源列表。
-- 本地规则拆题参考。
+- 本地题号、选项、小问和题图边界参考。
 - 可选答案文件 OCR Markdown。
 - 试卷自身可能包含的参考答案、答案解析或解答过程。
 
-大模型必须负责结构化拆出大题和小问：当题干中存在 `(1)`、`（2）`、`①` 等小问边界时，父题保留共用材料/大题题干，小问进入 `subQuestions`，并同步到兼容字段 `children`。本地规则拆题只作为提示、兜底和保守后处理，不能替代大模型对小问语义边界、答案和解析归属的判断。
+大模型只负责低置信边界的确认或修正，不生成题干文本、答案或解析。当题干中存在 `(1)`、`（2）`、`①` 等小问边界时，父题保留共用材料/大题题干，小问进入 `subQuestions`，并同步到兼容字段 `children`。本地规则拆题是主链路的证据来源和兜底；模型失败、未配置、返回非法 JSON 或某个分片失败时，系统回退对应本地边界，不让 OCR 任务失败。
 
 大模型输出必须经过本地归一化和校验。模型失败、未配置或返回非法 JSON 时，系统回退本地规则拆题。扁平 `questions` 可用于检索和兼容，但导入工作台生成题目卡片时应优先读取 `sections[].questions` 的父题，避免把小问误生成为独立大题。
+
+导入工作台从 OCR 输出生成待校验题时，不按 OCR 题号或 OCR `id` 做去重。平台展示编号按实际导入顺序递增；OCR `id` 只进入 `sourceQuestionId`。如果 OCR 在正文和答案解析区重复输出 `q_1..q_n`，后续重复项必须保留，并给 `sourceQuestionId` 增加 `__occurrence_2` 等后缀，避免覆盖前一轮题目。
 
 答案和解析匹配规则：
 
@@ -190,6 +194,13 @@ OCR 成功后必须形成以下结构：
 - 每道题的修复证据写入 `visualRepair`，包括 crop 路径、bbox、横线数量、Pix2Text 输出和是否应用。
 - 二次 OCR 只在低置信题目局部 crop 上运行，不整卷调用，避免拖慢导入速度。
 
+## 布局解析框能力
+
+- 布局解析框不属于视觉修复写回链路，而是独立的 `PaperLayoutCapability`。
+- `PaperLayoutCapability` 只生成只读定位数据：`paperLayout.pages[]`、`paperLayout.regions[]`、`paperLayout.warnings[]`，不会修改 OCR 题目、题图或人工编辑稿。
+- 坐标源优先使用 MinerU `_middle.json` 的 `pdf_info[].para_blocks`、`discarded_blocks` 和 `page_size`，因为该坐标系与当前试卷页图预览同源；只有缺失 `_middle.json` 时才回退 `content_list`。
+- 能力只输出父题级范围并绑定平台 `questionId`，过滤标题、章节说明、页码等非题目 block；前端点击后仅用于滚动定位右侧校验题卡。
+
 ## 公式标准化与 AI 修复
 
 本地公式标准化负责处理高置信格式问题：
@@ -213,14 +224,20 @@ AI 标准化约束：
 - 导入题必须调用导入题专用接口，并参考同题原始 OCR 文本。
 - 题库题必须调用题库题专用接口；如果题目来自导入任务，应回溯源 OCR 上下文。
 - 新建题且没有题目 ID 时才允许调用通用标准化接口。
+- `currentMarkdown` / `manualMarkdown` 只代表当前编辑稿，可能已经被人工或模型破坏；可信 OCR 证据必须通过 `rawOcrContext`、同题 OCR 题段、`stemMarkdown` 或来源题段单独传递，不得把当前编辑稿拼进 trusted raw OCR context。
+- AI 标准化候选链路必须按“本地确定性修复 -> 可信 OCR 兜底 -> LLM 修复”执行；本地修复或 OCR 兜底已经消除严重风险时不得再调用 LLM。
+- 标准化后必须整理展示公式块边界，避免 `$$...$$(2)` 这类块公式与正文粘连。
+- 所有候选必须返回严重 LaTeX 校验和 Markdown/KaTeX 渲染级校验；不可渲染候选只能作为安全 fallback 说明，不得展示为可直接应用候选。
 - AI 标准化成功后，Java 应记录 AI job，并默认把标准化后的 Markdown 作为候选返回；前端展示候选源码和候选预览，用户应用后再通过保存接口写入 `manualMarkdown`。
-- 只有显式传入 `writeResult=true` 或 `apply=true` 时，Java 才尝试直接写回 AI 标准化结果；低置信、`candidateSevereIssues` 非空或 `writeBlocked=true` 时必须保留原题干，并返回 `writeResult=false` 与 `writeSkippedReason`。
+- 只有显式传入 `writeResult=true` 或 `apply=true` 时，Java 才尝试直接写回 AI 标准化结果；低置信、`candidateSevereIssues` 非空、`writeBlocked=true`、`applyBlocked=true` 或 `renderValidation.valid=false` 时必须保留原题干，并返回 `writeResult=false` 与 `writeSkippedReason`。
+- 只有进入 LLM 修复阶段且成功返回的候选才可进入短期缓存；缓存 key 必须包含当前编辑稿、可信 OCR 上下文和结构化提示，TTL 由 `AI_STANDARDIZE_CACHE_TTL_SECONDS` 控制。
 - 如果 currentMarkdown 或同题 OCR 上下文中混入本题答案、解析、参考答案或解答过程，AI 标准化应将其从题干中移除，并分别返回 `answer`、`analysis`；前端应用候选时可同步回填输入框，AI 解析接口仍负责答案/解析自动写回。
 - 如果题目已有小问，或 currentMarkdown / 原始 OCR 上下文显示题目由多个小问组成，AI 标准化必须返回 `subQuestions[].answer` / `subQuestions[].analysis`，父题 `answer` / `analysis` 返回空字符串；Java 写回和前端应用候选时都只更新小问答案解析。
 - 如果题目是空位题、补全题或横线题，AI 标准化必须保留 `____` / `(____)` 占位，不得把模型自行求解结果写回题干；缺失占位只能作为候选修复，并带出 warning。
 - 答案/解析识别以大模型语义分析为主，程序脚本只做保守后处理：当模型已经返回 `answer` 或 `analysis` 时，必须删除题干中带 `【答案】`、`【解析】`、`【解答】`、`故答案为` 等明确标记的答案解析块；如果题干末尾以“长为/值为/结果为/等于”等形式直接拼入已抽取答案，应替换为空括号，答案只保留在 `answer` 字段。
 - 修复后仍存在严重风险时不得覆盖原题干。
 - 本地公式标准化如果会重新引入严重 LaTeX 风险，必须跳过该轮本地标准化并保留已修好的 AI 候选原文。
+- OCR 主链路默认 `OCR_AUTO_SEMANTIC_REPAIR_MODE=skip`，只记录语义修复候选数量并交给人工校验；如需压测可配置为 `inline` 或 `inline-concurrent`，但低置信、仍有同类风险或缺少证据的修复不得自动写回。
 
 ## 人工校验工作台
 
@@ -239,6 +256,7 @@ AI 标准化约束：
 - 预览态必须渲染 Markdown + LaTeX，不能展示原始源码。
 - 支持 AI 标准化、AI 解析、保存、单题入库和批量入库。
 - AI 标准化返回候选源码和候选预览；用户应用候选时，若响应包含 `answer` 或 `analysis`，前端可回填对应字段，未返回时保留用户当前内容。
+- AI 标准化候选面板必须区分来源：本地修复、原始 OCR 兜底、AI 修复；不可应用候选必须禁用“应用”按钮并展示具体原因。
 - AI 解析返回 `answer` 时自动回填答案；未返回答案时保留用户当前答案。含小问题目会把当前 `subQuestions` 一并传给 worker，并要求模型返回每个小问的答案与解析；前端把结果合并到小问编辑区，父题答案解析保持为空。
 - 含小问题目的每个可编辑小问必须保留独立 `AI 标准化` 和 `AI 解析` 操作。小问级标准化只返回当前小问候选并等待人工应用；小问级解析以大题材料、当前小问、答案、知识点和题图作为上下文，只回填当前小问 `answer` / `analysis`，不得修改父题或其它小问。
 - 保存后题目优先展示人工编辑内容。

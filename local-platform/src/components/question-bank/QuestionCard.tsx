@@ -3,11 +3,12 @@ import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { StatusTag } from "@/components/ui/StatusTag";
 import { MarkdownRenderer } from "@/components/ui/MarkdownRenderer";
 import { QuestionImageUploader } from "@/components/question-bank/QuestionImageUploader";
+import { MarkdownChipEditor } from "@/components/question-bank/MarkdownChipEditor";
 import {
+  AiStandardizeJobStatus,
   StandardizeCandidatePanel,
   standardizeCandidateFromPayload,
   type StandardizeCandidate,
@@ -26,17 +27,24 @@ import {
   addSubQuestionForm,
   appendMissingImageRefs,
   appendNewImageRefs,
+  ensureQuestionImageLabels,
+  filterRemovedQuestionImages,
+  getRemovedQuestionImages,
   getQuestionImages,
   getQuestionMarkdown,
   getQuestionMarkdownParts,
   getSubQuestions,
   mergeSubQuestionSuggestions,
   normalizeQuestionOptions,
+  removeQuestionImageRefsFromOptions,
+  removeQuestionImageRefsFromMarkdown,
+  serializeQuestionOptions,
   removeSubQuestionForm,
   subQuestionEditorForm,
   type QuestionImage,
 } from "@/lib/question";
 import {
+  aiAnalysisFallbackMessage,
   buildSubQuestionAnalysisPayload,
   subAnalysisPatch,
   subStandardizePatch,
@@ -56,7 +64,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
 
   const isBanked = question.status === "已入库";
   const isVerified = question.status === "已校验";
-  const initialImages = getQuestionImages(question);
+  const initialImages = ensureQuestionImageLabels(getQuestionImages(question));
   const initialMarkdown = getQuestionMarkdown(question);
 
   const [collapsed, setCollapsed] = useState(isBanked);
@@ -71,7 +79,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     answer: question.answer || "",
     analysis: question.analysis || "",
     knowledgePoints: question.knowledgePoints?.join("，") || "",
-    options: normalizeQuestionOptions(question.options),
+    options: normalizeQuestionOptions(question.options, initialImages),
   });
   const [subForms, setSubForms] = useState(() =>
     getSubQuestions(question).map((sub: any, subIndex: number) => {
@@ -119,12 +127,43 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   };
 
   const handleImagesChange = (next: QuestionImage[]) => {
+    const previousImages = ensureQuestionImageLabels(images);
+    const nextImages = ensureQuestionImageLabels(next, previousImages);
+    const removedImages = getRemovedQuestionImages(previousImages, nextImages);
+    const cleanedSubForms = subForms.map((sub) => ({
+      ...sub,
+      markdown: removeQuestionImageRefsFromMarkdown(sub.markdown, removedImages),
+      answer: removeQuestionImageRefsFromMarkdown(sub.answer, removedImages),
+      analysis: removeQuestionImageRefsFromMarkdown(sub.analysis, removedImages),
+      options: removeQuestionImageRefsFromOptions(sub.options, removedImages),
+      images: filterRemovedQuestionImages(sub.images, removedImages),
+    }));
     setFormData((f) => ({
       ...f,
-      markdown: appendNewImageRefs(f.markdown, images, next, [f.answer, f.analysis]),
+      markdown: appendNewImageRefs(
+        removeQuestionImageRefsFromMarkdown(f.markdown, removedImages),
+        previousImages,
+        nextImages,
+        [
+          removeQuestionImageRefsFromMarkdown(f.answer, removedImages),
+          removeQuestionImageRefsFromMarkdown(f.analysis, removedImages),
+          ...removeQuestionImageRefsFromOptions(f.options, removedImages).map((option) => option.content),
+          ...cleanedSubForms.flatMap((sub) => [
+            sub.markdown,
+            sub.answer,
+            sub.analysis,
+            ...normalizeQuestionOptions(sub.options, sub.images).map((option) => option.content),
+          ]),
+        ],
+      ),
+      answer: removeQuestionImageRefsFromMarkdown(f.answer, removedImages),
+      analysis: removeQuestionImageRefsFromMarkdown(f.analysis, removedImages),
+      options: removeQuestionImageRefsFromOptions(f.options, removedImages),
     }));
-    setImages(next);
+    setSubForms(cleanedSubForms);
+    setImages(nextImages);
     setStandardizeCandidate(null);
+    setSubStandardizeCandidate(null);
     setDirty(true);
   };
 
@@ -168,7 +207,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     const updatedQuestion = res?.question || {};
     const suggestedAnswer = String(res?.answer ?? res?.suggestedAnswer ?? updatedQuestion.answer ?? "").trim();
     const suggestedAnalysis = String(res?.analysis ?? updatedQuestion.analysis ?? "").trim();
-    const updatedOptions = normalizeQuestionOptions(res?.options ?? updatedQuestion.options);
+    const updatedOptions = normalizeQuestionOptions(res?.options ?? updatedQuestion.options, images);
     const nextSubForms = withSubImageRefs(
       mergeSubQuestionSuggestions(
         subForms,
@@ -203,6 +242,11 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
       });
     },
     onSuccess: (res: any) => {
+      const fallbackMessage = aiAnalysisFallbackMessage(res);
+      if (fallbackMessage) {
+        toast({ title: "AI 解析暂时不可用", description: fallbackMessage });
+        return;
+      }
       const suggestedAnswer = String(res?.answer ?? res?.suggestedAnswer ?? "").trim();
       const nextSubForms = withSubImageRefs(
         mergeSubQuestionSuggestions(subForms, res?.subQuestions ?? res?.metadata?.subQuestions, question),
@@ -251,6 +295,11 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     },
     onMutate: ({ subIndex }) => setActiveSubAnalysisIndex(subIndex),
     onSuccess: (res: any, { subIndex }) => {
+      const fallbackMessage = aiAnalysisFallbackMessage(res);
+      if (fallbackMessage) {
+        toast({ title: "小问 AI 解析暂时不可用", description: fallbackMessage });
+        return;
+      }
       const patch = subAnalysisPatch(res);
       if (!patch.answer && !patch.analysis) {
         toast({ title: "小问 AI 解析未返回可应用内容", description: "请检查题干、答案或题图是否完整" });
@@ -273,9 +322,9 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
 
   const prepareData = () => {
     const { markdown, ...rest } = formData;
-    const questionParts = getQuestionMarkdownParts(markdown, formData.type, formData.options);
+    const questionParts = getQuestionMarkdownParts(markdown, formData.type, formData.options, images);
     const subQuestions = subForms.map((sub) => {
-      const subParts = getQuestionMarkdownParts(sub.markdown, sub.type, sub.options);
+      const subParts = getQuestionMarkdownParts(sub.markdown, sub.type, sub.options, sub.images);
       return {
         id: sub.id,
         label: sub.label,
@@ -289,7 +338,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
         analysis: sub.analysis,
         knowledgePointIds: sub.knowledgePointIds,
         knowledgePoints: sub.knowledgePoints.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
-        options: subParts.options,
+        options: serializeQuestionOptions(subParts.options, sub.images),
         images: sub.images,
         contextMatched: sub.contextMatched,
         answerEvidence: sub.answerEvidence,
@@ -307,7 +356,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
       analysis: hasSubQuestions ? "" : formData.analysis,
       knowledgePointIds: question.knowledgePointIds || [],
       knowledgePoints: formData.knowledgePoints.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
-      options: questionParts.options,
+      options: serializeQuestionOptions(questionParts.options, images),
       images,
       subQuestions,
       children: subQuestions,
@@ -460,11 +509,13 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
           <div className="grid grid-cols-1 @2xl:grid-cols-2 gap-3">
             <div className="flex flex-col">
               <span className="text-xs font-medium text-muted-foreground mb-1.5">题干源码</span>
-              <textarea
+              <MarkdownChipEditor
+                editorId={`import-q-editor-${qid}-stem`}
                 value={formData.markdown}
-                onChange={e => patch({ markdown: e.target.value })}
+                onChange={(value) => patch({ markdown: value })}
                 readOnly={readOnly}
-                className="min-h-[220px] flex-1 p-3 rounded-md border border-input bg-secondary text-secondary-foreground font-mono text-xs leading-relaxed resize-y focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring read-only:opacity-70"
+                variant="source"
+                className="min-h-[220px] font-mono text-xs leading-relaxed"
                 placeholder="在此输入题干 Markdown..."
               />
             </div>
@@ -493,6 +544,9 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
               questionType={formData.type}
             />
           ) : null}
+          {!standardizeCandidate ? (
+            <AiStandardizeJobStatus active={localStdMutation.isPending} />
+          ) : null}
 
           {/* Question images */}
           <div className="space-y-1.5">
@@ -501,7 +555,9 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
             </span>
             {!readOnly && (
               <p className="text-[11px] leading-relaxed text-muted-foreground/80">
-                新增题图后会自动追加 <code className="px-1 py-0.5 rounded bg-muted font-mono">![](图N)</code> 到题干源码；也可拖拽题图或复制引用到指定位置。
+                上传或从题图库添加题图后，会自动在题干源码中插入{" "}
+                <code className="px-1 py-0.5 rounded bg-muted font-mono">![](图N)</code>{" "}
+                引用，并显示为「图N」小标签；标签可整体拖拽到题干、答案或解析，双击可编辑文字。
               </p>
             )}
             <QuestionImageUploader
@@ -567,7 +623,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
           </div>
 
           {!hasSubQuestions && !readOnly ? (
-            <div className="space-y-3 rounded-md border border-primary/15 bg-primary/5 p-3">
+            <div className="space-y-3 rounded-md border border-border bg-card p-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-sm font-medium text-foreground">小问编辑（0 个）</div>
                 <Button
@@ -587,7 +643,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
           ) : null}
 
           {hasSubQuestions ? (
-            <div className="space-y-3 rounded-md border border-primary/15 bg-primary/5 p-3">
+            <div className="space-y-3 rounded-md border border-border bg-card p-3">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-sm font-medium text-foreground">小问编辑（{subForms.length} 个）</div>
                 {!readOnly && (
@@ -661,6 +717,12 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
                       questionType={sub.type}
                     />
                   ) : null}
+                  {subStandardizeCandidate?.subIndex !== subIndex ? (
+                    <AiStandardizeJobStatus
+                      active={subStdMutation.isPending && activeSubStandardizeIndex === subIndex}
+                      label="小问 AI 标准化"
+                    />
+                  ) : null}
                   <div className="grid grid-cols-2 @2xl:grid-cols-4 gap-3">
                     <div className="space-y-1.5">
                       <Label className="text-xs text-muted-foreground">标签</Label>
@@ -717,19 +779,21 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
                     />
                   </div>
                   <div className="grid grid-cols-1 @2xl:grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label className="text-xs text-muted-foreground">小问题干</Label>
-                      <Textarea
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">小问题干</Label>
+                      <MarkdownChipEditor
+                        editorId={`import-q-editor-${qid}-sub-${subIndex}-stem`}
                         value={sub.markdown}
-                        onChange={(e) => patchSub(subIndex, { markdown: e.target.value })}
+                        onChange={(value) => patchSub(subIndex, { markdown: value })}
                         readOnly={readOnly}
+                        variant="source"
                         rows={4}
                         className="font-mono text-xs leading-relaxed"
                       />
                     </div>
                     <div className="space-y-1.5">
                       <Label className="text-xs text-muted-foreground">小问预览</Label>
-                      <div className="min-h-[120px] p-3 rounded-md border border-border bg-muted/30 overflow-auto prose-container">
+                      <div className="min-h-[120px] p-3 rounded-md border border-border bg-card overflow-auto prose-container">
                         <MarkdownRenderer
                           content={sub.markdown}
                           images={sub.images}
@@ -743,9 +807,10 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
                   <div className="grid grid-cols-1 @2xl:grid-cols-2 gap-3">
                     <div className="space-y-1.5">
                       <Label className="text-xs text-muted-foreground">答案（支持 LaTeX）</Label>
-                      <Textarea
+                      <MarkdownChipEditor
+                        editorId={`import-q-editor-${qid}-sub-${subIndex}-answer`}
                         value={sub.answer}
-                        onChange={(e) => patchSub(subIndex, { answer: e.target.value })}
+                        onChange={(value) => patchSub(subIndex, { answer: value })}
                         readOnly={readOnly}
                         rows={4}
                         className="font-mono text-xs leading-relaxed"
@@ -761,9 +826,10 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
                     </div>
                     <div className="space-y-1.5">
                       <Label className="text-xs text-muted-foreground">解析（支持 LaTeX）</Label>
-                      <Textarea
+                      <MarkdownChipEditor
+                        editorId={`import-q-editor-${qid}-sub-${subIndex}-analysis`}
                         value={sub.analysis}
-                        onChange={(e) => patchSub(subIndex, { analysis: e.target.value })}
+                        onChange={(value) => patchSub(subIndex, { analysis: value })}
                         readOnly={readOnly}
                         rows={4}
                         className="font-mono text-xs leading-relaxed"
@@ -785,9 +851,10 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
             <div className="grid grid-cols-1 @2xl:grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">答案（支持 LaTeX）</Label>
-                <Textarea
+                <MarkdownChipEditor
+                  editorId={`import-q-editor-${qid}-answer`}
                   value={formData.answer}
-                  onChange={e => patch({ answer: e.target.value })}
+                  onChange={(value) => patch({ answer: value })}
                   readOnly={readOnly}
                   rows={4}
                   className="font-mono text-xs leading-relaxed"
@@ -804,9 +871,10 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs text-muted-foreground">解析（支持 LaTeX）</Label>
-                <Textarea
+                <MarkdownChipEditor
+                  editorId={`import-q-editor-${qid}-analysis`}
                   value={formData.analysis}
-                  onChange={e => patch({ analysis: e.target.value })}
+                  onChange={(value) => patch({ analysis: value })}
                   readOnly={readOnly}
                   rows={4}
                   className="font-mono text-xs leading-relaxed"

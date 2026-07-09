@@ -10,7 +10,7 @@
 - 创建加工任务、查询任务、获取标准题目包、人工校验、AI 解析、题图、导出和回调的出入参。
 - Python worker 在工程中的职责，以及平台侧不应直接依赖的兼容接口。
 
-本说明书是开发者使用入口；正式机器可读契约以 `question-engine/openapi/question-engine.v1.yaml` 为准。
+本说明书是开发者使用入口；正式机器可读契约以 `question-engine/openapi/question-engine.v1.yaml` 为准。当前 OpenAPI 契约版本为 `1.1.0`，`question-package.v1` 输出包结构保持兼容。
 
 ## 2. question-engine 作用
 
@@ -173,7 +173,7 @@ GET /api/engine/interfaces
 | `engine-catalog` | `/api/engine`、`/api/engine/modules`、`/api/engine/interfaces`、`/api/engine/platform-requirements`、`/api/engine/delivery-boundary` |
 | `capability-catalog` | `/api/capabilities` |
 | `ocr-flow` | `/api/capabilities/ocr-flow`、`/api/capabilities/ocr-flow/runtime` |
-| `question-import` | `/api/capabilities/question-processing`、`/api/capabilities/question-processing/jobs`、`/api/import-tasks`、`/api/import-tasks/{taskId}`、`/api/import-tasks/{taskId}/source/{paper|answer}` |
+| `question-import` | `/api/capabilities/question-processing`、`/api/capabilities/question-processing/jobs`、`/api/import-tasks`、`/api/import-tasks/{taskId}`、`/api/import-tasks/{taskId}/source/{paper|answer}`、`/api/import-tasks/{taskId}/rescan` |
 | `question-bank` | `/api/question-bank/questions`、`/api/question-bank/questions/{id}`、`/api/import-tasks/{taskId}/questions/{questionId}/bank`、`/api/import-tasks/{taskId}/bank` |
 | `paper-assembly` | `/api/papers`、`/api/papers/{id}`、`/api/papers/{id}/export` |
 | `knowledge-base` | `/api/knowledge-points`、`/api/knowledge-points/{id}` |
@@ -318,8 +318,8 @@ GET /api/capabilities/question-processing/jobs/{jobId}/question-package
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `questionId` | string | engine 内部题目 ID |
-| `sourceQuestionId` | string | OCR/原始来源题目 ID |
-| `number` | number | 题号 |
+| `sourceQuestionId` | string | OCR/原始来源题目 ID，仅用于追踪来源；当 OCR 正文区和答案解析区重复出现 `q_1..q_n` 时，后续重复项会追加 `__occurrence_2` 等后缀，避免被导入题快照覆盖 |
+| `number` | number | 平台展示题号，按导入题生成顺序自动递增；不得再用 OCR 扫描题号作为展示编号或去重依据 |
 | `status` | string | 题目校验状态 |
 | `type` | string | 题型候选 |
 | `stemMarkdown` | string | 推荐题干 Markdown；空位题、补全题和横线题应保留 `____` / `(____)` 占位 |
@@ -443,13 +443,21 @@ GET /api/capabilities/ocr-flow/runtime
 | `GET` | `/api/import-tasks/{jobId}` | 获取导入任务详情和题目 |
 | `GET` | `/api/import-tasks/{jobId}/source/paper` | 预览试卷原文件 |
 | `GET` | `/api/import-tasks/{jobId}/source/answer` | 预览答案原文件 |
+| `GET` | `/api/import-tasks/{jobId}/source/paper/pages/{pageIndex}` | 获取试卷单页页图，用于布局解析框叠加 |
 | `PUT` | `/api/import-tasks/{jobId}/questions/{questionId}` | 保存人工校验后的题目 |
 | `POST` | `/api/import-tasks/{jobId}/questions/{questionId}/bank` | 单题入库到本地 Java 题库快照 |
 | `POST` | `/api/import-tasks/{jobId}/bank` | 批量入库到本地 Java 题库快照 |
+| `POST` | `/api/import-tasks/{jobId}/rescan` | 重新 OCR 扫描原始试卷/答案文件，保留已提取和已编辑题目 |
 
 说明：
 
 - `/api/import-tasks/{jobId}/source/{paper|answer}` 优先从 Java 文件存储读取；旧任务没有 Java 文件记录时回退 Python。
+- `/api/import-tasks/{jobId}` 在试卷 OCR 成功后会返回 `paperLayout`，结构为 `capability`、`pages[]`、`regions[]`、`warnings[]`。`regions` 为父题级范围，坐标是 0-1 归一化的原始 OCR bbox；编号使用平台导入顺序，`questionId` 绑定右侧父题卡片。
+- `/api/import-tasks/{jobId}/source/paper/pages/{pageIndex}` 由 Python worker 按 OCR 使用的渲染尺寸生成页图，Java bridge 透传给前端；多页 PDF 使用从 `0` 开始的 `pageIndex`，答案文件暂不提供布局框页图。
+- 布局解析框由 Python worker `PaperLayoutCapability` 封装，优先读取 MinerU `_middle.json` 的 `page_size` 和 block bbox，缺失时回退 `content_list`；前端不需要理解 MinerU 内部坐标，只消费 `paperLayout.pages/regions/warnings`。
+- 前端开启布局解析框后，应把 `regions` 叠加到对应 `pages`，点击范围框后定位到右侧父题卡片；缺少可靠坐标、原文件缺失或 PDF 渲染失败时，应展示 `paperLayout.warnings` 并允许继续人工校验。
+- `/api/import-tasks/{jobId}/rescan` 只重新投递已有 OCR job；任务、试卷 OCR 或答案 OCR 正在处理中时返回 `409`，前端应保持当前轮询并提示用户等待。
+- 重扫启动后 Java 会把 `status`、`paperOcrStatus` 和可选 `answerOcrStatus` 切为 `处理中`；worker 同步 OCR job 最新状态时不会覆盖已有 `questions`，真实“重扫后重新提题并合并”需要另行定义合并规则。
 - 选择题选项不要拆成独立编辑面板；工作台应把结构化 `options` 物化为题干源码中的 `\begin{tasks}(4)` / `\task` / `\end{tasks}`，用户在同一源码 textarea 中修改，保存时再解析回 `stemMarkdown + options`。
 - 空位题占位不要拆成答案输入框；工作台应在同一 Markdown 源码中保留 `____` / `(____)`，用户可以人工增删占位，AI 候选不能绕过人工确认直接把占位替换成答案。
 - 含小问的大题应使用复合编辑器；保存人工校验结果时请求体可携带 `subQuestions`，服务端同步返回 `subQuestions` 与兼容字段 `children`。
@@ -523,14 +531,17 @@ POST /api/ai/analysis
 - Java 创建 AI job 并记录状态。
 - Python worker 只负责模型调用和公式/Markdown 修复。
 - AI 标准化默认只返回候选 Markdown 和候选预览所需元数据，不直接覆盖导入题或题库题；前端/平台应让用户预览后应用，再走保存接口持久化。
-- 只有显式传入 `writeResult=true` 或 `apply=true` 时，Java 才尝试写回 AI 标准化结果；若候选低置信、`candidateSevereIssues` 非空或 `writeBlocked=true`，响应会保持 `writeResult=false` 并返回 `writeSkippedReason`。
+- 只有显式传入 `writeResult=true` 或 `apply=true` 时，Java 才尝试写回 AI 标准化结果；若候选低置信、`candidateSevereIssues` 非空、`writeBlocked=true`、`applyBlocked=true` 或 `renderValidation.valid=false`，响应会保持 `writeResult=false` 并返回 `writeSkippedReason`。
 - 导入题和来自导入任务的题库题会由 Java 回溯同题原始 OCR 片段传给 worker；严重 LaTeX 损坏时，worker 可直接用更完整的原始 OCR 片段作为候选并标记 `rawOcrFallbackUsed=true`。
 - worker 会先做确定性 LaTeX 分隔符修复：展示公式 `$$...$$` 内部嵌套单 `$`、行内公式被 `\div`/`\leq` 等运算符切断时，可在不调用大模型的情况下生成可渲染候选，并在 `standardizer.latexDelimiterRepaired=true` 中标记。
+- 当前编辑稿严重损坏且同题原始 OCR 题段更可靠时，worker 可直接返回 `standardizer.source=ocr-fallback`、`rawOcrFallbackUsed=true` 的候选，不再调用 LLM。
 - 空位题 AI 标准化必须保留 `____` / `(____)` 占位；模型可以根据 OCR 证据修正缺失或乱码占位，但不能直接求解并把答案填进 `markdown`。
 - worker 对候选执行本地公式标准化前后会比较严重风险；如果本地标准化会重新引入严重 LaTeX 风险，会保留候选原文并在 `standardizer.warnings` 中记录。
 - AI 解析返回 `answer` 或 `analysis` 时，Java 会写回导入题或题库题。
 - AI 解析会携带题图：调用导入题或题库题专用解析接口时，请求体可省略 `images`，Java 会读取当前题目已保存的 `images`，优先从 `file-flow` 的 Java 存储读取图片，旧 OCR 图片会通过 worker 文件接口回退读取，然后转成模型可消费的 `imageDataUrl` 发给大模型。
 - `imageDataUrl` 只用于 Java 到 Python worker 的内部解析请求；`GET /api/capabilities/ai-flow/jobs` 返回的 job request 会把内联图片内容脱敏为占位文本，避免把 base64 图片写入任务查询结果。
+- 导入工作台“AI 解析全部”不新增后端批量接口，前端顺序调用单题 AI 解析和保存接口：默认只补齐未入库且缺少解析的题目，可选择覆盖已有解析；普通题按整题生成，复合大题按小问生成，提示词包含父题材料和当前小问题干，答案使用当前小问答案；失败项只计入汇总，不中断整批。
+- AI 批量解析写回后不得自动改变题目校验状态，仍需人工从“待校验”确认后再入库。生产高并发场景如果需要大量批处理，应迁移为 Java `ai-flow` 队列任务，并增加租户级、用户级和 endpoint 级限流。
 - 如果要提高 LaTeX 修复精度，调用方应尽量传 `rawOcrText`，不要只传渲染后的文本。
 
 ## 11. 题图和 file-flow 接口
@@ -608,9 +619,10 @@ GET /api/capabilities/export-flow/runtime
 说明：
 
 - Java 创建导出 job、记录状态和导出文件。
-- Python worker `/worker/export/render` 只负责 Markdown/Pandoc/XeLaTeX 渲染。
-- DOCX/PDF 主路径是先生成中间 Markdown，再通过 Pandoc 转换。
-- 未安装 Pandoc/XeLaTeX 时，按当前配置返回失败原因或走 fallback。
+- Python worker `/worker/export/render` 只负责 DOCX/PDF 文件渲染，不保存导出 job 元数据。
+- DOCX 主路径是生成 Markdown + LaTeX 中间文件后通过 Pandoc 转换，数学公式进入 Word 原生公式对象。
+- PDF 主路径是专用 XeLaTeX 预览模板，保留数学公式、题型徽标、小问卡片、题图、选项和解答题作答区；不再把 PDF 主路径建立在 Pandoc PDF 上。
+- 未安装 Pandoc 时 DOCX 走旧 fallback；未安装 XeLaTeX 或缺少 `ctex`、`tcolorbox`、`tabularx` 等 LaTeX 包时 PDF 走 ReportLab fallback，复杂公式会降级为文本，应优先修复运行环境。
 
 ## 13. callback-flow 接口
 
@@ -717,6 +729,7 @@ docs/product/LOCAL_PLATFORM_AS_EXAMPLE.md
 | --- | --- | --- |
 | 能力目录 | `listCapabilities` / `getEngineCatalog` / `getEngineInterfaces` | `listCapabilities` / `getEngineCatalog` / `getEngineInterfaces` |
 | 加工任务 | `createProcessingJob` / `getProcessingJob` / `getQuestionPackage` | `getProcessingJob` / `getQuestionPackage` |
+| 重新 OCR 扫描 | `rescanImportTask` | `rescanImportTask` |
 | 任务题图库 | `getImportTaskImageLibrary` | `getImportTaskImageLibrary` |
 | 选择任务题图 | `selectImportQuestionImages` | `selectImportQuestionImages` |
 | 导入题 AI 标准化候选 | `standardizeImportQuestion` | `standardizeImportQuestion` |

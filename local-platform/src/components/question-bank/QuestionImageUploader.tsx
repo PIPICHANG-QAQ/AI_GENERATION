@@ -9,7 +9,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { QUESTION_IMAGE_REF_MIME, getImageKey, questionImageSrc, type QuestionImage } from "@/lib/question";
+import { QUESTION_IMAGE_REF_MIME, getImageKey, getQuestionImageLabel, questionImageSrc, type QuestionImage } from "@/lib/question";
 
 const MAX_SIZE = 5 * 1024 * 1024;
 
@@ -140,17 +140,18 @@ export function QuestionImageUploader({
   };
 
   const srcOf = (img: QuestionImage) => questionImageSrc(img.url || img.path);
-  const refToken = (index: number) => `![](图${index + 1})`;
+  const imageLabel = (img: QuestionImage, index: number) => getQuestionImageLabel(img, index);
+  const refToken = (img: QuestionImage, index: number) => `![](${imageLabel(img, index)})`;
 
-  const handleRefDragStart = (index: number) => (e: React.DragEvent) => {
-    const token = refToken(index);
+  const handleRefDragStart = (img: QuestionImage, index: number) => (e: React.DragEvent) => {
+    const token = refToken(img, index);
     e.dataTransfer.setData(QUESTION_IMAGE_REF_MIME, token);
     e.dataTransfer.setData("text/plain", token);
     e.dataTransfer.effectAllowed = "copy";
   };
 
-  const copyRef = async (index: number) => {
-    const token = refToken(index);
+  const copyRef = async (img: QuestionImage, index: number) => {
+    const token = refToken(img, index);
     try {
       await navigator.clipboard.writeText(token);
       setError("");
@@ -167,17 +168,17 @@ export function QuestionImageUploader({
             <div
               key={getImageKey(img) || i}
               className="relative group w-24 h-24 rounded-md border border-border bg-card overflow-hidden flex items-center justify-center"
-              title={img.name || `图${i + 1}`}
+              title={img.name || imageLabel(img, i)}
               draggable={!readOnly}
-              onDragStart={handleRefDragStart(i)}
+              onDragStart={handleRefDragStart(img, i)}
             >
               <span className="absolute left-1 top-1 z-10 rounded bg-background/90 px-1.5 py-0.5 text-[10px] font-medium text-foreground shadow-sm">
-                图{i + 1}
+                {imageLabel(img, i)}
               </span>
               {srcOf(img) ? (
                 <img
                   src={srcOf(img)}
-                  alt={img.name || `图${i + 1}`}
+                  alt={img.name || imageLabel(img, i)}
                   className="max-w-full max-h-full object-contain cursor-pointer"
                   onClick={() => window.open(srcOf(img), "_blank")}
                 />
@@ -192,10 +193,10 @@ export function QuestionImageUploader({
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
-                      void copyRef(i);
+                      void copyRef(img, i);
                     }}
                     className="w-5 h-5 inline-flex items-center justify-center rounded-full bg-background/95 text-foreground shadow-sm hover:bg-accent"
-                    title={`复制引用 ${refToken(i)}`}
+                    title={`复制引用 ${refToken(img, i)}`}
                   >
                     <Copy className="w-3 h-3" />
                   </button>
@@ -278,7 +279,7 @@ export function QuestionImageUploader({
       )}
 
       <Dialog open={libraryOpen} onOpenChange={setLibraryOpen}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-3xl max-h-[82vh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
           <DialogHeader>
             <DialogTitle>任务题图库</DialogTitle>
             <DialogDescription>
@@ -291,7 +292,8 @@ export function QuestionImageUploader({
               本任务题图库暂无图片。
             </div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 max-h-[420px] overflow-auto pr-1">
+            <div className="min-h-0 overflow-y-auto overflow-x-hidden pr-1">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 auto-rows-[8rem] sm:auto-rows-[9rem]">
               {libraryImages.map((img, i) => {
                 const key = getImageKey(img) || String(i);
                 const selected = selectedLibraryKeys.includes(key);
@@ -301,7 +303,7 @@ export function QuestionImageUploader({
                     key={key}
                     type="button"
                     onClick={() => toggleLibraryImage(img)}
-                    className={`relative aspect-square rounded-lg border overflow-hidden bg-card flex items-center justify-center transition-colors ${
+                    className={`relative h-32 sm:h-36 min-h-0 w-full rounded-lg border overflow-hidden bg-card flex items-center justify-center transition-colors ${
                       selected ? "border-primary ring-2 ring-ring/30" : "border-border hover:border-primary/60"
                     }`}
                     title={img.name || `题图库图片 ${i + 1}`}
@@ -323,6 +325,7 @@ export function QuestionImageUploader({
                   </button>
                 );
               })}
+              </div>
             </div>
           )}
 

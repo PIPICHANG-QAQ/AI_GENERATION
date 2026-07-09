@@ -675,8 +675,7 @@ public class AiFlowOrchestrationService {
                 value(raw.get("rawOcrContext")),
                 sameQuestionRawOcrContext(question),
                 value(raw.get("stemMarkdown")),
-                value(question.getStemMarkdown()),
-                value(question.getManualMarkdown()));
+                value(question.getStemMarkdown()));
     }
 
     /**
@@ -700,8 +699,7 @@ public class AiFlowOrchestrationService {
         return joinContext(
                 sourceRawContext,
                 value(question.getSource()),
-                value(question.getStemMarkdown()),
-                value(question.getManualMarkdown()));
+                value(question.getStemMarkdown()));
     }
 
     /**
@@ -729,9 +727,13 @@ public class AiFlowOrchestrationService {
     private boolean standardizeWriteAllowed(Map<String, Object> response) {
         Map<String, Object> standardizer = mapValue(response.get("standardizer"));
         String confidence = value(standardizer.get("confidence")).toLowerCase(java.util.Locale.ROOT);
+        Map<String, Object> renderValidation = mapValue(standardizer.get("renderValidation"));
+        boolean renderInvalid = renderValidation.containsKey("valid") && !booleanValue(renderValidation.get("valid"));
         return !"low".equals(confidence)
                 && listValue(standardizer.get("candidateSevereIssues")).isEmpty()
-                && !Boolean.TRUE.equals(standardizer.get("writeBlocked"));
+                && !Boolean.TRUE.equals(standardizer.get("writeBlocked"))
+                && !Boolean.TRUE.equals(standardizer.get("applyBlocked"))
+                && !renderInvalid;
     }
 
     /**
@@ -751,7 +753,7 @@ public class AiFlowOrchestrationService {
      */
     private void markStandardizeWriteSkipped(Map<String, Object> response) {
         response.put("writeResult", false);
-        response.put("writeSkippedReason", "AI 标准化结果低置信或仍存在严重 LaTeX 风险，已保留原题干");
+        response.put("writeSkippedReason", "AI 标准化结果低置信、仍存在严重 LaTeX 风险或渲染安全校验失败，已保留原题干");
     }
 
     /**

@@ -14,10 +14,10 @@ from package_question_engine_delivery import EXCLUDE_PARTS, ROOT, iter_files, va
 ABSOLUTE_LOCAL_PATH_RE = re.compile(
     "|".join(
         [
-            "/" + r"Users/[^\\s`'\"<>]+",
-            "/" + r"home/[^\\s`'\"<>]+",
-            "/" + r"var/folders/[^\\s`'\"<>]+",
-            "/" + r"opt/homebrew/[^\\s`'\"<>]+",
+            r"/Users/[^\s`'\"<>]+",
+            r"/home/[^\s`'\"<>]+",
+            r"/var/folders/[^\s`'\"<>]+",
+            r"/opt/homebrew/[^\s`'\"<>]+",
         ]
     )
 )
@@ -30,6 +30,25 @@ ALLOWED_SHEBANG_PREFIXES = (
 )
 
 BINARY_PACKAGE_SUFFIXES = (".whl", ".zip", ".gz", ".tgz", ".bz2", ".xz")
+
+ALLOWED_ABSOLUTE_LOCAL_PATH_PREFIXES = (
+    "/home/user/AI_GENERATION_DOCKER",
+)
+
+ALLOWED_ABSOLUTE_LOCAL_PATH_FILES = {
+    "README.md",
+    "docker-compose.server.yml",
+    "docs/CHANGELOG.md",
+    "docs/delivery/OPERATIONS_GUIDE.md",
+    "docs/server/CHANGELOG.md",
+    "docs/server/README.md",
+    "docs/server/RUNBOOK.md",
+    "docs/superpowers/plans/2026-07-06-ocr-flow-llm-efficiency.md",
+}
+
+ABSOLUTE_PATH_PATTERN_SOURCE_FILES = {
+    "scripts/check_project_portability.py",
+}
 
 
 def read_text(path: Path) -> str | None:
@@ -55,9 +74,10 @@ def check_packaged_files(files: list[Path], failures: list[str]) -> None:
         if text is None:
             continue
 
-        match = ABSOLUTE_LOCAL_PATH_RE.search(text)
-        if match:
-            failures.append(f"absolute local path leaked into portable file: {rel}: {match.group(0)}")
+        if rel not in ABSOLUTE_PATH_PATTERN_SOURCE_FILES:
+            match = ABSOLUTE_LOCAL_PATH_RE.search(text)
+            if match and not is_allowed_absolute_local_path(rel, match.group(0)):
+                failures.append(f"absolute local path leaked into portable file: {rel}: {match.group(0)}")
 
         lines = text.splitlines()
         first_line = lines[0] if lines else ""
@@ -65,11 +85,27 @@ def check_packaged_files(files: list[Path], failures: list[str]) -> None:
             failures.append(f"non-portable shebang in packaged file: {rel}: {first_line}")
 
 
+def is_allowed_absolute_local_path(relative_path: str, matched_path: str) -> bool:
+    """Allow documented server deployment paths while still rejecting accidental local leaks."""
+    return (
+        relative_path in ALLOWED_ABSOLUTE_LOCAL_PATH_FILES
+        and any(matched_path.startswith(prefix) for prefix in ALLOWED_ABSOLUTE_LOCAL_PATH_PREFIXES)
+    )
+
+
+def iter_source_tree_paths(root: Path = ROOT):
+    """Yield source tree paths while pruning local dependency/build directories."""
+    for current, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in EXCLUDE_PARTS]
+        current_path = Path(current)
+        for name in dirnames:
+            yield current_path / name
+        for name in filenames:
+            yield current_path / name
+
+
 def check_source_tree_symlinks(failures: list[str]) -> None:
-    for path in ROOT.rglob("*"):
-        relative_parts = path.relative_to(ROOT).parts
-        if set(relative_parts) & EXCLUDE_PARTS:
-            continue
+    for path in iter_source_tree_paths(ROOT):
         if not path.is_symlink():
             continue
         if not path.exists():

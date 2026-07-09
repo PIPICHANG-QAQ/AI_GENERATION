@@ -12,6 +12,7 @@ import type {
   DeliveryBoundary,
   EngineCatalog,
   EngineInterfaceDescriptor,
+  ImportTaskRescanResult,
   ProcessingJob,
   QuestionImageLibrary,
   QuestionImageMutationResult,
@@ -64,6 +65,12 @@ export class QuestionEngineClient {
 
   getQuestionPackage(jobId: string): Promise<QuestionPackage> {
     return this.getJson(`/api/capabilities/question-processing/jobs/${encodeURIComponent(jobId)}/question-package`);
+  }
+
+  rescanImportTask(jobId: string): Promise<ImportTaskRescanResult> {
+    return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/rescan`, {
+      method: "POST",
+    });
   }
 
   getImportTaskImageLibrary(jobId: string): Promise<QuestionImageLibrary> {

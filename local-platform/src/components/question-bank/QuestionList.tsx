@@ -42,6 +42,10 @@ export function QuestionList({ search, setSearch }: { search: string, setSearch:
   });
 
   const total = questions?.total ?? 0;
+  const questionItems: any[] = Array.isArray(questions?.items) ? questions.items : [];
+  const currentPageIds = questionItems.map((question: any) => String(question.id));
+  const selectedCurrentPageIds = currentPageIds.filter((id) => selectedIds.has(id));
+  const currentPageAllSelected = currentPageIds.length > 0 && selectedCurrentPageIds.length === currentPageIds.length;
 
   useEffect(() => {
     setPage(1);
@@ -109,6 +113,14 @@ export function QuestionList({ search, setSearch }: { search: string, setSearch:
     batchDeleteMutation.mutate(ids);
   };
 
+  const selectCurrentPageQuestions = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      currentPageIds.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+
   const metaPill = "text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-md border border-border";
 
   return (
@@ -129,11 +141,20 @@ export function QuestionList({ search, setSearch }: { search: string, setSearch:
         <div className="text-center py-12 bg-card rounded-lg border border-border">
           <p className="text-muted-foreground">加载中...</p>
         </div>
-      ) : questions?.items?.length > 0 ? (
+      ) : questionItems.length > 0 ? (
         <div className="space-y-4">
           <div className="flex items-center justify-between mb-2">
-            <div className="text-sm text-muted-foreground">共 {total || questions.items.length} 道题目</div>
+            <div className="text-sm text-muted-foreground">共 {total || questionItems.length} 道题目</div>
             <div className="flex items-center gap-2">
+              {currentPageIds.length > 0 && !currentPageAllSelected && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={selectCurrentPageQuestions}
+                >
+                  全选
+                </Button>
+              )}
               {selectedIds.size > 0 && (
                 <>
                   <Button
@@ -164,7 +185,7 @@ export function QuestionList({ search, setSearch }: { search: string, setSearch:
               </Button>
             </div>
           </div>
-          {questions.items.map((q: any) => (
+          {questionItems.map((q: any) => (
             <div key={q.id} className="bg-card p-5 rounded-lg border border-border elevation-1 hover:border-primary/30 hover:elevation-2 transition-all group">
               {(() => {
                 const subQuestions = getSubQuestions(q);

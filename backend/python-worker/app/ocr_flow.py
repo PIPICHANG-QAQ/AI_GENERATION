@@ -140,6 +140,11 @@ class MineruOcrProvider(OcrProvider):
             candidates.append(entrypoint)
         return candidates
 
+    def _api_url(self) -> str | None:
+        """Return the optional persistent MinerU API URL."""
+        value = os.getenv("MINERU_API_URL", "").strip()
+        return value or None
+
     def _command_availability_error(self, command: ProviderCommand) -> str | None:
         """检查命令入口本身是否可启动，版本探测不参与可用性判定。"""
         if not command.args:
@@ -299,12 +304,16 @@ class MineruOcrProvider(OcrProvider):
                 "ocrFlowProviderCommandSource": command.source,
                 "ocrFlowProviderResolution": resolution,
                 "mineruCommand": command.display,
+                "mineruApiUrl": self._api_url(),
             }
         )
         runtime.mark_step(job, "ocr-provider", "running", "正在调用 MinerU 识别文件", None)
         runtime.write_job(job)
 
         cmd = [*command.args, "-p", upload_path, "-o", str(output_dir), "-b", "pipeline"]
+        api_url = self._api_url()
+        if api_url:
+            cmd.extend(["--api-url", api_url])
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=runtime.timeout_seconds)
             job["mineruStdout"] = result.stdout[-8000:]

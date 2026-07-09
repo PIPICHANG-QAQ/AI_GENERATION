@@ -6,9 +6,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
+import copy
+import hashlib
 import json
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +23,18 @@ import httpx
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-pro"
 VALID_QUESTION_TYPES = {"choice", "fill_blank", "solution", "unknown"}
-LLM_KEY_HINT = "未配置 DEEPSEEK_API_KEY / DASHSCOPE_API_KEY / ALIYUN_LLM_API_KEY"
+LLM_KEY_HINT = "未配置本地模型或外部 DEEPSEEK_API_KEY / DASHSCOPE_API_KEY / ALIYUN_LLM_API_KEY"
+LLM_ROUTER_CACHE_VERSION = "2026-07-07-hybrid-llm-router-v1"
+LLM_ROUTER_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+LLM_ROUTER_CACHE_LOCK = threading.RLock()
+LLM_ENDPOINT_SEMAPHORES: dict[str, threading.BoundedSemaphore] = {}
+LLM_ENDPOINT_SEMAPHORES_LOCK = threading.RLock()
+LLM_TASK_SEMAPHORES: dict[str, threading.BoundedSemaphore] = {}
+LLM_TASK_SEMAPHORES_LOCK = threading.RLock()
 
 
 def llm_api_key() -> str | None:
-    """Return the configured OpenAI-compatible LLM API key."""
+    """Return the configured external OpenAI-compatible LLM API key."""
     return os.getenv("DEEPSEEK_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or os.getenv("ALIYUN_LLM_API_KEY")
 
 
@@ -43,8 +55,12 @@ def infer_provider(base_url: str, model: str) -> str:
 
 def llm_status() -> dict[str, Any]:
     """返回大模型配置和可用性状态。"""
-    api_key = llm_api_key()
     enabled = os.getenv("ENABLE_LLM_SPLIT", "true").lower() not in {"0", "false", "no", "off"}
+    external = external_llm_status()
+    local = local_llm_status()
+    preferred = local if router_mode() == "local" and local.get("configured") else external
+    if not preferred.get("configured") and local.get("configured"):
+        preferred = local
     if os.getenv("DEEPSEEK_API_KEY"):
         model = os.getenv("DEEPSEEK_MODEL") or os.getenv("LLM_MODEL") or os.getenv("DASHSCOPE_MODEL") or DEFAULT_MODEL
         base_url = os.getenv("DEEPSEEK_BASE_URL") or os.getenv("LLM_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL") or DEFAULT_BASE_URL
@@ -53,11 +69,439 @@ def llm_status() -> dict[str, Any]:
         base_url = os.getenv("DASHSCOPE_BASE_URL") or os.getenv("LLM_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL
     return {
         "enabled": enabled,
+        "configured": bool(local.get("configured") or external.get("configured")),
+        "provider": preferred.get("provider") or infer_provider(base_url, model),
+        "model": preferred.get("model") or model,
+        "baseUrl": preferred.get("baseUrl") or base_url,
+        "routerMode": router_mode(),
+        "local": public_endpoint_status(local),
+        "external": public_endpoint_status(external),
+    }
+
+
+def router_mode() -> str:
+    """Return hybrid routing mode."""
+    mode = os.getenv("LLM_ROUTER_MODE", "external").strip().lower()
+    if mode not in {"hybrid", "local", "external"}:
+        mode = "hybrid"
+    return mode
+
+
+def public_endpoint_status(endpoint: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(endpoint.get("enabled")),
+        "configured": bool(endpoint.get("configured")),
+        "provider": endpoint.get("provider"),
+        "model": endpoint.get("model"),
+        "baseUrl": endpoint.get("baseUrl"),
+        "role": endpoint.get("role"),
+    }
+
+
+def external_llm_status() -> dict[str, Any]:
+    """Return external full-capability model endpoint configuration."""
+    api_key = llm_api_key()
+    if os.getenv("DEEPSEEK_API_KEY"):
+        model = os.getenv("DEEPSEEK_MODEL") or os.getenv("LLM_MODEL") or os.getenv("DASHSCOPE_MODEL") or DEFAULT_MODEL
+        base_url = os.getenv("DEEPSEEK_BASE_URL") or os.getenv("LLM_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL") or DEFAULT_BASE_URL
+    else:
+        model = os.getenv("DASHSCOPE_MODEL") or os.getenv("LLM_MODEL") or os.getenv("DEEPSEEK_MODEL") or DEFAULT_MODEL
+        base_url = os.getenv("DASHSCOPE_BASE_URL") or os.getenv("LLM_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL
+    return {
+        "role": "external",
+        "enabled": bool_env("LLM_EXTERNAL_ENABLED", True),
         "configured": bool(api_key),
+        "apiKey": api_key,
         "provider": infer_provider(base_url, model),
         "model": model,
         "baseUrl": base_url,
     }
+
+
+def local_llm_status() -> dict[str, Any]:
+    """Return server-local OpenAI-compatible model endpoint configuration."""
+    enabled = bool_env("LOCAL_LLM_ENABLED", False)
+    base_url = os.getenv("LOCAL_LLM_BASE_URL", "").strip()
+    model = os.getenv("LOCAL_LLM_MODEL", "aux-qwen3-32b-fp8").strip()
+    api_key = os.getenv("LOCAL_LLM_API_KEY", "EMPTY").strip() or "EMPTY"
+    provider = os.getenv("LOCAL_LLM_PROVIDER", "").strip() or infer_provider(base_url, model)
+    if provider == "openai-compatible":
+        provider = "local-openai-compatible"
+    return {
+        "role": "local",
+        "enabled": enabled,
+        "configured": enabled and bool(base_url) and bool(model),
+        "apiKey": api_key,
+        "provider": provider,
+        "model": model,
+        "baseUrl": base_url,
+    }
+
+
+def llm_json_retry_payload(payload: dict[str, Any], reason: str, required_fields: list[str]) -> dict[str, Any]:
+    """Build a stricter second-attempt payload after malformed JSON/schema output."""
+    retry_payload = {**payload}
+    retry_messages = list(payload.get("messages") or [])
+    fields = "、".join(required_fields)
+    retry_messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"上一轮输出无法被系统接收：{reason}。"
+                f"请只返回一个 JSON 对象，不要 Markdown 代码块、不要解释文字。"
+                f"必须包含字段：{fields}。"
+                "字段没有内容时返回空字符串或空数组，不要省略字段。"
+            ),
+        }
+    )
+    retry_payload["messages"] = retry_messages
+    retry_payload["temperature"] = 0.0
+    return retry_payload
+
+
+def int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    """Read and clamp an integer environment option."""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def bool_env(name: str, default: bool) -> bool:
+    """Read a boolean environment option."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def llm_runtime_options() -> dict[str, Any]:
+    """Return LLM execution controls used by OCR-Flow."""
+    mode = os.getenv("OCR_AUTO_SEMANTIC_REPAIR_MODE", "skip").strip().lower()
+    if mode not in {"skip", "inline", "inline-concurrent"}:
+        mode = "skip"
+    default_max_concurrency = (
+        int_env("LOCAL_LLM_MAX_CONCURRENCY", int_env("LLM_MAX_CONCURRENCY", 1, 1, 8), 1, 16)
+        if local_llm_status().get("configured") and router_mode() in {"hybrid", "local"}
+        else int_env("LLM_MAX_CONCURRENCY", 1, 1, 8)
+    )
+    return {
+        "maxConcurrency": default_max_concurrency,
+        "boundaryMaxConcurrency": int_env("LLM_BOUNDARY_MAX_CONCURRENCY", default_max_concurrency, 1, 8),
+        "standardizeMaxConcurrency": int_env("LLM_STANDARDIZE_MAX_CONCURRENCY", default_max_concurrency, 1, 16),
+        "analysisMaxConcurrency": int_env("LLM_ANALYSIS_MAX_CONCURRENCY", default_max_concurrency, 1, 16),
+        "standardizeMaxAttempts": int_env("LLM_STANDARDIZE_MAX_ATTEMPTS", 2, 1, 3),
+        "analysisMaxAttempts": int_env("LLM_ANALYSIS_MAX_ATTEMPTS", 2, 1, 3),
+        "boundaryChunkSize": int_env("LLM_BOUNDARY_CHUNK_SIZE", 5, 1, 20),
+        "boundaryChunkMaxChars": int_env("LLM_BOUNDARY_CHUNK_MAX_CHARS", 6000, 1000, 30000),
+        "autoSemanticRepairMode": mode,
+        "metricsEnabled": bool_env("LLM_METRICS_ENABLED", True),
+        "routerMode": router_mode(),
+        "externalFallbackEnabled": bool_env("LLM_EXTERNAL_FALLBACK_ENABLED", True),
+        "localMaxConcurrency": int_env("LOCAL_LLM_MAX_CONCURRENCY", 4, 1, 16),
+        "externalMaxConcurrency": int_env("LLM_EXTERNAL_MAX_CONCURRENCY", 1, 1, 4),
+        "cacheEnabled": bool_env("LLM_ROUTER_CACHE_ENABLED", True),
+    }
+
+
+def float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def llm_router_cache_ttl_seconds() -> float:
+    return float_env("LLM_ROUTER_CACHE_TTL_SECONDS", 300.0, 0.0, 86400.0)
+
+
+def llm_cache_key(endpoint: dict[str, Any], task_type: str, payload: dict[str, Any]) -> str:
+    cache_payload = {
+        "version": LLM_ROUTER_CACHE_VERSION,
+        "role": endpoint.get("role"),
+        "baseUrl": endpoint.get("baseUrl"),
+        "model": endpoint.get("model"),
+        "taskType": task_type,
+        "payload": payload,
+    }
+    encoded = json.dumps(cache_payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def cached_llm_response(cache_key: str) -> dict[str, Any] | None:
+    if not bool_env("LLM_ROUTER_CACHE_ENABLED", True):
+        return None
+    ttl = llm_router_cache_ttl_seconds()
+    if ttl <= 0:
+        return None
+    now = time.time()
+    with LLM_ROUTER_CACHE_LOCK:
+        entry = LLM_ROUTER_CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at, data = entry
+        if expires_at <= now:
+            LLM_ROUTER_CACHE.pop(cache_key, None)
+            return None
+        return copy.deepcopy(data)
+
+
+def store_llm_response(cache_key: str, data: dict[str, Any]) -> None:
+    if not bool_env("LLM_ROUTER_CACHE_ENABLED", True):
+        return
+    ttl = llm_router_cache_ttl_seconds()
+    if ttl <= 0:
+        return
+    with LLM_ROUTER_CACHE_LOCK:
+        LLM_ROUTER_CACHE[cache_key] = (time.time() + ttl, copy.deepcopy(data))
+
+
+def endpoint_timeout_seconds(endpoint: dict[str, Any], task_type: str, default_timeout: float) -> float:
+    role = str(endpoint.get("role") or "")
+    if role == "local":
+        task_key = task_type.upper().replace("-", "_")
+        raw = os.getenv(f"LOCAL_LLM_{task_key}_TIMEOUT_SECONDS") or os.getenv("LOCAL_LLM_TIMEOUT_SECONDS")
+        if raw:
+            try:
+                return max(1.0, float(raw))
+            except (TypeError, ValueError):
+                pass
+        return min(float(default_timeout), float_env("LOCAL_LLM_DEFAULT_TIMEOUT_SECONDS", 45.0, 1.0, 300.0))
+    return float(default_timeout)
+
+
+def endpoint_semaphore(endpoint: dict[str, Any]) -> threading.BoundedSemaphore:
+    role = str(endpoint.get("role") or "external")
+    limit = int_env("LOCAL_LLM_MAX_CONCURRENCY", 4, 1, 16) if role == "local" else int_env("LLM_EXTERNAL_MAX_CONCURRENCY", 1, 1, 4)
+    key = f"{role}:{limit}"
+    with LLM_ENDPOINT_SEMAPHORES_LOCK:
+        semaphore = LLM_ENDPOINT_SEMAPHORES.get(key)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(limit)
+            LLM_ENDPOINT_SEMAPHORES[key] = semaphore
+        return semaphore
+
+
+def task_semaphore(task_type: str) -> threading.BoundedSemaphore:
+    """Bound concurrent synchronous AI calls by task family."""
+    if task_type == "standardize":
+        limit = int_env("LLM_STANDARDIZE_MAX_CONCURRENCY", llm_runtime_options()["maxConcurrency"], 1, 16)
+    elif task_type in {"analysis", "analysis-generate"}:
+        limit = int_env("LLM_ANALYSIS_MAX_CONCURRENCY", llm_runtime_options()["maxConcurrency"], 1, 16)
+    else:
+        limit = llm_runtime_options()["maxConcurrency"]
+    key = f"{task_type}:{limit}"
+    with LLM_TASK_SEMAPHORES_LOCK:
+        semaphore = LLM_TASK_SEMAPHORES.get(key)
+        if semaphore is None:
+            semaphore = threading.BoundedSemaphore(limit)
+            LLM_TASK_SEMAPHORES[key] = semaphore
+        return semaphore
+
+
+def llm_risk_score(task_type: str, context: dict[str, Any] | None = None) -> float:
+    """Score escalation risk from existing OCR evidence; 1.0 means use external directly."""
+    context = context or {}
+    reasons = normalize_string_list(context.get("reasons"))
+    if context.get("forceExternal"):
+        return 1.0
+    try:
+        markdown_chars = int(context.get("markdownChars") or 0)
+    except (TypeError, ValueError):
+        markdown_chars = 0
+    local_safe_chars = int_env("LOCAL_LLM_SAFE_INPUT_CHARS", 6000, 1000, 50000)
+    score = 0.25
+    if task_type in {"boundary-refine", "sub-question-split"}:
+        if markdown_chars > local_safe_chars:
+            score = max(score, 0.97)
+        if context.get("highConfidence"):
+            score = 0.15
+        if "no-question-boundaries" in reasons or "invalid-question-range" in reasons:
+            score = max(score, 0.96)
+        if "unstable-choice-options" in reasons:
+            score = max(score, 0.72)
+        if "question-number-gap" in reasons:
+            score = max(score, 0.68)
+        if "unknown-image-path" in reasons:
+            score = max(score, 0.62)
+        try:
+            if int(context.get("questionCount") or 0) == 0:
+                score = max(score, 0.96)
+        except (TypeError, ValueError):
+            pass
+    if task_type == "standardize":
+        markdown = str(context.get("markdown") or "")
+        if len(markdown) > local_safe_chars:
+            score = max(score, 0.97)
+        hints = context.get("structuredHints") if isinstance(context.get("structuredHints"), dict) else {}
+        question_type = str(hints.get("type") or "").strip()
+        if len(markdown) > int_env("LLM_ROUTER_LONG_MARKDOWN_CHARS", 6000, 1000, 50000):
+            score = max(score, 0.74)
+        if re.search(r"[（(]\s*\d+\s*[）)]|[①②③④⑤⑥⑦⑧⑨⑩]", markdown):
+            score = max(score, 0.58)
+        if re.search(r"【?(?:答案|解析|解答|参考答案|故答案为)】?", markdown):
+            score = max(score, 0.64)
+        if question_type == "fill_blank" and not re.search(r"_{2,}|____|（\s*）|\(\s*\)|填空", markdown):
+            score = max(score, 0.68)
+        if hints.get("subQuestions"):
+            score = max(score, 0.55)
+    return min(1.0, max(0.0, score))
+
+
+def route_llm_endpoints(
+    task_type: str,
+    risk_context: dict[str, Any] | None = None,
+    force_external: bool = False,
+) -> list[dict[str, Any]]:
+    """Route OCR-flow LLM work to local-first or external fallback endpoints."""
+    status = llm_status()
+    if not status["enabled"]:
+        return []
+    mode = router_mode()
+    local = local_llm_status()
+    external = external_llm_status()
+    local_first_tasks = {"sub-question-split", "standardize", "semantic-repair", "render-validation-repair"}
+    external_first_risk = float_env("LLM_ROUTER_EXTERNAL_FIRST_RISK_THRESHOLD", 0.92, 0.0, 1.0)
+    risk = llm_risk_score(task_type, risk_context)
+    fallback_enabled = bool_env("LLM_EXTERNAL_FALLBACK_ENABLED", True)
+
+    endpoints: list[dict[str, Any]] = []
+    if force_external or mode == "external" or risk >= external_first_risk:
+        if external.get("enabled") and external.get("configured"):
+            endpoints.append({**external, "riskScore": risk, "routeReason": "external-forced-or-high-risk"})
+        elif local.get("enabled") and local.get("configured"):
+            endpoints.append({**local, "riskScore": risk, "routeReason": "external-unavailable-local-fallback"})
+        return endpoints
+
+    if mode in {"hybrid", "local"} and task_type in local_first_tasks and local.get("enabled") and local.get("configured"):
+        endpoints.append({**local, "riskScore": risk, "routeReason": "local-first"})
+        if mode == "hybrid" and fallback_enabled and external.get("enabled") and external.get("configured"):
+            endpoints.append({**external, "riskScore": risk, "routeReason": "external-fallback"})
+        return endpoints
+
+    if external.get("enabled") and external.get("configured"):
+        endpoints.append({**external, "riskScore": risk, "routeReason": "external-default"})
+    elif local.get("enabled") and local.get("configured"):
+        endpoints.append({**local, "riskScore": risk, "routeReason": "local-only"})
+    return endpoints
+
+
+def post_llm_json_for_endpoint(
+    endpoint: dict[str, Any],
+    payload: dict[str, Any],
+    timeout_seconds: float,
+    task_type: str,
+) -> tuple[dict[str, Any], bool]:
+    """Post one routed OpenAI-compatible call and return decoded response JSON."""
+    api_key = str(endpoint.get("apiKey") or "EMPTY")
+    routed_payload = {**payload, "model": endpoint.get("model") or payload.get("model")}
+    if endpoint.get("role") == "local" and bool_env("LOCAL_LLM_DISABLE_THINKING", True):
+        chat_template_kwargs = dict(routed_payload.get("chat_template_kwargs") or {})
+        chat_template_kwargs.setdefault("enable_thinking", False)
+        routed_payload["chat_template_kwargs"] = chat_template_kwargs
+    cache_key = llm_cache_key(endpoint, task_type, routed_payload)
+    cached = cached_llm_response(cache_key)
+    if cached is not None:
+        return cached, True
+
+    url = f"{str(endpoint.get('baseUrl') or '').rstrip('/')}/chat/completions"
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"LLM endpoint baseUrl 无效：{endpoint.get('baseUrl')}")
+    with endpoint_semaphore(endpoint):
+        response = post_llm_json_with_deadline(
+            url,
+            api_key,
+            routed_payload,
+            endpoint_timeout_seconds(endpoint, task_type, timeout_seconds),
+        )
+    response.raise_for_status()
+    data = response.json()
+    store_llm_response(cache_key, data)
+    return data, False
+
+
+def post_llm_json_with_deadline(
+    url: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout_seconds: float,
+) -> httpx.Response:
+    """POST to an OpenAI-compatible endpoint with a hard total deadline.
+
+    httpx read timeouts are not a total request deadline: a slow model can keep
+    sending tokens and hold OCR-Flow forever. The outer future deadline forces
+    boundary confirmation to fail fast and lets the caller fall back to local
+    boundaries.
+    """
+    deadline = max(1.0, float(timeout_seconds))
+    io_timeout = httpx.Timeout(
+        timeout=deadline,
+        connect=min(10.0, deadline),
+        read=min(30.0, deadline),
+        write=min(10.0, deadline),
+        pool=min(10.0, deadline),
+    )
+
+    def send() -> httpx.Response:
+        with httpx.Client(timeout=io_timeout) as client:
+            return client.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(send)
+    try:
+        return future.result(timeout=deadline)
+    except FutureTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(f"LLM request exceeded total deadline {int(deadline)}s") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def llm_call_metadata(
+    call_type: str,
+    started_at: float,
+    status: str,
+    error: str | None = None,
+    chunk_index: int | None = None,
+    item_count: int | None = None,
+    retry_count: int | None = None,
+    endpoint: dict[str, Any] | None = None,
+    cache_hit: bool | None = None,
+) -> dict[str, Any]:
+    """Build sanitized timing metadata for one LLM call."""
+    llm = endpoint or llm_status()
+    duration_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+    sanitized_error = None
+    if error is not None:
+        sanitized_error = re.sub(r"\s+", " ", str(error)).strip()
+        if len(sanitized_error) > 300:
+            sanitized_error = f"{sanitized_error[:297]}..."
+    metadata = {
+        "callType": call_type,
+        "status": status,
+        "provider": llm["provider"],
+        "model": llm["model"],
+        "route": llm.get("role"),
+        "routeReason": llm.get("routeReason"),
+        "riskScore": llm.get("riskScore"),
+        "durationMs": duration_ms,
+        "error": sanitized_error,
+    }
+    if chunk_index is not None:
+        metadata["chunkIndex"] = chunk_index
+    if item_count is not None:
+        metadata["itemCount"] = item_count
+    if retry_count is not None:
+        metadata["retryCount"] = retry_count
+    if cache_hit is not None:
+        metadata["cacheHit"] = cache_hit
+    return metadata
 
 
 def rule_splitter_metadata(reason: str | None = None) -> dict[str, Any]:
@@ -68,6 +512,7 @@ def rule_splitter_metadata(reason: str | None = None) -> dict[str, Any]:
         "model": None,
         "fallback": reason is not None,
         "error": reason,
+        "llmCalls": [],
     }
 
 
@@ -80,6 +525,20 @@ def llm_splitter_metadata() -> dict[str, Any]:
         "model": status["model"],
         "fallback": False,
         "error": None,
+    }
+
+
+def boundary_refinement_skipped_metadata(confidence: dict[str, Any]) -> dict[str, Any]:
+    """Build metadata for local-boundary high-confidence skips."""
+    return {
+        "source": "local-boundary",
+        "provider": None,
+        "model": None,
+        "fallback": False,
+        "error": None,
+        "reason": "local-high-confidence" if confidence.get("highConfidence") else "llm-boundary-not-required",
+        "confidence": confidence,
+        "llmCalls": [],
     }
 
 
@@ -106,13 +565,8 @@ def refine_questions_with_llm(
     url = f"{str(status['baseUrl']).rstrip('/')}/chat/completions"
 
     try:
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-            )
-            response.raise_for_status()
+        response = post_llm_json_with_deadline(url, api_key, payload, timeout_seconds)
+        response.raise_for_status()
         data = response.json()
         content = data["choices"][0]["message"]["content"]
         parsed = extract_json_object(content)
@@ -126,6 +580,8 @@ def refine_question_boundaries_with_llm(
     markdown: str,
     assets: list[dict[str, Any]],
     local_boundaries: dict[str, Any],
+    risk_context: dict[str, Any] | None = None,
+    force_external: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Ask the LLM to confirm boundaries only, never to generate question text."""
     status = llm_status()
@@ -136,37 +592,208 @@ def refine_question_boundaries_with_llm(
     if not markdown.strip():
         return None, rule_splitter_metadata("OCR Markdown 为空，已使用本地边界候选")
 
-    api_key = llm_api_key()
-    assert api_key is not None
-
     max_chars = int(os.getenv("LLM_BOUNDARY_MAX_CHARS", "30000"))
     timeout_seconds = float(os.getenv("LLM_BOUNDARY_TIMEOUT_SECONDS", "90"))
     boundary_markdown = markdown[:max_chars]
     payload = build_boundary_payload(boundary_markdown, assets, local_boundaries, status["model"])
-    url = f"{str(status['baseUrl']).rstrip('/')}/chat/completions"
+    item_count = len(local_boundaries.get("questions") or [])
+    routed_context = {
+        **(risk_context or {}),
+        "markdownChars": len(boundary_markdown),
+        "itemCount": item_count,
+    }
+    endpoints = route_llm_endpoints("boundary-refine", routed_context, force_external=force_external)
+    if not endpoints:
+        return None, rule_splitter_metadata(f"{LLM_KEY_HINT}，已使用本地边界候选")
 
-    try:
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
-            )
-            response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        parsed = extract_json_object(content)
-        parsed = preserve_local_boundaries_after_truncation(parsed, local_boundaries, max_chars, len(markdown))
-        return parsed, {
-            "source": "llm-boundary",
-            "provider": status["provider"],
-            "model": status["model"],
-            "fallback": False,
-            "error": None,
-            "warnings": normalize_string_list(parsed.get("warnings")),
-        }
-    except Exception as exc:
-        return None, rule_splitter_metadata(f"LLM 边界确认失败，已回退本地边界候选：{exc}")
+    calls: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for endpoint in endpoints:
+        started = time.perf_counter()
+        try:
+            data, cache_hit = post_llm_json_for_endpoint(endpoint, payload, timeout_seconds, "boundary-refine")
+            content = data["choices"][0]["message"]["content"]
+            parsed = extract_json_object(content)
+            parsed = preserve_local_boundaries_after_truncation(parsed, local_boundaries, max_chars, len(markdown))
+            calls.append(llm_call_metadata("boundary-refine", started, "success", item_count=item_count, endpoint=endpoint, cache_hit=cache_hit))
+            return parsed, {
+                "source": "llm-boundary",
+                "provider": endpoint["provider"],
+                "model": endpoint["model"],
+                "route": endpoint.get("role"),
+                "riskScore": endpoint.get("riskScore"),
+                "fallback": False,
+                "error": None,
+                "warnings": normalize_string_list(parsed.get("warnings")),
+                "llmCalls": calls,
+            }
+        except Exception as exc:
+            errors.append(f"{endpoint.get('role') or endpoint.get('provider')}: {exc}")
+            calls.append(llm_call_metadata("boundary-refine", started, "failed", error=str(exc), item_count=item_count, endpoint=endpoint))
+            continue
+
+    metadata = rule_splitter_metadata(f"LLM 边界确认失败，已回退本地边界候选：{'; '.join(errors)}")
+    metadata["llmCalls"] = calls
+    return None, metadata
+
+
+def offset_boundary_ranges(value: Any, delta: int) -> Any:
+    """Return a copy with boundary offsets shifted by delta."""
+    if isinstance(value, list):
+        return [offset_boundary_ranges(item, delta) for item in value]
+    if not isinstance(value, dict):
+        return value
+    shifted: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in {"start", "end", "contentStart"} and isinstance(item, int):
+            shifted[key] = item + delta
+        else:
+            shifted[key] = offset_boundary_ranges(item, delta)
+    return shifted
+
+
+def merge_boundary_chunk_results(local_boundaries: dict[str, Any], chunk_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge chunked LLM boundary results, falling back per chunk."""
+    sections_by_id: dict[str, dict[str, Any]] = {}
+    questions: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    for section in local_boundaries.get("sections") or []:
+        if isinstance(section, dict):
+            sections_by_id[str(section.get("id") or len(sections_by_id))] = section
+
+    for chunk in sorted(chunk_results, key=lambda item: int(item.get("index") or 0)):
+        result = chunk.get("result") if isinstance(chunk.get("result"), dict) else chunk.get("localBoundaries")
+        if not isinstance(result, dict):
+            continue
+        for section in result.get("sections") or []:
+            if isinstance(section, dict):
+                sections_by_id[str(section.get("id") or len(sections_by_id))] = section
+        for question in result.get("questions") or []:
+            if isinstance(question, dict):
+                questions.append(question)
+        if chunk.get("error"):
+            warnings.append(f"chunk {chunk.get('index')} fallback: {chunk.get('error')}")
+        warnings.extend(normalize_string_list(result.get("warnings")))
+
+    deduped_questions: list[dict[str, Any]] = []
+    seen_starts: set[int] = set()
+    for question in sorted(questions, key=lambda item: int(item.get("start") or 0)):
+        start = question.get("start")
+        if isinstance(start, int) and start in seen_starts:
+            continue
+        if isinstance(start, int):
+            seen_starts.add(start)
+        deduped_questions.append(question)
+
+    return {
+        "source": "llm-boundary-chunked",
+        "sections": list(sections_by_id.values()),
+        "questions": deduped_questions,
+        "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
+def refine_boundary_chunk_with_llm(
+    chunk: dict[str, Any],
+    assets: list[dict[str, Any]],
+    risk_context: dict[str, Any] | None = None,
+    force_external: bool = False,
+) -> dict[str, Any]:
+    """Refine one chunk and map model offsets back to full-document offsets."""
+    chunk_start = int(chunk.get("start") or 0)
+    local_boundaries = chunk.get("localBoundaries") if isinstance(chunk.get("localBoundaries"), dict) else {}
+    prompt_boundaries = offset_boundary_ranges(local_boundaries, -chunk_start)
+    result, metadata = refine_question_boundaries_with_llm(
+        str(chunk.get("markdown") or ""),
+        assets,
+        prompt_boundaries,
+        risk_context=risk_context,
+        force_external=force_external,
+    )
+    restored = offset_boundary_ranges(result, chunk_start) if result else None
+    return {
+        **chunk,
+        "result": restored,
+        "error": metadata.get("error") if isinstance(metadata, dict) else None,
+        "metadata": metadata,
+    }
+
+
+def refine_question_boundaries_in_chunks(
+    chunks: list[dict[str, Any]],
+    assets: list[dict[str, Any]],
+    local_boundaries: dict[str, Any],
+    risk_context: dict[str, Any] | None = None,
+    force_external: bool = False,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Run boundary refinement on planned chunks with bounded concurrency."""
+    options = llm_runtime_options()
+    if not chunks:
+        return None, rule_splitter_metadata("没有可用于 AI 边界确认的题目分片")
+
+    calls: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+
+    def chunk_call_metadata(metadata: dict[str, Any], chunk: dict[str, Any]) -> list[dict[str, Any]]:
+        question_count = len((chunk.get("localBoundaries") or {}).get("questions") or [])
+        result: list[dict[str, Any]] = []
+        for call in metadata.get("llmCalls") or []:
+            if isinstance(call, dict):
+                result.append({**call, "chunkIndex": chunk.get("index"), "itemCount": call.get("itemCount", question_count)})
+        return result
+
+    boundary_max_concurrency = int(options.get("boundaryMaxConcurrency") or options["maxConcurrency"])
+    if len(chunks) <= 1 or boundary_max_concurrency <= 1:
+        for chunk in chunks:
+            result = refine_boundary_chunk_with_llm(chunk, assets, risk_context=risk_context, force_external=force_external)
+            metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+            calls.extend(chunk_call_metadata(metadata, chunk))
+            results.append(result)
+    else:
+        with ThreadPoolExecutor(max_workers=boundary_max_concurrency) as executor:
+            futures = {
+                executor.submit(refine_boundary_chunk_with_llm, chunk, assets, risk_context, force_external): chunk
+                for chunk in chunks
+            }
+            for future in as_completed(futures):
+                chunk = futures[future]
+                try:
+                    result = future.result()
+                    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+                    calls.extend(chunk_call_metadata(metadata, chunk))
+                    results.append(result)
+                except Exception as exc:
+                    calls.append(
+                        {
+                            "callType": "boundary-refine",
+                            "status": "failed",
+                            "provider": llm_status()["provider"],
+                            "model": llm_status()["model"],
+                            "durationMs": 0,
+                            "error": re.sub(r"\s+", " ", str(exc)).strip()[:300],
+                            "chunkIndex": chunk.get("index"),
+                            "itemCount": len((chunk.get("localBoundaries") or {}).get("questions") or []),
+                        }
+                    )
+                    results.append({**chunk, "result": None, "error": str(exc)})
+
+    merged = merge_boundary_chunk_results(local_boundaries, results)
+    status = llm_status()
+    routed_calls = [call for call in calls if isinstance(call, dict)]
+    last_success = next((call for call in reversed(routed_calls) if call.get("status") == "success"), None)
+    return merged, {
+        "source": "llm-boundary-chunked",
+        "provider": (last_success or status).get("provider"),
+        "model": (last_success or status).get("model"),
+        "route": (last_success or {}).get("route"),
+        "fallback": False,
+        "error": None,
+        "llmCalls": calls,
+        "chunkCount": len(chunks),
+        "maxConcurrency": boundary_max_concurrency,
+        "warnings": normalize_string_list(merged.get("warnings")),
+    }
 
 
 def standardize_markdown_with_llm(
@@ -183,11 +810,7 @@ def standardize_markdown_with_llm(
     if not markdown.strip():
         return "", {"source": "ai", "provider": status["provider"], "model": status["model"], "error": None}
 
-    api_key = llm_api_key()
-    assert api_key is not None
-
     timeout_seconds = float(os.getenv("LLM_STANDARDIZE_TIMEOUT_SECONDS", "60"))
-    url = f"{str(status['baseUrl']).rstrip('/')}/chat/completions"
     payload = {
         "model": status["model"],
         "temperature": 0.0,
@@ -202,6 +825,8 @@ def standardize_markdown_with_llm(
                     "如果 currentMarkdown 或 rawOcrContext 明显把本题答案、解析、参考答案、解答过程扫进题干，"
                     "需要把这些内容从 markdown 中移除，并分别返回 answer、analysis；"
                     "如果题目包含（1）（2）等小问，或 structuredHints.subQuestions 非空，必须把答案和解析按小问归属到 subQuestions；"
+                    "即使没有答案和解析，只要 currentMarkdown 明显包含小问结构，也必须返回 subQuestions[].label 和 subQuestions[].stemMarkdown，"
+                    "并让 markdown 只保留大题共用材料/父题题干，不要把小问题干继续混在父题 markdown 中。"
                     "此时父题 answer、analysis 返回空字符串，小问对象返回 id、label、answer、analysis，可选返回 stemMarkdown。"
                     "返回的 markdown 必须只包含题干、选项和必要题图引用，不能再包含【答案】、【解析】、【解答】、故答案为、解答过程等内容；"
                     "答案和解析一旦抽取，只能放在 answer、analysis 字段中，不得重复留在 markdown 字段里。"
@@ -210,6 +835,8 @@ def standardize_markdown_with_llm(
                     "不要把普通不等式、方程或短公式改写成 array/cases/aligned 等复杂环境，除非原文已经明确使用了该结构。"
                     "不要把题目整体包进 \\left、\\right、\\begin{array} 或其它大结构。"
                     "保留原有换行、题号、选项和 LaTeX tasks 环境；已有 tasks 环境只修正拼写和公式，不改变选项含义。"
+                    "选择题的选项结构优先级高于题干格式修复：不得删除、合并、重排 A/B/C/D 选项；"
+                    "图片选项必须保留为原有 `![](图N)` 引用，禁止把图片选项并入题干或替换成文字描述。"
                     "没有 tasks 时不要主动新增 tasks；只有 structuredHints.type 明确为 choice，且原文已有 A/B/C/D 等清晰选项边界时，"
                     "才可最小化整理为标准 LaTeX tasks 环境：\\begin{tasks}(4) ... \\task 选项 ... \\end{tasks}。"
                     "禁止输出 \\begin{ttasks}、\\end{ttasks} 或其它拼写错误。"
@@ -266,40 +893,73 @@ def standardize_markdown_with_llm(
         ],
     }
 
-    try:
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
+    last_error: Exception | None = None
+    calls: list[dict[str, Any]] = []
+    attempt_payload = payload
+    max_attempts = int_env("LLM_STANDARDIZE_MAX_ATTEMPTS", 2, 1, 3)
+    with task_semaphore("standardize"):
+        for attempt in range(max_attempts):
+            endpoints = route_llm_endpoints(
+                "standardize",
+                {
+                    "markdown": markdown,
+                    "rawOcrContext": raw_ocr_context,
+                    "structuredHints": structured_hints or {},
+                },
             )
-            response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        parsed = extract_json_object(content)
-        standardized = str(parsed.get("markdown") or "").strip()
-        if not standardized:
-            raise ValueError("模型未返回 markdown 字段")
-        return standardized, {
-            "source": "ai",
-            "provider": status["provider"],
-            "model": status["model"],
-            "error": None,
-            "answer": str(parsed.get("answer") or parsed.get("suggestedAnswer") or "").strip(),
-            "analysis": str(parsed.get("analysis") or parsed.get("explanation") or "").strip(),
-            "subQuestions": normalize_solution_sub_questions(parsed.get("subQuestions") or parsed.get("children")),
-            "corrections": normalize_corrections(parsed.get("corrections")),
-            "warnings": normalize_string_list(parsed.get("warnings")),
-            "confidence": str(parsed.get("confidence") or "unknown"),
-        }
-    except Exception as exc:
-        return None, {
-            "source": "ai",
-            "provider": status["provider"],
-            "model": status["model"],
-            "error": str(exc),
-            "imageCount": 0,
-        }
+            for endpoint in endpoints:
+                started = time.perf_counter()
+                try:
+                    data, cache_hit = post_llm_json_for_endpoint(endpoint, attempt_payload, timeout_seconds, "standardize")
+                    content = data["choices"][0]["message"]["content"]
+                    parsed = extract_json_object(content)
+                    standardized = str(parsed.get("markdown") or "").strip()
+                    if not standardized:
+                        raise ValueError("模型未返回 markdown 字段")
+                    success_call = llm_call_metadata("standardize", started, "success", retry_count=attempt, endpoint=endpoint, cache_hit=cache_hit)
+                    calls.append(success_call)
+                    return standardized, {
+                        "source": "ai",
+                        "provider": endpoint["provider"],
+                        "model": endpoint["model"],
+                        "route": endpoint.get("role"),
+                        "riskScore": endpoint.get("riskScore"),
+                        "error": None,
+                        "answer": str(parsed.get("answer") or parsed.get("suggestedAnswer") or "").strip(),
+                        "analysis": str(parsed.get("analysis") or parsed.get("explanation") or "").strip(),
+                        "subQuestions": normalize_solution_sub_questions(parsed.get("subQuestions") or parsed.get("children")),
+                        "corrections": normalize_corrections(parsed.get("corrections")),
+                        "warnings": normalize_string_list(parsed.get("warnings")),
+                        "confidence": str(parsed.get("confidence") or "unknown"),
+                        "llmCall": success_call,
+                        "llmCalls": calls,
+                    }
+                except Exception as exc:
+                    last_error = exc
+                    calls.append(llm_call_metadata("standardize", started, "failed", error=str(exc), retry_count=attempt, endpoint=endpoint))
+                    continue
+            if attempt < max_attempts - 1:
+                attempt_payload = llm_json_retry_payload(
+                    payload,
+                    str(last_error or "模型返回不符合 schema"),
+                    ["markdown", "answer", "analysis", "subQuestions", "corrections", "warnings", "confidence"],
+                )
+                continue
+            break
+
+    error = str(last_error or "AI 标准化失败")
+    return None, {
+        "source": "ai",
+        "provider": status["provider"],
+        "model": status["model"],
+        "error": error,
+        "fallbackUsed": True,
+        "retryable": True,
+        "retryAfterSeconds": int_env("LLM_STANDARDIZE_RETRY_AFTER_SECONDS", 10, 1, 300),
+        "imageCount": 0,
+        "llmCall": calls[-1] if calls else llm_call_metadata("standardize", time.perf_counter(), "failed", error=error, retry_count=max_attempts - 1),
+        "llmCalls": calls,
+    }
 
 
 def analysis_image_urls(images: list[dict[str, Any]]) -> list[str]:
@@ -357,11 +1017,7 @@ def generate_question_analysis_with_llm(
     if not stem_markdown.strip():
         return None, {"source": "ai", "provider": status["provider"], "model": status["model"], "error": "题干为空，无法生成解析"}
 
-    api_key = llm_api_key()
-    assert api_key is not None
-
     timeout_seconds = float(os.getenv("LLM_ANALYSIS_TIMEOUT_SECONDS", "75"))
-    url = f"{str(status['baseUrl']).rstrip('/')}/chat/completions"
     image_urls = analysis_image_urls(images or [])
     sub_question_hints = compact_sub_questions(sub_questions or [])
     user_text = json.dumps(
@@ -422,70 +1078,117 @@ def generate_question_analysis_with_llm(
             },
         ],
     }
+    started = time.perf_counter()
 
-    try:
-        with httpx.Client(timeout=timeout_seconds) as client:
-            response = client.post(
-                url,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload,
+    last_error: Exception | None = None
+    last_warnings: list[str] = []
+    last_sub_questions: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
+    attempt_payload = payload
+    max_attempts = int_env("LLM_ANALYSIS_MAX_ATTEMPTS", 2, 1, 3)
+    with task_semaphore("analysis-generate"):
+        for attempt in range(max_attempts):
+            endpoints = route_llm_endpoints(
+                "analysis-generate",
+                {
+                    "markdown": stem_markdown,
+                    "markdownChars": len(stem_markdown),
+                    "questionType": question_type,
+                    "imageCount": len(image_urls),
+                    "subQuestionCount": len(sub_question_hints),
+                },
             )
-            response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        parsed = extract_json_object(content)
-        raw_analysis = (
-            parsed.get("analysis")
-            or parsed.get("解析")
-            or parsed.get("solution")
-            or parsed.get("explanation")
-        )
-        if not raw_analysis and isinstance(parsed.get("steps"), list):
-            raw_analysis = "\n\n".join(str(step) for step in parsed["steps"] if str(step).strip())
-        analysis = str(raw_analysis or "").strip()
-        solution_sub_questions = normalize_solution_sub_questions(parsed.get("subQuestions") or parsed.get("children"))
-        if sub_question_hints and not solution_sub_questions:
-            warnings = normalize_string_list(parsed.get("warnings"))
-            return None, {
-                "source": "ai",
-                "provider": status["provider"],
-                "model": status["model"],
-                "error": warnings[0] if warnings else "模型未返回 subQuestions 小问解析字段",
-                "warnings": warnings,
-                "confidence": str(parsed.get("confidence") or "unknown"),
-                "imageCount": len(image_urls),
-                "subQuestions": [],
-            }
-        has_sub_question_analysis = any(str(item.get("analysis") or "").strip() for item in solution_sub_questions)
-        if not analysis and not has_sub_question_analysis:
-            warnings = normalize_string_list(parsed.get("warnings"))
-            return None, {
-                "source": "ai",
-                "provider": status["provider"],
-                "model": status["model"],
-                "error": warnings[0] if warnings else "模型未返回 analysis 字段",
-                "warnings": warnings,
-                "confidence": str(parsed.get("confidence") or "unknown"),
-                "imageCount": len(image_urls),
-                "subQuestions": solution_sub_questions,
-            }
-        answer_text = str(parsed.get("answer") or "").strip()
-        if solution_sub_questions:
-            analysis = ""
-            answer_text = ""
-        return analysis, {
-            "source": "ai",
-            "provider": status["provider"],
-            "model": status["model"],
-            "error": None,
-            "answer": answer_text,
-            "subQuestions": solution_sub_questions,
-            "warnings": normalize_string_list(parsed.get("warnings")),
-            "confidence": str(parsed.get("confidence") or "unknown"),
-            "imageCount": len(image_urls),
-        }
-    except Exception as exc:
-        return None, {"source": "ai", "provider": status["provider"], "model": status["model"], "error": str(exc)}
+            for endpoint in endpoints:
+                call_started = time.perf_counter()
+                try:
+                    data, cache_hit = post_llm_json_for_endpoint(endpoint, attempt_payload, timeout_seconds, "analysis-generate")
+                    content = data["choices"][0]["message"]["content"]
+                    parsed = extract_json_object(content)
+                    raw_analysis = (
+                        parsed.get("analysis")
+                        or parsed.get("解析")
+                        or parsed.get("solution")
+                        or parsed.get("explanation")
+                    )
+                    if not raw_analysis and isinstance(parsed.get("steps"), list):
+                        raw_analysis = "\n\n".join(str(step) for step in parsed["steps"] if str(step).strip())
+                    analysis = str(raw_analysis or "").strip()
+                    solution_sub_questions = normalize_solution_sub_questions(parsed.get("subQuestions") or parsed.get("children"))
+                    warnings = normalize_string_list(parsed.get("warnings"))
+                    last_warnings = warnings
+                    last_sub_questions = solution_sub_questions
+                    if sub_question_hints and not solution_sub_questions:
+                        raise ValueError(warnings[0] if warnings else "模型未返回 subQuestions 小问解析字段")
+                    has_sub_question_analysis = any(str(item.get("analysis") or "").strip() for item in solution_sub_questions)
+                    if not analysis and not has_sub_question_analysis:
+                        raise ValueError(warnings[0] if warnings else "模型未返回 analysis 字段")
+                    answer_text = str(parsed.get("answer") or "").strip()
+                    if solution_sub_questions:
+                        analysis = ""
+                        answer_text = ""
+                    success_call = llm_call_metadata(
+                        "analysis-generate",
+                        call_started,
+                        "success",
+                        item_count=1,
+                        retry_count=attempt,
+                        endpoint=endpoint,
+                        cache_hit=cache_hit,
+                    )
+                    calls.append(success_call)
+                    return analysis, {
+                        "source": "ai",
+                        "provider": endpoint["provider"],
+                        "model": endpoint["model"],
+                        "route": endpoint.get("role"),
+                        "riskScore": endpoint.get("riskScore"),
+                        "error": None,
+                        "answer": answer_text,
+                        "subQuestions": solution_sub_questions,
+                        "warnings": warnings,
+                        "confidence": str(parsed.get("confidence") or "unknown"),
+                        "imageCount": len(image_urls),
+                        "llmCall": success_call,
+                        "llmCalls": calls,
+                    }
+                except Exception as exc:
+                    last_error = exc
+                    calls.append(
+                        llm_call_metadata(
+                            "analysis-generate",
+                            call_started,
+                            "failed",
+                            error=str(exc),
+                            item_count=1,
+                            retry_count=attempt,
+                            endpoint=endpoint,
+                        )
+                    )
+                    continue
+            if attempt < max_attempts - 1:
+                required_fields = ["analysis", "answer", "subQuestions", "warnings", "confidence"]
+                attempt_payload = llm_json_retry_payload(payload, str(last_error or "模型返回不符合 schema"), required_fields)
+                continue
+            break
+
+    error = str(last_error or "AI 解析失败")
+    fallback_warning = f"AI 解析暂时不可用：{error}。已保留当前题目内容，可稍后重试或人工填写解析。"
+    return "", {
+        "source": "ai",
+        "provider": status["provider"],
+        "model": status["model"],
+        "error": error,
+        "fallbackUsed": True,
+        "retryable": True,
+        "retryAfterSeconds": int_env("LLM_ANALYSIS_RETRY_AFTER_SECONDS", 10, 1, 300),
+        "warnings": [fallback_warning, *last_warnings],
+        "confidence": "unknown",
+        "imageCount": len(image_urls),
+        "subQuestions": last_sub_questions,
+        "answer": "",
+        "llmCall": calls[-1] if calls else llm_call_metadata("analysis-generate", started, "failed", error=error, item_count=1, retry_count=max_attempts - 1),
+        "llmCalls": calls,
+    }
 
 
 def enrich_questions_metadata_with_llm(
@@ -588,6 +1291,7 @@ def enrich_questions_metadata_with_llm(
             },
         ],
     }
+    started = time.perf_counter()
 
     try:
         with httpx.Client(timeout=timeout_seconds) as client:
@@ -608,9 +1312,21 @@ def enrich_questions_metadata_with_llm(
             if not question_id:
                 continue
             result[question_id] = normalize_enriched_question(item)
-        return result, {"source": "ai", "provider": status["provider"], "model": status["model"], "error": None}
+        return result, {
+            "source": "ai",
+            "provider": status["provider"],
+            "model": status["model"],
+            "error": None,
+            "llmCall": llm_call_metadata("metadata-enrich", started, "success", item_count=len(compact_questions)),
+        }
     except Exception as exc:
-        return {}, {"source": "rule", "provider": status["provider"], "model": status["model"], "error": f"AI 题目元数据补全失败，已使用本地默认值：{exc}"}
+        return {}, {
+            "source": "rule",
+            "provider": status["provider"],
+            "model": status["model"],
+            "error": f"AI 题目元数据补全失败，已使用本地默认值：{exc}",
+            "llmCall": llm_call_metadata("metadata-enrich", started, "failed", error=str(exc), item_count=len(compact_questions)),
+        }
 
 
 def normalize_enriched_question(item: dict[str, Any], require_evidence: bool = True) -> dict[str, Any]:
@@ -961,6 +1677,7 @@ def build_boundary_payload(
     return {
         "model": model,
         "temperature": 0.0,
+        "max_tokens": int_env("LLM_BOUNDARY_MAX_TOKENS", 4096, 512, 16000),
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -975,13 +1692,25 @@ def extract_json_object(content: str) -> dict[str, Any]:
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.S)
     if fenced:
         cleaned = fenced.group(1)
-    if not cleaned.startswith("{"):
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("模型未返回 JSON 对象")
-        cleaned = cleaned[start : end + 1]
-    parsed = json.loads(cleaned)
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", cleaned).strip()
+    decoder = json.JSONDecoder()
+    parsed: Any | None = None
+    if cleaned.startswith("{"):
+        try:
+            parsed = decoder.raw_decode(cleaned)[0]
+        except json.JSONDecodeError:
+            parsed = None
+    if parsed is None:
+        for match in re.finditer(r"\{", cleaned):
+            try:
+                candidate = decoder.raw_decode(cleaned[match.start() :])[0]
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                parsed = candidate
+                break
+    if parsed is None:
+        raise ValueError("模型未返回 JSON 对象")
     if not isinstance(parsed, dict):
         raise ValueError("模型返回值不是 JSON 对象")
     return parsed

@@ -28,7 +28,7 @@
 6. 提供可嵌入人工校验工作台，支持大题题干、小问题干/答案/解析、题图、知识点、难度和分值的人工修正。
 7. 输出 `question-package.v1` 标准题目包，供平台最终入库。
 8. 支持本地题库中心、知识点库和组卷中心，验证从导入到组卷导出的业务闭环。
-9. 支持 Markdown、DOCX、PDF 导出，优先使用 Markdown + Pandoc 链路稳定处理数学公式。
+9. 支持 Markdown、DOCX、PDF 导出：DOCX 优先使用 Markdown + Pandoc 链路，PDF 优先使用 XeLaTeX 预览模板，稳定处理数学公式、小问和作答空间。
 10. 提供能力目录、静态 OpenAPI 契约、生成型 SDK 交付入口和 callback-flow，逐步满足公司平台集成要求。
 
 ## 用户与调用方
@@ -60,7 +60,7 @@
 1. 平台服务通过能力 API 创建题目加工任务。
 2. 平台上传或传入试卷/答案文件。
 3. `question-engine` 管理任务状态、OCR/AI/export job、文件元数据和失败原因。
-4. Python worker 只执行 OCR、AI、LaTeX 修复和导出渲染。
+4. Python worker 只执行 OCR、AI、LaTeX 修复和 DOCX/PDF 导出渲染。
 5. 平台轮询任务或接收 callback-flow 回调。
 6. 平台获取 `question-package.v1`。
 7. 平台按自有权限、审核流、知识点主数据和题库表结构完成最终入库。
@@ -92,7 +92,7 @@
 - Java 管理业务 API、任务元数据、状态机、数据表、文件存储、题图、导出任务、AI job、callback event 和平台能力契约。
 - Java 默认使用 H2 本地库，企业部署可切换 MySQL。
 - Java 文件存储默认写入本地目录，企业部署可切换 MinIO 或平台文件中心。
-- Python worker 默认端口 `8000`，只保留 OCR provider、AI 模型调用、公式处理和 Pandoc 导出渲染。
+- Python worker 默认端口 `8000`，只保留 OCR provider、AI 模型调用、公式处理、DOCX Pandoc 导出和 PDF XeLaTeX 渲染。
 - 旧 `/api/*` Python 业务接口只作为兼容迁移保留，不再作为新增业务入口。
 
 ## 不属于本项目主责

@@ -66,6 +66,16 @@ export type OcrStatus = {
   raw?: JsonObject;
 };
 
+export type ImportTaskRescanResult = {
+  taskId: string;
+  status: string;
+  paperOcrStatus?: string;
+  answerOcrStatus?: string;
+  rescanInProgress: boolean;
+  rescannedJobs: JsonObject;
+  [key: string]: unknown;
+};
+
 export type ProcessingStatus =
   | "PROCESSING"
   | "WAITING_REVIEW"

@@ -16,7 +16,8 @@
 - Java 新增 callback-flow HTTP 回调签名、事件记录和手动重试入口；SDK 草案位于 `question-engine/sdk`。
 - 后端接收文件并创建 OCR-Flow 任务。
 - OCR-Flow 默认调用 MinerU 命令行执行 OCR 和文档解析，同时通过 provider 边界预留替换其它 OCR 引擎的空间。
-- OCR 成功后进入证据驱动拆题流水线：本地先识别大题/题号/小问/选项/题图候选边界，再让 OpenAI 兼容大模型只确认边界，最后按 OCR 原文切片构建结构并做证据校验；未配置或失败时回退本地规则。
+- OCR 成功后进入证据驱动拆题流水线：本地先识别大题/题号/小问/选项/题图候选边界；高置信边界直接跳过 `llm-boundary-refine`，低置信边界按题段分片并受控并发调用 OpenAI 兼容大模型确认边界；最后按 OCR 原文切片构建结构并做证据校验，未配置或失败时按分片回退本地规则。
+- OCR outputs 会返回 `boundaryConfidence`、`autoSemanticRepair` 和脱敏 `llmMetrics`；指标只包含调用类型、provider、model、状态、耗时和 chunk/item 数，不记录 prompt、密钥、完整 OCR 文本或图片 base64。
 - 对题干、选项和子题进行公式标准化与校验，减少 OCR 公式边界错误导致的渲染失败。
 - 支持题目人工校验编辑，使用 Markdown + LaTeX 双栏源码/预览模式。
 - 支持确定性公式标准化/校验、LaTeX 分隔符修复和 AI 标准化候选。
@@ -154,6 +155,30 @@ LLM_PROVIDER=dashscope
 
 `DASHSCOPE_*` 变量名会继续保留，用于兼容旧部署和平台模型网关。拆题阶段会先执行 `local-boundary-detect`、`llm-boundary-refine`、`question-structure-build`、`sub-question-split` 和 `structure-validate`，模型只返回边界，不直接生成题干正文。
 
+OCR-Flow LLM 效率相关开关默认保守启用：
+
+```text
+LLM_MAX_CONCURRENCY=1
+LLM_BOUNDARY_CHUNK_SIZE=5
+LLM_METRICS_ENABLED=true
+LLM_ROUTER_MODE=external
+LOCAL_LLM_ENABLED=false
+LOCAL_LLM_BASE_URL=http://127.0.0.1:8001/v1
+LOCAL_LLM_MODEL=aux-qwen3-32b-fp8
+LOCAL_LLM_MAX_CONCURRENCY=4
+LOCAL_LLM_DISABLE_THINKING=true
+LLM_EXTERNAL_FALLBACK_ENABLED=true
+LLM_EXTERNAL_MAX_CONCURRENCY=1
+LLM_ROUTER_CACHE_ENABLED=true
+LLM_ROUTER_CACHE_TTL_SECONDS=300
+OCR_AUTO_SEMANTIC_REPAIR_MODE=skip
+AI_STANDARDIZE_CACHE_TTL_SECONDS=300
+```
+
+本地开发默认 `LLM_ROUTER_MODE=external` 且 `LOCAL_LLM_ENABLED=false`。服务器部署可启用 hybrid：`LLM_ROUTER_MODE=hybrid`、`LOCAL_LLM_ENABLED=true`、`LOCAL_LLM_BASE_URL=http://vllm-aux:8000/v1`。服务器 hybrid 下，高置信本地边界不调用边界模型，低置信样本才分片确认；`boundary_refine` 默认直接走外部满血模型，避免本地小模型在边界确认阶段耗时过长或输出不稳定；小问结构确认和 AI 标准化仍优先走本地 `aux-qwen3-32b-fp8`，调用失败、JSON/schema 失败、结构校验失败或风险评分过高时升级外部满血模型；AI 解析和复杂推理继续走外部模型。Qwen3 类本地模型建议保持 `LOCAL_LLM_DISABLE_THINKING=true`，避免 reasoning 文本污染 JSON 输出。`OCR_AUTO_SEMANTIC_REPAIR_MODE=skip` 表示 OCR 主链路不自动执行语义修复，人工校验里的 AI 标准化/AI 解析仍可按需触发。只有压测或明确需要 OCR 返回前自动修复时，才建议把语义修复切到 `inline` 或 `inline-concurrent`，并根据模型网关限流调整 `LLM_MAX_CONCURRENCY`。
+
+人工触发 AI 标准化会先尝试本地确定性修复和可信 OCR 兜底，只有仍需模型判断时才调用 LLM；`AI_STANDARDIZE_CACHE_TTL_SECONDS` 用于缓存成功的 LLM 标准化候选，设为 `0` 可关闭。
+
 后端启动时会自动读取项目根目录 `.env` 和 `backend/.env`。如果同时存在 shell 环境变量和 `.env`，以 shell 环境变量为准。
 
 手动启动 Python worker：
@@ -257,12 +282,19 @@ Python worker：http://localhost:8000
 docker compose -f docker-compose.server.yml up -d --build
 ```
 
-`docker-compose.server.yml` 默认适配 GPU 服务器：基础镜像可通过 `SERVER_BASE_IMAGE` 配置，默认优先使用服务器已有的 `nvcr.io/nvidia/tensorrt:23.09-py3`；MinerU 通过 `HOST_MINERU_VENV` 挂载服务器本机 venv，默认路径为 `/aa/AI_GENERATION_TOGO/backend/python-worker/.venv`。如果目标服务器没有该 venv，先在服务器上执行 `./scripts/deploy_local.sh --with-mineru` 或 `./scripts/install_mineru.sh` 生成，再启动 Docker。
+也可以直接使用服务器启动脚本，它会自动构建 jar、构建前端、启动 Docker 服务、执行健康检查并打印访问地址：
+
+```bash
+APP_PUBLIC_HOST=服务器公网IP ./scripts/start_server_docker.sh
+```
+
+`docker-compose.server.yml` 默认适配 GPU 服务器：基础镜像可通过 `SERVER_BASE_IMAGE` 配置，默认优先使用服务器已有的 `nvcr.io/nvidia/tensorrt:23.09-py3`；MinerU 通过 `HOST_MINERU_VENV` 挂载服务器本机 venv，默认路径为 `/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv`。当前服务器约定 AI_GENERATION / MinerU OCR 通过 `NVIDIA_VISIBLE_DEVICES=0` 只暴露物理 GPU0，vLLM / aux-qwen3-32b-fp8 留在物理 GPU1；容器内只看得到这一张卡，因此 `OCR_CUDA_VISIBLE_DEVICES=0`。MinerU 默认使用 `MINERU_VIRTUAL_VRAM_SIZE=48` 和 `MINERU_HYBRID_BATCH_RATIO=16` 适配 48GB 级别显存。如果目标服务器没有该 venv，先在服务器上执行 `./scripts/deploy_local.sh --with-mineru` 或 `./scripts/install_mineru.sh` 生成，再启动 Docker。
 
 默认端口：
 
 ```text
-前端和同源 API：http://服务器IP/
+客户体验入口：http://服务器IP/
+兼容调试入口：http://服务器IP:5173/
 Java 后端直连：http://服务器IP:8018
 Python worker：仅容器内监听 127.0.0.1:8000，不暴露公网
 ```

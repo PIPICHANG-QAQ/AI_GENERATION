@@ -1,8 +1,12 @@
+%% Version: 2026-07-09 / product v14
+%% Status: current-support
+%% Scope: local-platform as demo shell, not platform production boundary.
 flowchart LR
   User["本地使用者<br/>教师 / 运营 / 开发联调"]:::actor
   LocalPlatform["local-platform<br/>Vite React 本地小平台<br/>只用于演示、验收和闭环验证"]:::local
 
-  ImportPage["题目导入<br/>创建任务 / 原文件预览 / OCR 工作台 / 复合人工校验"]:::page
+  ImportPage["题目导入<br/>创建任务 / 原文件预览 / 布局解析框 / OCR 工作台 / 复合人工校验"]:::page
+  WorkbenchToolbar["导入工作台工具栏<br/>重新 OCR 扫描 / AI 解析全部 / 批量入库"]:::page
   BankPage["题库中心<br/>筛选 / 预览 / 复合编辑 / 题图 / AI 解析"]:::page
   PaperPage["组卷中心<br/>按小问选题 / subSelections / 排序 / 卷头 / 预览 / 导出"]:::page
   KnowledgePage["知识点库<br/>搜索 / 新增 / 编辑 / 删除"]:::page
@@ -17,17 +21,19 @@ flowchart LR
   WorkerApi["内部 worker API<br/>/worker/ocr<br/>/worker/ai/*<br/>/worker/export"]:::worker
   LegacyApi["兼容期 legacy /api/*<br/>只为本地页面平滑迁移保留"]:::legacy
 
-  OcrProvider["OCR provider<br/>默认 MinerU CLI<br/>可替换其它 OCR 引擎"]:::worker
+  OcrProvider["OCR provider<br/>默认 MinerU<br/>本地 CLI；服务器可用常驻 mineru-api"]:::worker
   Llm["大模型 API<br/>DeepSeek / OpenAI 兼容接口"]:::external
   ExportRuntime["导出运行时<br/>Markdown / Pandoc / XeLaTeX"]:::worker
 
   User --> LocalPlatform
   LocalPlatform --> ImportPage
+  ImportPage --> WorkbenchToolbar
   LocalPlatform --> BankPage
   LocalPlatform --> PaperPage
   LocalPlatform --> KnowledgePage
 
   ImportPage --> CompatibilityApi
+  WorkbenchToolbar --> CompatibilityApi
   BankPage --> CompatibilityApi
   PaperPage --> CompatibilityApi
   KnowledgePage --> CompatibilityApi

@@ -24,6 +24,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -986,7 +987,14 @@ class DomainControllerTest {
         try {
             pythonWorkerProperties.setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
             pythonWorkerProperties.setApiProxyEnabled(true);
-            importTaskMetadataService.syncMap(importTaskPayload("ai_raw_context_task_1", "待校验", 20, "AI 原文上下文任务"));
+            Map<String, Object> rawContextTask = new LinkedHashMap<>(importTaskPayload("ai_raw_context_task_1", "待校验", 20, "AI 原文上下文任务"));
+            List<Map<String, Object>> rawContextQuestions = new ArrayList<>();
+            for (Object item : (List<?>) rawContextTask.get("questions")) {
+                rawContextQuestions.add(new LinkedHashMap<>((Map<String, Object>) item));
+            }
+            rawContextQuestions.get(19).put("manualMarkdown", "BROKEN_MANUAL_CONTEXT_SHOULD_NOT_BE_TRUSTED");
+            rawContextTask.put("questions", rawContextQuestions);
+            importTaskMetadataService.syncMap(rawContextTask);
 
             mockMvc.perform(postJson(
                             "/api/import-tasks/ai_raw_context_task_1/questions/ai_raw_context_task_1_question_20/standardize/ai",
@@ -995,13 +1003,14 @@ class DomainControllerTest {
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.markdown").value("清理后的第 20 题"))
                     .andExpect(jsonPath("$.writeResult").value(false))
-                    .andExpect(jsonPath("$.question.manualMarkdown").isEmpty());
+                    .andExpect(jsonPath("$.question.manualMarkdown").value("BROKEN_MANUAL_CONTEXT_SHOULD_NOT_BE_TRUSTED"));
 
             JsonNode sent = objectMapper.readTree(requestBody.get());
             org.assertj.core.api.Assertions.assertThat(sent.path("rawOcrContext").asText())
                     .contains("20. （8分）（1）解下面一元一次不等式组")
                     .contains("\\frac{5x-1}{6}")
-                    .doesNotContain("21. 后一题");
+                    .doesNotContain("21. 后一题")
+                    .doesNotContain("BROKEN_MANUAL_CONTEXT_SHOULD_NOT_BE_TRUSTED");
         } finally {
             pythonWorkerProperties.setBaseUrl(oldBaseUrl);
             pythonWorkerProperties.setApiProxyEnabled(oldProxyEnabled);
@@ -1040,6 +1049,56 @@ class DomainControllerTest {
 
             mockMvc.perform(postJson(
                             "/api/import-tasks/ai_severe_guard_task_1/questions/ai_severe_guard_task_1_question_1/standardize/ai",
+                            Map.of("markdown", "原始安全题干", "writeResult", true)
+                    ))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.writeResult").value(false))
+                    .andExpect(jsonPath("$.writeSkippedReason").exists())
+                    .andExpect(jsonPath("$.question.manualMarkdown").isEmpty())
+                    .andExpect(jsonPath("$.question.stemMarkdown").value("导入题 1"));
+        } finally {
+            pythonWorkerProperties.setBaseUrl(oldBaseUrl);
+            pythonWorkerProperties.setApiProxyEnabled(oldProxyEnabled);
+            server.stop(0);
+        }
+    }
+
+    /**
+     * 验证 worker 标记候选不可应用时，Java 显式写回也必须保留原题干。
+     *
+     * @throws Exception 测试请求或内置 HTTP 服务失败时抛出
+     */
+    @Test
+    void aiStandardizeDoesNotOverwriteWhenCandidateApplyBlocked() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/ocr/jobs/ocr_paper_bridge/result", exchange ->
+                writeJson(exchange, Map.of("markdown", "1. 原始 OCR 题干"))
+        );
+        server.createContext("/worker/ai/standardize", exchange ->
+                writeJson(exchange, Map.of(
+                        "markdown", "不可渲染候选",
+                        "standardizer", Map.of(
+                                "source", "test",
+                                "confidence", "high",
+                                "candidateSevereIssues", List.of(),
+                                "applyBlocked", true,
+                                "renderValidation", Map.of(
+                                        "valid", false,
+                                        "issues", List.of("候选未通过渲染安全校验")
+                                )
+                        )
+                ))
+        );
+        server.start();
+        String oldBaseUrl = pythonWorkerProperties.getBaseUrl();
+        boolean oldProxyEnabled = pythonWorkerProperties.isApiProxyEnabled();
+        try {
+            pythonWorkerProperties.setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
+            pythonWorkerProperties.setApiProxyEnabled(true);
+            importTaskMetadataService.syncMap(importTaskPayload("ai_apply_blocked_task_1", "待校验", 1, "AI 应用闸门任务"));
+
+            mockMvc.perform(postJson(
+                            "/api/import-tasks/ai_apply_blocked_task_1/questions/ai_apply_blocked_task_1_question_1/standardize/ai",
                             Map.of("markdown", "原始安全题干", "writeResult", true)
                     ))
                     .andExpect(status().isOk())

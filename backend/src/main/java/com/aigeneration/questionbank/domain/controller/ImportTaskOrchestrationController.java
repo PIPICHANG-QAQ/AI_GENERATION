@@ -35,4 +35,15 @@ public class ImportTaskOrchestrationController {
     public Map<String, Object> retry(@PathVariable String taskId) {
         return service.retry(taskId);
     }
+
+    /**
+     * 重新扫描导入任务原始 OCR 文件。
+     *
+     * @param taskId 导入任务 ID
+     * @return 重扫启动后的任务状态
+     */
+    @PostMapping("/api/import-tasks/{taskId}/rescan")
+    public Map<String, Object> rescan(@PathVariable String taskId) {
+        return service.rescan(taskId);
+    }
 }

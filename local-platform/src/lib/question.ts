@@ -3,6 +3,10 @@ import { apiUrl } from "@/lib/api";
 export interface QuestionImage {
   id?: string;
   imageId?: string;
+  index?: number;
+  label?: string;
+  refLabel?: string;
+  imageLabel?: string;
   name?: string;
   path?: string;
   url?: string;
@@ -11,6 +15,7 @@ export interface QuestionImage {
   type?: string;
   storageFileId?: string;
   questionId?: string;
+  raw?: Record<string, unknown>;
 }
 
 export const QUESTION_IMAGE_REF_MIME = "application/x-question-image-ref";
@@ -42,6 +47,77 @@ function safeDecode(value: string): string {
   }
 }
 
+function rawImageValue(img: QuestionImage, key: string): string {
+  const raw = img.raw || {};
+  return String(raw[key] ?? "").trim();
+}
+
+function normalizeImageLabel(value?: string | null): string {
+  const normalized = String(value || "").trim();
+  const match = /^(?:题图|图|#)?\s*([1-9]\d*)$/i.exec(safeDecode(normalized));
+  return match ? `图${Number(match[1])}` : "";
+}
+
+function explicitQuestionImageLabel(img: QuestionImage): string {
+  return [
+    img.label,
+    img.refLabel,
+    img.imageLabel,
+    rawImageValue(img, "label"),
+    rawImageValue(img, "refLabel"),
+    rawImageValue(img, "imageLabel"),
+    img.name,
+  ]
+    .map((value) => normalizeImageLabel(value))
+    .find(Boolean) || "";
+}
+
+export function getQuestionImageLabel(img: QuestionImage, zeroIndex = 0): string {
+  const explicit = explicitQuestionImageLabel(img);
+  if (explicit) return explicit;
+
+  if (typeof img.index === "number" && Number.isFinite(img.index) && img.index >= 0) {
+    return `图${img.index + 1}`;
+  }
+  return `图${zeroIndex + 1}`;
+}
+
+function labelNumber(label: string): number {
+  const match = /^图([1-9]\d*)$/.exec(label);
+  return match ? Number(match[1]) : 0;
+}
+
+export function ensureQuestionImageLabels(images: QuestionImage[] = [], previousImages: QuestionImage[] = []): QuestionImage[] {
+  const previousByKey = new Map<string, string>();
+  const used = new Set<string>();
+  let maxLabel = 0;
+
+  previousImages.forEach((img, index) => {
+    const label = getQuestionImageLabel(img, index);
+    const key = getImageKey(img);
+    if (key && label) previousByKey.set(key, label);
+    if (label) {
+      used.add(label);
+      maxLabel = Math.max(maxLabel, labelNumber(label));
+    }
+  });
+
+  return images.map((img, index) => {
+    const key = getImageKey(img);
+    let label = explicitQuestionImageLabel(img);
+    if (key && previousByKey.has(key)) {
+      label = previousByKey.get(key) || label;
+    }
+    if (!label || used.has(label)) {
+      maxLabel += 1;
+      label = `图${maxLabel}`;
+    }
+    used.add(label);
+    maxLabel = Math.max(maxLabel, labelNumber(label));
+    return { ...img, label, refLabel: label };
+  });
+}
+
 function stripMarkdownImageSrc(value?: string | null): string {
   return String(value || "")
     .trim()
@@ -60,7 +136,9 @@ export function resolveImageSrc(src?: string | null, images: QuestionImage[] = [
   const decoded = safeDecode(raw);
   const indexMatch = /^(?:题图|图|#)?\s*([1-9]\d*)$/i.exec(decoded);
   if (indexMatch) {
-    const img = images[Number(indexMatch[1]) - 1];
+    const label = `图${Number(indexMatch[1])}`;
+    const labeledImages = ensureQuestionImageLabels(images);
+    const img = labeledImages.find((item, index) => getQuestionImageLabel(item, index) === label) || labeledImages[Number(indexMatch[1]) - 1];
     const resolved = imageOutputSrc(img);
     if (resolved) return resolved;
   }
@@ -83,12 +161,47 @@ export function resolveImageSrc(src?: string | null, images: QuestionImage[] = [
 
 function markdownImageSources(text: string): string[] {
   const sources: string[] = [];
-  const regex = /!\[[^\]]*]\(\s*<?([^>)\s]+)>?(?:\s+["'][^)]*["'])?\s*\)/g;
+  const regex = /!\[[^\]]*]\s*\(\s*<?([^>)\s]+)>?(?:\s+["'][^)]*["'])?\s*\)/g;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(text || "")) !== null) {
     if (match[1]) sources.push(stripMarkdownImageSrc(match[1]));
   }
   return sources;
+}
+
+function refComparable(value?: string | null): string {
+  return safeDecode(stripMarkdownImageSrc(value))
+    .replace(/[?#].*$/, "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .trim()
+    .toLowerCase();
+}
+
+function imageRefCandidates(img: QuestionImage, zeroIndex: number): Set<string> {
+  const candidates = new Set<string>();
+  const label = getQuestionImageLabel(img, zeroIndex);
+  const labelNo = labelNumber(label);
+  [label, labelNo ? `题图${labelNo}` : "", labelNo ? `#${labelNo}` : ""]
+    .filter(Boolean)
+    .forEach((value) => candidates.add(refComparable(value)));
+  [img.url, img.path, img.name, getImageKey(img), rawImageValue(img, "url"), rawImageValue(img, "path"), rawImageValue(img, "name")]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .forEach((value) => {
+      const comparable = refComparable(value);
+      candidates.add(comparable);
+      const filename = comparable.split("/").pop() || "";
+      if (filename) candidates.add(filename);
+    });
+  return candidates;
+}
+
+function imageRefMatches(src: string, img: QuestionImage, zeroIndex: number): boolean {
+  const comparable = refComparable(src);
+  if (!comparable) return false;
+  const candidates = imageRefCandidates(img, zeroIndex);
+  return candidates.has(comparable) || Array.from(candidates).some((candidate) => comparable.endsWith(`/${candidate}`));
 }
 
 function sameResolvedImage(a: string, b: string): boolean {
@@ -108,8 +221,7 @@ function isImageReferenced(img: QuestionImage, index: number, images: QuestionIm
     const imageRefs = markdownImageSources(raw);
     if (
       imageRefs.some((src) => {
-        const indexMatch = /^(?:题图|图|#)?\s*([1-9]\d*)$/i.exec(safeDecode(src));
-        if (indexMatch && Number(indexMatch[1]) === index) return true;
+        if (imageRefMatches(src, img, index - 1)) return true;
         const resolved = resolveImageSrc(src, images);
         return target ? sameResolvedImage(resolved, target) : rawValues.includes(src);
       })
@@ -124,8 +236,9 @@ export function getUnreferencedImageRefs(
   images: QuestionImage[] = [],
   texts: string[] = [],
 ): Array<{ index: number; token: string }> {
-  return images
-    .map((img, zeroIndex) => ({ img, index: zeroIndex + 1, token: `![](图${zeroIndex + 1})` }))
+  const labeledImages = ensureQuestionImageLabels(images);
+  return labeledImages
+    .map((img, zeroIndex) => ({ img, index: zeroIndex + 1, token: `![](${getQuestionImageLabel(img, zeroIndex)})` }))
     .filter(({ img, index }) => !isImageReferenced(img, index, images, texts))
     .map(({ index, token }) => ({ index, token }));
 }
@@ -142,7 +255,8 @@ export function appendMissingImageRefs(
   images: QuestionImage[] = [],
   siblingTexts: string[] = [],
 ): string {
-  return appendImageRefTokens(markdown, getUnreferencedImageRefs(images, [markdown, ...siblingTexts]));
+  const normalizedMarkdown = normalizeQuestionImageRefsInMarkdown(markdown, images);
+  return appendImageRefTokens(normalizedMarkdown, getUnreferencedImageRefs(images, [normalizedMarkdown, ...siblingTexts]));
 }
 
 export function appendNewImageRefs(
@@ -151,19 +265,96 @@ export function appendNewImageRefs(
   nextImages: QuestionImage[] = [],
   siblingTexts: string[] = [],
 ): string {
-  const previousKeys = new Set(previousImages.map(getImageKey).filter(Boolean));
-  const refs = getUnreferencedImageRefs(nextImages, [markdown, ...siblingTexts]).filter(({ index }) => {
-    const img = nextImages[index - 1];
+  const labeledPrevious = ensureQuestionImageLabels(previousImages);
+  const labeledNext = ensureQuestionImageLabels(nextImages, labeledPrevious);
+  const normalizedMarkdown = normalizeQuestionImageRefsInMarkdown(markdown, labeledNext);
+  const previousKeys = new Set(labeledPrevious.map(getImageKey).filter(Boolean));
+  const refs = getUnreferencedImageRefs(labeledNext, [normalizedMarkdown, ...siblingTexts]).filter(({ index }) => {
+    const img = labeledNext[index - 1];
     const key = img ? getImageKey(img) : "";
     return key && !previousKeys.has(key);
   });
-  return appendImageRefTokens(markdown, refs);
+  return appendImageRefTokens(normalizedMarkdown, refs);
+}
+
+export function getRemovedQuestionImages(previousImages: QuestionImage[] = [], nextImages: QuestionImage[] = []): QuestionImage[] {
+  const nextKeys = new Set(nextImages.map(getImageKey).filter(Boolean));
+  return previousImages.filter((img) => {
+    const key = getImageKey(img);
+    return key && !nextKeys.has(key);
+  });
+}
+
+export function filterRemovedQuestionImages(images: QuestionImage[] = [], removedImages: QuestionImage[] = []): QuestionImage[] {
+  if (removedImages.length === 0) return images;
+  const removedKeys = new Set(removedImages.map(getImageKey).filter(Boolean));
+  return images.filter((img) => {
+    const key = getImageKey(img);
+    return !key || !removedKeys.has(key);
+  });
+}
+
+export function removeQuestionImageRefsFromMarkdown(markdown: string, removedImages: QuestionImage[] = []): string {
+  const text = String(markdown || "");
+  if (!text || removedImages.length === 0) return text;
+  const removed = ensureQuestionImageLabels(removedImages);
+  const imageRegex = /!\[[^\]]*]\s*\(\s*<?([^>)\s]+)>?(?:\s+["'][^)]*["'])?\s*\)/g;
+  const cleaned = text.replace(imageRegex, (full, src) =>
+    removed.some((img, index) => imageRefMatches(src, img, index)) ? "" : full,
+  );
+  return cleaned
+    .split(/\r?\n/)
+    .map((line) => line.replace(/[ \t]+$/g, ""))
+    .filter((line, index, lines) => line.trim() || (index > 0 && index < lines.length - 1 && lines[index - 1].trim() && lines[index + 1].trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export function normalizeQuestionImageRefsInMarkdown(markdown: string, images: QuestionImage[] = []): string {
+  const text = String(markdown || "");
+  if (!text || images.length === 0) return text;
+  const labeledImages = ensureQuestionImageLabels(images);
+  const imageRegex = /!\[[^\]]*]\s*\(\s*<?([^>)\s]+)>?(?:\s+["'][^)]*["'])?\s*\)/g;
+  return text.replace(imageRegex, (full, src) => {
+    const imageIndex = labeledImages.findIndex((img, index) => imageRefMatches(src, img, index));
+    return imageIndex >= 0 ? `![](${getQuestionImageLabel(labeledImages[imageIndex], imageIndex)})` : full;
+  });
+}
+
+export function removeQuestionImageRefsFromOptions(options: unknown, removedImages: QuestionImage[] = []): QuestionOption[] {
+  if (!Array.isArray(options)) return [];
+  const seen = new Set<string>();
+  return options
+    .map((item, index) => {
+      const raw = item as any;
+      const fallbackLabel = String.fromCharCode(65 + index);
+      const label = String(
+        typeof raw === "object" && raw
+          ? raw.label ?? raw.key ?? raw.name ?? raw.option ?? fallbackLabel
+          : fallbackLabel,
+      )
+        .trim()
+        .toUpperCase();
+      const content = String(
+        typeof raw === "object" && raw
+          ? raw.contentMarkdown ?? raw.markdown ?? raw.text ?? raw.content ?? raw.value ?? ""
+          : raw ?? "",
+      ).trim();
+      const cleaned = removeQuestionImageRefsFromMarkdown(content, removedImages);
+      return { label, content: cleaned, contentMarkdown: cleaned, raw: item };
+    })
+    .filter((option) => {
+      if (!option.label || seen.has(option.label)) return false;
+      seen.add(option.label);
+      return true;
+    });
 }
 
 export function getQuestionMarkdown(q: any): string {
   if (!q) return "";
   const markdown = q.manualMarkdown || q.stemMarkdown || q.stem || q.content || "";
-  return withEditableChoiceOptions(markdown, q.options);
+  return withEditableChoiceOptions(markdown, q.options, getQuestionImages(q));
 }
 
 export function getQuestionImages(q: any): QuestionImage[] {
@@ -230,6 +421,7 @@ export function removeSubQuestionForm(current: any[], index: number): any[] {
 
 export function subQuestionEditorForm(sub: any, index: number, parent?: any): any {
   const label = sub?.label || `(${index + 1})`;
+  const images = getQuestionImages(sub);
   return {
     id: String(sub?.id || `sub_${index + 1}`),
     label,
@@ -242,8 +434,8 @@ export function subQuestionEditorForm(sub: any, index: number, parent?: any): an
     analysis: sub?.analysis || sub?.explanation || "",
     knowledgePointIds: Array.isArray(sub?.knowledgePointIds) ? sub.knowledgePointIds.map(String) : [],
     knowledgePoints: Array.isArray(sub?.knowledgePoints) ? sub.knowledgePoints.join("，") : String(sub?.knowledgePoints || ""),
-    images: getQuestionImages(sub),
-    options: normalizeQuestionOptions(sub?.options),
+    images,
+    options: normalizeQuestionOptions(sub?.options, images),
     contextMatched: Boolean(sub?.contextMatched ?? sub?.aiMetadata?.contextMatched),
     answerEvidence: String(sub?.answerEvidence ?? sub?.aiMetadata?.answerEvidence ?? ""),
     analysisEvidence: String(sub?.analysisEvidence ?? sub?.aiMetadata?.analysisEvidence ?? ""),
@@ -310,7 +502,9 @@ function mergeSubQuestionForm(current: any, incoming: any): any {
     next.knowledgePointIds = incoming.knowledgePointIds;
   }
   if (Array.isArray(incoming?.images) && incoming.images.length > 0) next.images = incoming.images;
-  if (Array.isArray(incoming?.options) && incoming.options.length > 0) next.options = incoming.options;
+  if (Array.isArray(incoming?.options) && incoming.options.length > 0) {
+    next.options = normalizeQuestionOptions(incoming.options, next.images);
+  }
   return next;
 }
 
@@ -324,7 +518,7 @@ export function getSelectedSubQuestions(q: any, subSelections?: Record<string, s
   return selectedSubs.length > 0 ? selectedSubs : subs;
 }
 
-export function normalizeQuestionOptions(value: unknown): QuestionOption[] {
+export function normalizeQuestionOptions(value: unknown, images: QuestionImage[] = []): QuestionOption[] {
   if (!Array.isArray(value)) return [];
   const options: QuestionOption[] = [];
   const seen = new Set<string>();
@@ -338,16 +532,25 @@ export function normalizeQuestionOptions(value: unknown): QuestionOption[] {
     )
       .trim()
       .toUpperCase();
-    const content = String(
+    const rawContent = String(
       typeof raw === "object" && raw
         ? raw.contentMarkdown ?? raw.markdown ?? raw.text ?? raw.content ?? raw.value ?? ""
         : raw ?? "",
     ).trim();
+    const content = normalizeQuestionImageRefsInMarkdown(rawContent, images).trim();
     if (!label || !content || seen.has(label)) return;
     seen.add(label);
     options.push({ label, content, contentMarkdown: content, raw: item });
   });
   return options;
+}
+
+export function serializeQuestionOptions(value: unknown, images: QuestionImage[] = []): QuestionOption[] {
+  return normalizeQuestionOptions(value, images).map((option) => ({
+    label: option.label,
+    content: option.content,
+    contentMarkdown: option.contentMarkdown || option.content,
+  }));
 }
 
 function nextChoiceLabel(label: string) {
@@ -370,7 +573,7 @@ function cleanOptionText(value: string) {
 }
 
 function splitTrailingImageBlock(content: string): { content: string; trailingImageBlock: string } {
-  const match = /(?:\s*!\[[^\]]*]\([^)]+\)\s*)+$/.exec(String(content || ""));
+  const match = /(?:\s*!\[[^\]]*]\s*\([^)]+\)\s*)+$/.exec(String(content || ""));
   if (!match) return { content, trailingImageBlock: "" };
   const before = content.slice(0, match.index).trimEnd();
   const trailingImageBlock = match[0].trim();
@@ -388,9 +591,9 @@ function tasksColumnCount(optionCount: number) {
   return 1;
 }
 
-export function withEditableChoiceOptions(markdown: string, rawOptions: unknown): string {
-  const normalizedMarkdown = normalizeTasksEnvironment(markdown).trim();
-  const options = normalizeQuestionOptions(rawOptions);
+export function withEditableChoiceOptions(markdown: string, rawOptions: unknown, images: QuestionImage[] = []): string {
+  const normalizedMarkdown = normalizeTasksEnvironment(normalizeQuestionImageRefsInMarkdown(markdown, images)).trim();
+  const options = normalizeQuestionOptions(rawOptions, images);
   if (options.length === 0) return normalizedMarkdown;
   if (splitChoiceOptionsFromMarkdown(normalizedMarkdown, "choice").options.length > 0) {
     return normalizedMarkdown;
@@ -519,12 +722,19 @@ export function getQuestionMarkdownParts(
   markdown: string,
   questionType: string,
   fallbackOptions: unknown = [],
+  images: QuestionImage[] = [],
 ): { stemMarkdown: string; options: QuestionOption[] } {
-  const parsed = splitChoiceOptionsFromMarkdown(markdown, questionType);
-  if (parsed.options.length > 0) return parsed;
+  const normalizedMarkdown = normalizeQuestionImageRefsInMarkdown(markdown, images);
+  const parsed = splitChoiceOptionsFromMarkdown(normalizedMarkdown, questionType);
+  if (parsed.options.length > 0) {
+    return {
+      stemMarkdown: parsed.stemMarkdown,
+      options: normalizeQuestionOptions(parsed.options, images),
+    };
+  }
   return {
-    stemMarkdown: String(markdown || "").trim(),
-    options: questionType === "choice" ? normalizeQuestionOptions(fallbackOptions) : [],
+    stemMarkdown: String(normalizedMarkdown || "").trim(),
+    options: questionType === "choice" ? normalizeQuestionOptions(fallbackOptions, images) : [],
   };
 }
 

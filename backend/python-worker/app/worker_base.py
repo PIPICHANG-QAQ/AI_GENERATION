@@ -152,7 +152,7 @@ class ImportQuestionPayload(BaseModel):
     difficulty: str | None = None
     score: float | None = None
     status: str | None = None
-    options: list[dict[str, str]] | None = None
+    options: list[dict[str, Any]] | None = None
     images: list[dict[str, Any]] | None = None
     subQuestions: list[dict[str, Any]] | None = None
 
@@ -295,6 +295,7 @@ def summarize_ocr_flow(flow: dict[str, Any]) -> dict[str, Any]:
     """刷新 OCR-Flow 汇总字段。"""
     timestamp = now_iso()
     steps = [step for step in flow.get("steps", []) if isinstance(step, dict)]
+    repair_stale_running_ocr_flow_steps(steps, timestamp)
     for step in steps:
         if step.get("startedAt") and (step.get("finishedAt") or step.get("status") == "running"):
             step["durationMs"] = ocr_flow_duration_ms(step.get("startedAt"), step.get("finishedAt"), timestamp)
@@ -327,6 +328,65 @@ def summarize_ocr_flow(flow: dict[str, Any]) -> dict[str, Any]:
     flow["totalCount"] = len(steps)
     flow["elapsedMs"] = ocr_flow_duration_ms(flow.get("startedAt"), flow.get("finishedAt"), timestamp)
     return flow
+
+
+def repair_stale_running_ocr_flow_steps(steps: list[dict[str, Any]], timestamp: str) -> None:
+    """Close impossible running steps when later OCR-Flow steps already finished.
+
+    A duplicated OCR job can write an older snapshot after a newer run has advanced
+    the flow. In that state the job may be successful while an earlier step, most
+    often llm-boundary-refine, remains running forever. The later terminal step is
+    stronger evidence, so close the stale running step as skipped.
+    """
+    for index, step in enumerate(steps):
+        if step.get("status") != "running":
+            continue
+        later_terminal = next(
+            (
+                later
+                for later in steps[index + 1:]
+                if later.get("status") in OCR_FLOW_TERMINAL_STATUSES
+            ),
+            None,
+        )
+        if not later_terminal:
+            continue
+        finished_at = (
+            later_terminal.get("startedAt")
+            or later_terminal.get("finishedAt")
+            or timestamp
+        )
+        step["status"] = "skipped"
+        step["finishedAt"] = step.get("finishedAt") or finished_at
+        message = str(step.get("message") or "").strip()
+        repair_message = "检测到后续节点已完成，自动结束该节点"
+        step["message"] = f"{message}；{repair_message}" if message and repair_message not in message else repair_message
+
+
+def finalize_ocr_flow_for_terminal_job(job: dict[str, Any]) -> None:
+    """Keep OCR-Flow consistent when the job itself has reached a terminal state."""
+    if job.get("status") != "success":
+        return
+    flow = job.get("ocrFlow")
+    if not isinstance(flow, dict) or not isinstance(flow.get("steps"), list):
+        return
+    timestamp = str(job.get("finishedAt") or now_iso())
+    for step in flow["steps"]:
+        if not isinstance(step, dict):
+            continue
+        if step.get("status") == "running":
+            step["status"] = "skipped"
+            step["startedAt"] = step.get("startedAt") or timestamp
+            step["finishedAt"] = step.get("finishedAt") or timestamp
+            message = str(step.get("message") or "").strip()
+            repair_message = "任务已完成，自动结束未关闭节点"
+            step["message"] = f"{message}；{repair_message}" if message and repair_message not in message else repair_message
+        elif step.get("status") == "pending":
+            step["status"] = "skipped"
+            step["startedAt"] = step.get("startedAt") or timestamp
+            step["finishedAt"] = step.get("finishedAt") or timestamp
+            step["message"] = step.get("message") or "任务已完成，历史节点未单独记录"
+    job["ocrFlow"] = summarize_ocr_flow(flow)
 
 
 def mark_ocr_flow_step(
@@ -425,6 +485,7 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 def write_job(job: dict[str, Any]) -> None:
     """将 OCR job 元数据写入本地 JSON 文件。"""
     with JSON_FILE_LOCK:
+        finalize_ocr_flow_for_terminal_job(job)
         atomic_write_json(job_file(job["jobId"]), job)
 
 

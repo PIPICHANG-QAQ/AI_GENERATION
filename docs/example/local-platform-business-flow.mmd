@@ -17,12 +17,12 @@ flowchart TD
   subgraph Import["模块一：题目导入"]
     I1["新建 OCR 任务<br/>标题、学段、学科、年级、地区、年份"]:::demo
     I2["上传试卷和答案文件"]:::packaged
-    I3["OCR / 拆题 / 题图抽取"]:::packaged
+    I3["OCR / 本地边界置信度 / 低置信 AI 边界确认 / 题图抽取"]:::packaged
     I4["原文件预览"]:::packaged
     I5["复合人工复核<br/>大题题干 + 小问题干/答案/解析/分值/知识点"]:::demo
     I6["任务题图库"]:::packaged
     I7["选择/上传题图"]:::packaged
-    I8["AI 标准化候选<br/>LaTeX 分隔符修复 / OCR 上下文 / 风险闸门"]:::packaged
+    I8["AI 标准化候选<br/>本地修复 / OCR 兜底 / 缓存或 LLM / 渲染闸门"]:::packaged
     I9["AI 解析"]:::packaged
     I10["标记已校验"]:::demo
     I11["单题/批量入本地题库"]:::demo
@@ -35,7 +35,7 @@ flowchart TD
     B3["新建/编辑/删除题目<br/>复合编辑器"]:::platform
     B4["Markdown + LaTeX 实时预览"]:::demo
     B5["题库题图库 / 题图上传"]:::packaged
-    B6["题库题 AI 标准化候选"]:::packaged
+    B6["题库题 AI 标准化候选<br/>rawOcrContext 分离 + 不可应用候选禁用"]:::packaged
     B7["题库题 AI 解析"]:::packaged
     B8["题目版本、审核、发布、权限"]:::platform
   end

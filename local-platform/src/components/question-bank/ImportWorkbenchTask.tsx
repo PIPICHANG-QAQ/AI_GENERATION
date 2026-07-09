@@ -1,12 +1,24 @@
 import React, { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, apiUrl } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { StatusTag } from "@/components/ui/StatusTag";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
-import { RefreshCcw, CheckCircle2, FileText, Database, ExternalLink, Eye, EyeOff, Circle, Clock3, AlertCircle, MinusCircle } from "lucide-react";
+import { RefreshCcw, CheckCircle2, FileText, Database, ExternalLink, Eye, EyeOff, Circle, Clock3, AlertCircle, MinusCircle, Wand2, ScanSearch } from "lucide-react";
 import { QuestionCard } from "./QuestionCard";
-import { getSourceFileInfo } from "@/lib/question";
+import { getQuestionImages, getQuestionMarkdown, getSourceFileInfo, getSubQuestions } from "@/lib/question";
+import { aiAnalysisFallbackMessage, buildSubQuestionAnalysisPayload, subAnalysisPatch } from "@/lib/sub-question-ai";
 
 type OcrFlowStepStatus = "pending" | "running" | "success" | "failed" | "skipped" | string;
 
@@ -45,6 +57,35 @@ type OcrFlowJobView = {
   title: string;
   status?: string;
   job?: OcrJobSummary | null;
+};
+
+type PaperLayoutPage = {
+  pageIndex: number;
+  width: number;
+  height: number;
+  previewUrl: string;
+};
+
+type PaperLayoutRegion = {
+  questionId: string;
+  index: number;
+  pageIndex: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  confidence?: number;
+  source?: string;
+  type?: string;
+  text?: string;
+};
+
+type PaperLayout = {
+  version?: string;
+  sourceVersion?: string;
+  pages?: PaperLayoutPage[];
+  regions?: PaperLayoutRegion[];
+  warnings?: string[];
 };
 
 const FLOW_STATUS_LABELS: Record<string, string> = {
@@ -238,10 +279,30 @@ function OcrFlowProgress({ task, onRefresh }: { task: any; onRefresh: () => void
   );
 }
 
-function SourcePreview({ url, file }: { url: string, file: any }) {
+function layoutPreviewUrl(value: string) {
+  if (/^https?:\/\//i.test(value)) return value;
+  return apiUrl(value.startsWith("/") ? value : `/${value}`);
+}
+
+function SourcePreview({
+  url,
+  file,
+  layout,
+  showRegions,
+  onRegionClick,
+}: {
+  url: string;
+  file: any;
+  layout?: PaperLayout | null;
+  showRegions?: boolean;
+  onRegionClick?: (questionId: string) => void;
+}) {
   const [failed, setFailed] = useState(false);
   const info = getSourceFileInfo(file);
   const kind = info?.kind ?? "pdf";
+  const pages = Array.isArray(layout?.pages) ? layout.pages : [];
+  const regions = Array.isArray(layout?.regions) ? layout.regions : [];
+  const hasLayoutPreview = pages.length > 0;
 
   useEffect(() => {
     setFailed(false);
@@ -257,6 +318,67 @@ function SourcePreview({ url, file }: { url: string, file: any }) {
             <ExternalLink className="w-4 h-4" /> 打开原文件
           </Button>
         </a>
+      </div>
+    );
+  }
+
+  if (hasLayoutPreview) {
+    return (
+      <div className="w-full max-w-[900px] space-y-4">
+        {pages.map((page) => {
+          const pageRegions = regions.filter((region) => region.pageIndex === page.pageIndex);
+          return (
+            <div
+              key={page.pageIndex}
+              className="relative w-full overflow-hidden rounded-md border border-border bg-card elevation-1"
+            >
+              <img
+                src={layoutPreviewUrl(page.previewUrl)}
+                alt={`${info?.name || "试卷"} 第 ${page.pageIndex + 1} 页`}
+                className="block w-full h-auto"
+                onError={() => setFailed(true)}
+              />
+              {showRegions && pageRegions.length > 0 && (
+                <div className="absolute inset-0">
+                  {pageRegions.map((region) => {
+                    const isRawMineruRegion = region.source === "mineru_raw" || !region.questionId;
+                    const title = isRawMineruRegion
+                      ? `MinerU ${region.type || "bbox"} #${region.index}${region.text ? `：${region.text}` : ""}`
+                      : `定位到第 ${region.index} 题`;
+                    return (
+                      <button
+                        key={`${region.questionId || region.source || "region"}-${region.pageIndex}-${region.index}-${region.x}-${region.y}`}
+                        type="button"
+                        aria-label={title}
+                        title={title}
+                        onClick={() => {
+                          if (!isRawMineruRegion) onRegionClick?.(region.questionId);
+                        }}
+                        className={`absolute rounded-sm border-2 shadow-[0_0_0_1px_rgba(255,255,255,0.75)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
+                          isRawMineruRegion
+                            ? "cursor-default border-amber-500/80 bg-amber-400/10 text-amber-700 focus-visible:ring-amber-500"
+                            : "border-primary/80 bg-primary/10 text-primary hover:bg-primary/20 focus-visible:ring-primary"
+                        }`}
+                        style={{
+                          left: `${region.x * 100}%`,
+                          top: `${region.y * 100}%`,
+                          width: `${region.w * 100}%`,
+                          height: `${region.h * 100}%`,
+                        }}
+                      >
+                        <span className={`absolute left-1 top-1 flex h-5 min-w-5 items-center justify-center rounded-sm px-1 text-[11px] font-semibold leading-none ${
+                          isRawMineruRegion ? "bg-amber-500 text-white" : "bg-primary text-primary-foreground"
+                        }`}>
+                          {region.index}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     );
   }
@@ -302,6 +424,14 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
   const [fileType, setFileType] = useState<"paper" | "answer">("paper");
   const [mobileView, setMobileView] = useState<"source" | "questions">("source");
   const [sourceVisible, setSourceVisible] = useState(true);
+  const [aiDialogOpen, setAiDialogOpen] = useState(false);
+  const [overwriteExisting, setOverwriteExisting] = useState(false);
+  const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
+  const [rescanDialogOpen, setRescanDialogOpen] = useState(false);
+  const [showLayoutBoxes, setShowLayoutBoxes] = useState(true);
+  const [highlightQuestionId, setHighlightQuestionId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const aiRunning = aiProgress !== null;
 
   const { data: task, isLoading, isError, error, isRefetching } = useQuery({
     queryKey: ["importTask", taskId],
@@ -312,6 +442,14 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
       return isProcessing ? 5000 : false;
     }
   });
+
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
 
   const bankAllMutation = useMutation({
     mutationFn: () => api.bankAllImportQuestions(taskId),
@@ -331,6 +469,133 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
     bankAllMutation.mutate();
   };
 
+  const rescanMutation = useMutation({
+    mutationFn: () => api.rescanImportTask(taskId),
+    onSuccess: () => {
+      toast({
+        title: "已开始重新 OCR 扫描",
+        description: "只重新扫描原始文件，已提取和已编辑的题目不受影响",
+      });
+      queryClient.invalidateQueries({ queryKey: ["importTask", taskId] });
+      queryClient.invalidateQueries({ queryKey: ["importTasks"] });
+    },
+    onError: (err: any) => toast({ title: "重新扫描失败", description: err.message, variant: "destructive" }),
+  });
+
+  const knowledgePointNames = (value: any): string[] => {
+    const raw = value?.knowledgePoints;
+    if (Array.isArray(raw)) return raw.map((item) => String(item).trim()).filter(Boolean);
+    return String(raw || "")
+      .split(/[,，]/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  };
+
+  const runAiAnalyzeAll = async (overwrite: boolean) => {
+    const questions = Array.isArray(task?.questions) ? task.questions.filter((q: any) => q.status !== "已入库") : [];
+    type BatchUnit = { question: any; sub?: any; subIndex?: number };
+    const units: BatchUnit[] = [];
+    for (const question of questions) {
+      const subs = getSubQuestions(question);
+      if (subs.length > 0) {
+        subs.forEach((sub, subIndex) => {
+          if (getQuestionMarkdown(sub).trim() && (overwrite || !String(sub.analysis || "").trim())) {
+            units.push({ question, sub, subIndex });
+          }
+        });
+        return;
+      }
+      if (getQuestionMarkdown(question).trim() && (overwrite || !String(question.analysis || "").trim())) {
+        units.push({ question });
+      }
+    }
+
+    if (units.length === 0) {
+      toast({
+        title: "没有需要生成解析的题目",
+        description: overwrite
+          ? "未入库题目中没有可解析的题干"
+          : "未入库题目的解析均已填写，可勾选覆盖已有解析重新生成",
+      });
+      return;
+    }
+
+    setAiProgress({ done: 0, total: units.length });
+    let ok = 0;
+    let fail = 0;
+    let done = 0;
+    const dirtySubQuestions = new Map<string, any[]>();
+    const dirtySubSuccesses = new Map<string, number>();
+
+    for (const unit of units) {
+      try {
+        if (unit.sub) {
+          const parentSubs = dirtySubQuestions.get(unit.question.id)
+            || getSubQuestions(unit.question).map((sub: any) => ({ ...sub }));
+          const currentSub = parentSubs[unit.subIndex ?? -1] || unit.sub;
+          const res: any = await api.generateAnalysisAi(
+            buildSubQuestionAnalysisPayload({
+              parentMarkdown: getQuestionMarkdown(unit.question),
+              parentImages: getQuestionImages(unit.question),
+              sub: currentSub,
+              knowledgePoints: knowledgePointNames(currentSub),
+            }),
+          );
+          const fallbackMessage = aiAnalysisFallbackMessage(res);
+          const patch = fallbackMessage ? {} : subAnalysisPatch(res);
+          if (patch.analysis && parentSubs[unit.subIndex ?? -1]) {
+            parentSubs[unit.subIndex ?? -1] = { ...parentSubs[unit.subIndex ?? -1], analysis: patch.analysis };
+            dirtySubQuestions.set(unit.question.id, parentSubs);
+            dirtySubSuccesses.set(unit.question.id, (dirtySubSuccesses.get(unit.question.id) || 0) + 1);
+          } else {
+            fail++;
+          }
+        } else {
+          const res: any = await api.generateAnalysisAi({
+            manualMarkdown: getQuestionMarkdown(unit.question),
+            answer: unit.question.answer || "",
+            type: unit.question.type || "unknown",
+            knowledgePoints: knowledgePointNames(unit.question),
+            images: getQuestionImages(unit.question),
+            subQuestions: [],
+          });
+          const fallbackMessage = aiAnalysisFallbackMessage(res);
+          const analysis = String(fallbackMessage ? "" : res?.analysis || "").trim();
+          if (analysis) {
+            await api.updateImportQuestion(taskId, unit.question.id, { analysis });
+            ok++;
+          } else {
+            fail++;
+          }
+        }
+      } catch {
+        fail++;
+      }
+      done++;
+      setAiProgress({ done, total: units.length });
+    }
+
+    for (const [questionId, subQuestions] of dirtySubQuestions) {
+      const generatedCount = dirtySubSuccesses.get(questionId) || 0;
+      try {
+        await api.updateImportQuestion(taskId, questionId, { subQuestions });
+        ok += generatedCount;
+      } catch {
+        fail += generatedCount;
+      }
+    }
+
+    setAiProgress(null);
+    queryClient.invalidateQueries({ queryKey: ["importTask", taskId] });
+    if (fail === 0) {
+      toast({ title: "AI 解析生成完成", description: `已生成 ${ok} 处解析` });
+    } else if (ok > 0) {
+      toast({ title: "AI 解析部分完成", description: `成功 ${ok} 处，失败 ${fail} 处，可稍后重试` });
+    } else {
+      toast({ title: "AI 解析生成失败", description: `${fail} 处均未成功，请稍后重试`, variant: "destructive" });
+    }
+  };
+
   const handleRefresh = () => {
     queryClient.invalidateQueries({ queryKey: ["importTask", taskId] });
   };
@@ -340,6 +605,24 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
       const nextVisible = !visible;
       setMobileView(nextVisible ? "source" : "questions");
       return nextVisible;
+    });
+  };
+
+  const handleLocateLayoutQuestion = (questionId: string) => {
+    if (!questionId) return;
+    setMobileView("questions");
+    setHighlightQuestionId(questionId);
+    if (highlightTimerRef.current) {
+      clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = setTimeout(() => {
+      setHighlightQuestionId((current) => (current === questionId ? null : current));
+    }, 2500);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`import-question-${questionId}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
     });
   };
 
@@ -357,6 +640,14 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
 
   const hasAnswer = !!task.answerFile;
   const isProcessing = task.status === "处理中";
+  const paperLayout = (task.paperLayout || null) as PaperLayout | null;
+  const hasPaperLayout =
+    fileType === "paper"
+    && Array.isArray(paperLayout?.pages)
+    && paperLayout.pages.length > 0
+    && Array.isArray(paperLayout?.regions)
+    && paperLayout.regions.length > 0;
+  const layoutWarnings = Array.isArray(paperLayout?.warnings) ? paperLayout.warnings.filter(Boolean) : [];
   
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -373,16 +664,85 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
             <span>答案 OCR：{hasAnswer ? (task.answerOcrStatus || "处理中") : "未上传答案"}</span>
           </div>
         </div>
-        <div className="flex gap-2 shrink-0">
+        <div className="flex flex-wrap justify-end gap-2 shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setRescanDialogOpen(true)}
+            disabled={isProcessing || rescanMutation.isPending || aiRunning}
+            className="gap-2"
+          >
+            <ScanSearch className="w-4 h-4" /> {rescanMutation.isPending ? "启动扫描中" : "重新 OCR 扫描"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAiDialogOpen(true)}
+            disabled={isProcessing || aiRunning || rescanMutation.isPending}
+            className="gap-2 text-primary border-primary/30 hover:bg-primary/10 hover:text-primary"
+          >
+            <Wand2 className="w-4 h-4" /> {aiProgress ? `AI 解析中 ${aiProgress.done}/${aiProgress.total}` : "AI 解析全部"}
+          </Button>
           <Button variant="outline" size="sm" onClick={toggleSourceVisible} className="gap-2">
             {sourceVisible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             {sourceVisible ? "隐藏原文件" : "显示原文件"}
           </Button>
-          <Button size="sm" onClick={handleBankAll} disabled={bankAllMutation.isPending} className="gap-2">
+          <Button size="sm" onClick={handleBankAll} disabled={bankAllMutation.isPending || isProcessing || rescanMutation.isPending} className="gap-2">
             <Database className="w-4 h-4" /> 批量入库
           </Button>
         </div>
       </div>
+
+      <AlertDialog open={aiDialogOpen} onOpenChange={(open) => !aiRunning && setAiDialogOpen(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>一键 AI 解析全部题目？</AlertDialogTitle>
+            <AlertDialogDescription>
+              默认只为未入库且缺少解析的题目补齐解析；已入库题目会跳过。普通题按整题生成，复合大题会按小问逐个生成，生成后仍需人工校验才能入库。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <label className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+            <Checkbox
+              checked={overwriteExisting}
+              onCheckedChange={(checked) => setOverwriteExisting(checked === true)}
+            />
+            覆盖已有解析
+          </label>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setAiDialogOpen(false);
+                void runAiAnalyzeAll(overwriteExisting);
+              }}
+            >
+              开始生成
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={rescanDialogOpen} onOpenChange={(open) => !rescanMutation.isPending && setRescanDialogOpen(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>重新 OCR 扫描原始文档？</AlertDialogTitle>
+            <AlertDialogDescription>
+              只会重新扫描原始试卷/答案文件，当前已提取和已编辑的题目不受影响。扫描期间任务和 OCR 状态会显示处理中，页面会自动轮询刷新。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setRescanDialogOpen(false);
+                rescanMutation.mutate();
+              }}
+            >
+              开始扫描
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       
       {isError && !isRefetching && (
         <div className="shrink-0 px-4 py-2 bg-warm/10 border-b border-warm/30 flex items-center justify-between gap-3 text-sm text-foreground/80">
@@ -417,26 +777,57 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
         <div className={`w-full md:w-1/2 border-b md:border-b-0 md:border-r border-border flex-col bg-muted/30 ${mobileView === "source" ? "flex" : "hidden"} md:flex`}>
           <div className="shrink-0 h-12 px-4 flex gap-2 border-b border-border bg-card justify-between items-center">
              <span className="text-sm font-medium">原文件</span>
-             <div className="flex gap-1 bg-muted p-0.5 rounded-md">
-               <button 
-                 onClick={() => setFileType("paper")} 
-                 className={`px-3 py-1 text-xs font-medium rounded-sm transition-colors ${fileType === "paper" ? "bg-card elevation-1 text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+             <div className="flex items-center gap-2">
+               <div className="flex gap-1 bg-muted p-0.5 rounded-md">
+                 <button
+                   onClick={() => setFileType("paper")}
+                   className={`px-3 py-1 text-xs font-medium rounded-sm transition-colors ${fileType === "paper" ? "bg-card elevation-1 text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                 >
+                   试卷
+                 </button>
+                 <button
+                   onClick={() => setFileType("answer")}
+                   disabled={!hasAnswer}
+                   className={`px-3 py-1 text-xs font-medium rounded-sm transition-colors ${fileType === "answer" ? "bg-card elevation-1 text-foreground" : "text-muted-foreground hover:text-foreground"} ${!hasAnswer ? "opacity-50 cursor-not-allowed" : ""}`}
+                 >
+                   答案
+                 </button>
+               </div>
+               <Button
+                 type="button"
+                 variant="ghost"
+                 size="icon"
+                 disabled={fileType !== "paper" || !hasPaperLayout}
+                 onClick={() => setShowLayoutBoxes((visible) => !visible)}
+                 title={
+                   fileType !== "paper"
+                     ? "答案文件暂不支持布局解析框"
+                     : hasPaperLayout
+                       ? (showLayoutBoxes ? "关闭布局解析框" : "开启布局解析框")
+                       : "当前任务暂无可用布局解析框"
+                 }
+                 className={`h-8 w-8 rounded-md border ${showLayoutBoxes && hasPaperLayout && fileType === "paper" ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground"}`}
                >
-                 试卷
-               </button>
-               <button 
-                 onClick={() => setFileType("answer")} 
-                 disabled={!hasAnswer}
-                 className={`px-3 py-1 text-xs font-medium rounded-sm transition-colors ${fileType === "answer" ? "bg-card elevation-1 text-foreground" : "text-muted-foreground hover:text-foreground"} ${!hasAnswer ? "opacity-50 cursor-not-allowed" : ""}`}
-               >
-                 答案
-               </button>
+                 <ScanSearch className="w-4 h-4" />
+               </Button>
              </div>
           </div>
           <div className="flex-1 overflow-auto p-4 flex flex-col items-center justify-start bg-muted/50">
+             {fileType === "paper" && layoutWarnings.length > 0 && (
+               <div className="mb-3 flex w-full max-w-[900px] items-start gap-2 rounded-md border border-warm/30 bg-warm/10 px-3 py-2 text-xs text-foreground/80">
+                 <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warm-foreground" />
+                 <span>
+                   {layoutWarnings[0]}
+                   {layoutWarnings.length > 1 ? `，另有 ${layoutWarnings.length - 1} 条布局提示` : ""}
+                 </span>
+               </div>
+             )}
              <SourcePreview
                url={api.importTaskSourceUrl(taskId, fileType)}
                file={fileType === "paper" ? task.paperFile : task.answerFile}
+               layout={fileType === "paper" ? paperLayout : null}
+               showRegions={fileType === "paper" && showLayoutBoxes}
+               onRegionClick={handleLocateLayoutQuestion}
              />
           </div>
         </div>
@@ -459,7 +850,13 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
                </div>
              ) : (
                task.questions?.map((q: any, idx: number) => (
-                 <QuestionCard key={q.id} index={idx + 1} question={q} taskId={taskId} />
+                 <div
+                   key={q.id}
+                   id={`import-question-${q.id}`}
+                   className={`scroll-mt-4 rounded-lg transition-shadow duration-300 ${highlightQuestionId === q.id ? "ring-2 ring-primary ring-offset-2 ring-offset-card" : ""}`}
+                 >
+                   <QuestionCard index={idx + 1} question={q} taskId={taskId} />
+                 </div>
                ))
              )}
           </div>

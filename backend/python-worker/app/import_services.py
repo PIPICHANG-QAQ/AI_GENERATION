@@ -3,9 +3,20 @@
 当前 Java 主后端已接管导入任务元数据，但仍通过这些函数兼容旧的 Python 任务 JSON、入库桥和本地开发数据。
 """
 
+import copy
+import hashlib
+import threading
+import time
+from difflib import SequenceMatcher
+
 from app.worker_base import *
 from app.question_markdown import *
 from app.ocr_processing import *
+from app.question_boundary import detect_sub_question_boundaries, strip_sub_label
+
+AI_STANDARDIZE_CACHE_VERSION = "2026-07-09-choice-image-ref-guard-v1"
+AI_STANDARDIZE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+AI_STANDARDIZE_CACHE_LOCK = threading.RLock()
 
 INLINE_MATH_OPERATOR = (
     r"\\(?:div|times|cdot|leq|geq|neq|approx|sim|pm|mp|to|rightarrow|leftarrow|"
@@ -16,6 +27,57 @@ INLINE_MATH_OPERATOR_FRAGMENT_RE = re.compile(
     rf"(?P<op>{INLINE_MATH_OPERATOR})\s*"
     rf"(?<!\$)\$(?!\$)(?P<right>[^$\n]+?)\$(?!\$)"
 )
+
+
+def standardize_cache_ttl_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("AI_STANDARDIZE_CACHE_TTL_SECONDS", "300")))
+    except (TypeError, ValueError):
+        return 300.0
+
+
+def standardize_cache_key(markdown: str, raw_ocr_context: str, structured_hints: dict[str, Any] | None) -> str:
+    payload = {
+        "version": AI_STANDARDIZE_CACHE_VERSION,
+        "markdown": str(markdown or ""),
+        "rawOcrContext": str(raw_ocr_context or ""),
+        "structuredHints": structured_hints or {},
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def clear_standardize_cache() -> None:
+    with AI_STANDARDIZE_CACHE_LOCK:
+        AI_STANDARDIZE_CACHE.clear()
+
+
+def cached_standardize_response(cache_key: str) -> dict[str, Any] | None:
+    ttl_seconds = standardize_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return None
+    now = time.time()
+    with AI_STANDARDIZE_CACHE_LOCK:
+        entry = AI_STANDARDIZE_CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at, response = entry
+        if expires_at <= now:
+            AI_STANDARDIZE_CACHE.pop(cache_key, None)
+            return None
+        cached = copy.deepcopy(response)
+    cached.setdefault("standardizer", {})["cacheHit"] = True
+    return cached
+
+
+def store_standardize_response(cache_key: str, response: dict[str, Any]) -> None:
+    ttl_seconds = standardize_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return
+    cached = copy.deepcopy(response)
+    cached.setdefault("standardizer", {})["cacheHit"] = False
+    with AI_STANDARDIZE_CACHE_LOCK:
+        AI_STANDARDIZE_CACHE[cache_key] = (time.time() + ttl_seconds, cached)
 
 
 def sync_import_task(task: dict[str, Any], store: dict[str, Any]) -> dict[str, Any]:
@@ -141,7 +203,235 @@ def repair_latex_delimiter_fragments(markdown: str) -> tuple[str, list[dict[str,
             }
         )
 
+    current, display_corrections = normalize_display_math_blocks(current)
+    corrections.extend(display_corrections)
     return current, corrections, warnings
+
+
+def normalize_display_math_blocks(markdown: str) -> tuple[str, list[dict[str, str]]]:
+    """Keep $$ display math delimiters on standalone lines."""
+    text = str(markdown or "")
+    parts = re.split(r"(?<!\\)(\$\$)", text)
+    if len(parts) < 3:
+        return text, []
+
+    output: list[str] = []
+    changed = False
+    in_display = False
+    for index, part in enumerate(parts):
+        if part != "$$":
+            output.append(part)
+            continue
+        if not in_display:
+            if output and output[-1] and not output[-1].endswith("\n\n"):
+                output[-1] = output[-1].rstrip() + "\n\n"
+                changed = True
+            output.append("$$\n")
+            in_display = True
+            continue
+        if output and output[-1] and not output[-1].endswith("\n"):
+            output[-1] = output[-1].rstrip() + "\n"
+            changed = True
+        output.append("$$")
+        next_part = parts[index + 1] if index + 1 < len(parts) else ""
+        if next_part and not next_part.startswith("\n\n"):
+            output.append("\n\n")
+            changed = True
+        in_display = False
+
+    fixed = "".join(output)
+    if not changed and fixed == text:
+        return text, []
+    return fixed, [
+        {
+            "before": "$$...$$ 紧邻正文",
+            "after": "$$ 块级公式分隔符独立成行",
+            "reason": "规范化展示公式块边界，避免块公式和后续题干粘连",
+        }
+    ]
+
+
+def render_validate_markdown_candidate(markdown: str) -> dict[str, Any]:
+    """Lightweight validation for Markdown/KaTeX render safety."""
+    text = str(markdown or "")
+    issues = detect_severe_latex_issues(text)
+    if re.search(r"(?<!\\)\$\$\S", text):
+        issues.append("展示公式开始分隔符后缺少换行")
+    if re.search(r"\S(?<!\\)\$\$", text):
+        issues.append("展示公式结束分隔符前缺少换行")
+    return {"valid": not issues, "issues": list(dict.fromkeys(issues))}
+
+
+def duplicate_compare_key(value: str) -> str:
+    """Normalize a markdown block for whole-block duplicate detection."""
+    text = strip_question_images_from_markdown(str(value or ""), [])
+    text = re.sub(r"\s+", "", text)
+    return text.casefold()
+
+
+def strip_leading_question_number_for_duplicate(value: str) -> str:
+    """Remove a leading question number only for duplicate comparison."""
+    return re.sub(r"^\s*(?:#{1,6}\s*)?\d{1,3}\s*[\.．、)]\s*", "", str(value or "")).strip()
+
+
+def duplicate_question_key(value: str) -> str:
+    """Normalize a question block while ignoring an optional leading question number."""
+    return duplicate_compare_key(strip_leading_question_number_for_duplicate(value))
+
+
+def duplicate_line_key(value: str) -> str:
+    """Normalize one possible question opener line for duplicate comparison."""
+    return duplicate_question_key(value)
+
+
+def collapse_adjacent_duplicate_markdown(markdown: str) -> tuple[str, list[dict[str, str]]]:
+    """Collapse an AI candidate that accidentally repeats the whole stem twice."""
+    current = str(markdown or "").strip()
+    corrections: list[dict[str, str]] = []
+    for _ in range(2):
+        collapsed = collapse_adjacent_duplicate_markdown_once(current)
+        if collapsed == current:
+            break
+        corrections.append(
+            {
+                "before": "题干候选中相邻重复的完整题干块",
+                "after": "保留第一份题干",
+                "reason": "折叠 AI 标准化候选中的整题重复输出",
+            }
+        )
+        current = collapsed
+    return current, corrections
+
+
+def collapse_adjacent_duplicate_markdown_once(markdown: str) -> str:
+    """Collapse one adjacent duplicate block when both halves are effectively identical."""
+    text = str(markdown or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(duplicate_compare_key(text)) < 80:
+        return text
+
+    repeated_suffix_collapsed = collapse_repeated_question_suffix(text)
+    if repeated_suffix_collapsed != text:
+        return repeated_suffix_collapsed
+
+    midpoint = len(text) // 2
+    split_points: list[int] = [midpoint]
+    split_points.extend(match.end() for match in re.finditer(r"\n{1,3}", text))
+    split_points = sorted(set(point for point in split_points if 0 < point < len(text)), key=lambda point: abs(point - midpoint))
+
+    for point in split_points[:80]:
+        left = text[:point].strip()
+        right = text[point:].strip()
+        left_key = duplicate_compare_key(left)
+        right_key = duplicate_compare_key(right)
+        if len(left_key) < 80 or len(right_key) < 80:
+            continue
+        if abs(len(left_key) - len(right_key)) > max(12, int(max(len(left_key), len(right_key)) * 0.04)):
+            continue
+        if left_key == right_key:
+            return left
+    return text
+
+
+def collapse_repeated_question_suffix(text: str) -> str:
+    """Collapse suffix duplicates where the first copy has a question number and the second does not."""
+    matches = list(re.finditer(r"(?m)^[ \t]*(?P<line>\S[^\n]*)", text))
+    if len(matches) < 2:
+        return text
+
+    opener_key = duplicate_line_key(matches[0].group("line"))
+    if len(opener_key) < 12:
+        return text
+
+    for match in matches[1:]:
+        start = match.start()
+        if start < max(80, int(len(text) * 0.25)):
+            continue
+        if duplicate_line_key(match.group("line")) != opener_key:
+            continue
+        prefix = text[:start].strip()
+        suffix = text[start:].strip()
+        prefix_key = duplicate_question_key(prefix)
+        suffix_key = duplicate_question_key(suffix)
+        if len(suffix_key) < 80 or len(prefix_key) < len(suffix_key) * 0.75:
+            continue
+        compare_len = min(len(prefix_key), len(suffix_key))
+        similarity = SequenceMatcher(None, prefix_key[:compare_len], suffix_key[:compare_len]).ratio()
+        if similarity >= 0.86:
+            return prefix
+    return text
+
+
+def local_sub_questions_from_markdown(markdown: str, structured_hints: dict[str, Any] | None) -> tuple[str, list[dict[str, Any]], list[str]]:
+    """Second-pass sub-question candidate extraction for standardize results."""
+    text = str(markdown or "").strip()
+    if not text:
+        return text, [], []
+    hints = structured_hints or {}
+    question_type = normalize_question_type(hints.get("type"))
+    if question_type in {"choice", "fill_blank"}:
+        return text, [], []
+
+    boundaries = detect_sub_question_boundaries(text, 0, len(text))
+    if len(boundaries) < 2:
+        return text, [], []
+
+    sub_questions: list[dict[str, Any]] = []
+    for index, boundary in enumerate(boundaries, start=1):
+        start = int(boundary["start"])
+        end = int(boundary["end"])
+        label = str(boundary.get("label") or f"({index})")
+        body = strip_sub_label(text[start:end], label).strip()
+        if not body:
+            return text, [], []
+        body_key = duplicate_compare_key(body)
+        if len(body_key) < 8 and not re.search(r"[？?。；;]|求|证|解|写|计算|化简|说明|判断|填写|补全", body):
+            return text, [], []
+        sub_type = refine_question_type_from_markdown("unknown", body)
+        sub_questions.append(
+            {
+                "id": f"sub_ai_split_{index}",
+                "label": label,
+                "type": sub_type,
+                "difficulty": "",
+                "score": 0,
+                "stem": body,
+                "stemMarkdown": body,
+                "manualMarkdown": body,
+                "answer": "",
+                "analysis": "",
+                "knowledgePointIds": [],
+                "knowledgePoints": [],
+                "images": [],
+                "options": [],
+                "aiMetadata": {
+                    "contextMatched": True,
+                    "warnings": ["AI 标准化二次识别出小问结构，请人工复核边界"],
+                },
+            }
+        )
+
+    parent_markdown = text[: int(boundaries[0]["start"])].strip()
+    warnings = ["AI 标准化二次识别出小问结构，已将小问题干作为候选返回"]
+    return parent_markdown, sub_questions, warnings
+
+
+def split_standardize_markdown_sub_questions(
+    markdown: str,
+    ai_sub_questions: list[dict[str, Any]],
+    structured_hints: dict[str, Any] | None,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, str]], list[str]]:
+    """Ensure compound-question candidates separate parent stem from subQuestions."""
+    parent_markdown, local_sub_questions, local_warnings = local_sub_questions_from_markdown(markdown, structured_hints)
+    if local_sub_questions:
+        merged = normalize_sub_questions(local_sub_questions, ai_sub_questions)
+        return parent_markdown, merged, [
+            {
+                "before": "父题题干中混排的小问内容",
+                "after": "父题题干 + subQuestions 候选",
+                "reason": "AI 标准化二次拆解出小问结构",
+            }
+        ], local_warnings
+    return markdown, ai_sub_questions, [], []
 
 
 def strip_nested_dollars_in_display_math(markdown: str) -> tuple[str, int]:
@@ -244,6 +534,60 @@ def standardize_question_hints(question: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalized_choice_hint_options(structured_hints: dict[str, Any] | None) -> list[dict[str, str]]:
+    """从结构化提示中提取稳定选择题选项。"""
+    if not isinstance(structured_hints, dict):
+        return []
+    if str(structured_hints.get("type") or "").strip() != "choice":
+        return []
+    options = []
+    seen: set[str] = set()
+    for index, item in enumerate(structured_hints.get("options") or []):
+        raw = item if isinstance(item, dict) else {"content": item}
+        label = str(raw.get("label") or raw.get("key") or raw.get("name") or raw.get("option") or chr(65 + index)).strip().upper()
+        content = str(raw.get("contentMarkdown") or raw.get("markdown") or raw.get("content") or raw.get("text") or raw.get("value") or "").strip()
+        if not label or not content or label in seen:
+            continue
+        seen.add(label)
+        options.append({"label": label, "content": content})
+    return options
+
+
+def choice_tasks_block(options: list[dict[str, str]]) -> str:
+    """把结构化选项转换为标准 tasks 块。"""
+    column_count = 4 if len(options) >= 4 else 2 if len(options) >= 2 else 1
+    lines = [rf"\begin{{tasks}}({column_count})"]
+    lines.extend(rf"\task {option['content']}" for option in options)
+    lines.append(r"\end{tasks}")
+    return "\n".join(lines)
+
+
+def protect_choice_standardize_candidate(
+    candidate_markdown: str,
+    structured_hints: dict[str, Any] | None,
+) -> tuple[str, list[dict[str, str]], list[str], list[dict[str, str]]]:
+    """防止 AI 标准化丢失原 OCR 选择题选项。"""
+    original_options = normalized_choice_hint_options(structured_hints)
+    if len(original_options) < 2:
+        return candidate_markdown, [], [], []
+    _candidate_stem, candidate_options = split_choice_options(candidate_markdown, "choice")
+    if len(candidate_options) >= len(original_options):
+        return candidate_markdown, [], [], []
+    protected = f"{str(candidate_markdown or '').strip()}\n\n{choice_tasks_block(original_options)}".strip()
+    return (
+        protected,
+        [
+            {
+                "before": "AI 标准化候选缺少稳定选择题选项",
+                "after": "保留原 OCR 结构化选项",
+                "reason": "AI 标准化选择题结构保护",
+            }
+        ],
+        ["AI 标准化候选缺少或丢失选择题选项，已保留原 OCR 选项结构"],
+        original_options,
+    )
+
+
 def remove_extracted_solution_blocks(markdown: str, answer: str, analysis: str) -> tuple[str, list[dict[str, str]], list[str]]:
     """从题干 Markdown 中移除已抽取的答案和解析块。"""
     if not str(answer or "").strip() and not str(analysis or "").strip():
@@ -336,6 +680,68 @@ def safe_normalize_standardize_candidate(markdown: str) -> tuple[dict[str, Any],
     return local_result, []
 
 
+def standardize_markdown_fallback_response(
+    original_markdown: str,
+    repaired_markdown: str,
+    raw_context: str,
+    metadata: dict[str, Any],
+    severe_issues: list[str],
+    delimiter_corrections: list[dict[str, Any]],
+    delimiter_warnings: list[str],
+) -> dict[str, Any]:
+    """LLM 不可用时返回非破坏性的本地兜底候选。"""
+    fallback_markdown = normalize_tasks_environment(repaired_markdown or original_markdown)
+    fallback_markdown, duplicate_corrections = collapse_adjacent_duplicate_markdown(fallback_markdown)
+    local_result, local_warnings = safe_normalize_standardize_candidate(fallback_markdown)
+    candidate_severe_issues = detect_severe_latex_issues(local_result["markdown"])
+    render_validation = render_validate_markdown_candidate(local_result["markdown"])
+    error = str(metadata.get("error") or "AI 标准化失败")
+    warning = f"AI 标准化暂时不可用：{error}。已返回本地兜底候选，可人工复核后保存或稍后重试 AI。"
+    retry_after = metadata.get("retryAfterSeconds")
+    metadata_warnings = metadata.get("warnings") if isinstance(metadata.get("warnings"), list) else []
+    return {
+        "markdown": local_result["markdown"],
+        "answer": "",
+        "analysis": "",
+        "subQuestions": [],
+        "standardizer": {
+            **metadata,
+            "source": "rules-fallback",
+            "error": error,
+            "fallbackUsed": True,
+            "retryable": bool(metadata.get("retryable", True)),
+            "retryAfterSeconds": retry_after if retry_after is not None else 10,
+            "status": local_result["status"],
+            "changed": local_result["markdown"] != original_markdown,
+            "fixes": [
+                *local_result["fixes"],
+                *[item["reason"] for item in delimiter_corrections],
+                *[item["reason"] for item in duplicate_corrections],
+            ],
+            "issues": local_result["issues"],
+            "severeIssues": severe_issues,
+            "candidateSevereIssues": candidate_severe_issues,
+            "rawOcrContextUsed": bool(raw_context),
+            "rawOcrFallbackUsed": False,
+            "corrections": [
+                *delimiter_corrections,
+                *duplicate_corrections,
+            ],
+            "warnings": [
+                warning,
+                *delimiter_warnings,
+                *[str(item) for item in metadata_warnings if str(item).strip()],
+                *local_warnings,
+            ],
+            "confidence": "low" if candidate_severe_issues or not render_validation["valid"] else "medium",
+            "latexDelimiterRepaired": bool(delimiter_corrections),
+            "renderValidation": render_validation,
+            "applyBlocked": bool(candidate_severe_issues) or not render_validation["valid"],
+            "cacheHit": False,
+        },
+    }
+
+
 def standardize_markdown_ai_response(
     markdown: str,
     raw_ocr_context: str = "",
@@ -347,9 +753,11 @@ def standardize_markdown_ai_response(
     llm_config = llm_status()
     repaired_markdown, delimiter_corrections, delimiter_warnings = repair_latex_delimiter_fragments(markdown)
     if delimiter_corrections:
-        local_repair_result, local_repair_warnings = safe_normalize_standardize_candidate(normalize_tasks_environment(repaired_markdown))
+        local_candidate, duplicate_corrections = collapse_adjacent_duplicate_markdown(normalize_tasks_environment(repaired_markdown))
+        local_repair_result, local_repair_warnings = safe_normalize_standardize_candidate(local_candidate)
         local_repair_severe_issues = detect_severe_latex_issues(local_repair_result["markdown"])
         if severe_issues and not local_repair_severe_issues:
+            render_validation = render_validate_markdown_candidate(local_repair_result["markdown"])
             return {
                 "markdown": local_repair_result["markdown"],
                 "answer": "",
@@ -359,7 +767,6 @@ def standardize_markdown_ai_response(
                     "provider": llm_config["provider"],
                     "model": llm_config["model"],
                     "error": None,
-                    "corrections": delimiter_corrections,
                     "warnings": [*delimiter_warnings, *local_repair_warnings],
                     "confidence": "high",
                     "status": "fixed" if local_repair_result["status"] == "ok" else local_repair_result["status"],
@@ -367,6 +774,7 @@ def standardize_markdown_ai_response(
                     "fixes": [
                         *local_repair_result["fixes"],
                         *[item["reason"] for item in delimiter_corrections],
+                        *[item["reason"] for item in duplicate_corrections],
                     ],
                     "issues": local_repair_result["issues"],
                     "severeIssues": severe_issues,
@@ -374,15 +782,25 @@ def standardize_markdown_ai_response(
                     "rawOcrContextUsed": bool(raw_context),
                     "rawOcrFallbackUsed": False,
                     "latexDelimiterRepaired": True,
+                    "corrections": [
+                        *delimiter_corrections,
+                        *duplicate_corrections,
+                    ],
+                    "renderValidation": render_validation,
+                    "applyBlocked": not render_validation["valid"],
                 },
             }
-    if severe_issues and raw_context and llm_config["enabled"] and llm_config["configured"]:
+    if severe_issues and raw_context:
         raw_candidate_severe_issues = detect_severe_latex_issues(raw_context)
         if len(raw_candidate_severe_issues) < len(severe_issues):
+            raw_candidate, raw_display_corrections = normalize_display_math_blocks(raw_context)
+            raw_candidate, duplicate_corrections = collapse_adjacent_duplicate_markdown(raw_candidate)
+            raw_candidate_severe_issues = detect_severe_latex_issues(raw_candidate)
+            render_validation = render_validate_markdown_candidate(raw_candidate)
             return {
-                "markdown": raw_context,
+                "markdown": raw_candidate,
                 "standardizer": {
-                    "source": "ai",
+                    "source": "ocr-fallback",
                     "provider": llm_config["provider"],
                     "model": llm_config["model"],
                     "error": None,
@@ -391,12 +809,14 @@ def standardize_markdown_ai_response(
                             "before": "当前编辑题干存在严重公式结构损坏",
                             "after": "同题原始 OCR 片段",
                             "reason": "原始 OCR 同题片段的 LaTeX 结构更完整，优先作为修复候选",
-                        }
+                        },
+                        *raw_display_corrections,
+                        *duplicate_corrections,
                     ],
                     "warnings": ["已使用原始 OCR 同题片段生成候选，请人工核对题号、分值和小问边界"],
                     "confidence": "medium",
                     "status": "fixed",
-                    "changed": raw_context != markdown,
+                    "changed": raw_candidate != markdown,
                     "fixes": ["使用同题原始 OCR 片段恢复严重损坏题干"],
                     "issues": [],
                     "severeIssues": severe_issues,
@@ -404,22 +824,42 @@ def standardize_markdown_ai_response(
                     "rawOcrContextUsed": True,
                     "rawOcrFallbackUsed": True,
                     "latexDelimiterRepaired": False,
+                    "renderValidation": render_validation,
+                    "applyBlocked": bool(raw_candidate_severe_issues) or not render_validation["valid"],
                 },
                 "answer": "",
                 "analysis": "",
             }
+    cache_key = standardize_cache_key(markdown, raw_context, structured_hints)
+    cached_response = cached_standardize_response(cache_key)
+    if cached_response:
+        return cached_response
     standardized_markdown, metadata = standardize_markdown_with_llm(
         repaired_markdown,
         raw_ocr_context=raw_context,
         structured_hints=structured_hints,
     )
     if standardized_markdown is None:
-        raise HTTPException(status_code=409, detail=metadata.get("error") or "AI 标准化失败")
+        return standardize_markdown_fallback_response(
+            markdown,
+            repaired_markdown,
+            raw_context,
+            metadata,
+            severe_issues,
+            delimiter_corrections,
+            delimiter_warnings,
+        )
     standardized_markdown = normalize_tasks_environment(standardized_markdown)
     standardized_markdown, post_delimiter_corrections, post_delimiter_warnings = repair_latex_delimiter_fragments(standardized_markdown)
+    standardized_markdown, duplicate_corrections = collapse_adjacent_duplicate_markdown(standardized_markdown)
     answer = str(metadata.get("answer") or "")
     analysis = str(metadata.get("analysis") or "")
-    sub_question_solutions = normalize_sub_questions(metadata.get("subQuestions"))
+    ai_sub_questions = normalize_sub_questions(metadata.get("subQuestions"))
+    standardized_markdown, sub_question_solutions, sub_split_corrections, sub_split_warnings = split_standardize_markdown_sub_questions(
+        standardized_markdown,
+        ai_sub_questions,
+        structured_hints,
+    )
     solution_answer = answer or "\n".join(str(sub.get("answer") or "") for sub in sub_question_solutions)
     solution_analysis = analysis or "\n".join(str(sub.get("analysis") or "") for sub in sub_question_solutions)
     cleaned_markdown, cleanup_corrections, cleanup_warnings = remove_extracted_solution_blocks(
@@ -427,12 +867,18 @@ def standardize_markdown_ai_response(
         solution_answer,
         solution_analysis,
     )
-    local_result, local_warnings = safe_normalize_standardize_candidate(cleaned_markdown)
+    protected_markdown, choice_corrections, choice_warnings, protected_options = protect_choice_standardize_candidate(
+        cleaned_markdown,
+        structured_hints,
+    )
+    local_result, local_warnings = safe_normalize_standardize_candidate(protected_markdown)
     candidate_severe_issues = detect_severe_latex_issues(local_result["markdown"])
-    return {
+    render_validation = render_validate_markdown_candidate(local_result["markdown"])
+    response = {
         "markdown": local_result["markdown"],
         "answer": "" if sub_question_solutions else answer,
         "analysis": "" if sub_question_solutions else analysis,
+        "options": protected_options,
         "subQuestions": sub_question_solutions,
         "standardizer": {
             **metadata,
@@ -442,7 +888,10 @@ def standardize_markdown_ai_response(
                 *local_result["fixes"],
                 *[item["reason"] for item in delimiter_corrections],
                 *[item["reason"] for item in post_delimiter_corrections],
+                *[item["reason"] for item in duplicate_corrections],
+                *[item["reason"] for item in sub_split_corrections],
                 *[item["reason"] for item in cleanup_corrections],
+                *[item["reason"] for item in choice_corrections],
             ],
             "issues": local_result["issues"],
             "severeIssues": severe_issues,
@@ -453,19 +902,29 @@ def standardize_markdown_ai_response(
                 *delimiter_corrections,
                 *metadata.get("corrections", []),
                 *post_delimiter_corrections,
+                *duplicate_corrections,
+                *sub_split_corrections,
                 *cleanup_corrections,
+                *choice_corrections,
             ],
             "warnings": [
                 *delimiter_warnings,
                 *metadata.get("warnings", []),
                 *post_delimiter_warnings,
+                *sub_split_warnings,
                 *cleanup_warnings,
+                *choice_warnings,
                 *local_warnings,
             ],
             "solutionBlockRemoved": bool(cleanup_corrections),
             "latexDelimiterRepaired": bool(delimiter_corrections or post_delimiter_corrections),
+            "renderValidation": render_validation,
+            "applyBlocked": bool(candidate_severe_issues) or not render_validation["valid"],
+            "cacheHit": False,
         },
     }
+    store_standardize_response(cache_key, response)
+    return response
 
 
 def safe_normalize_manual_markdown(markdown: str) -> dict[str, Any]:
@@ -520,10 +979,11 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
         enriched = {}
         enrichment_meta = rule_splitter_metadata("导入任务同步阶段跳过 AI 元数据补全，避免页面查询被大模型长调用阻塞")
     import_questions: list[dict[str, Any]] = []
+    source_id_counts: dict[str, int] = {}
     for index, source_question in enumerate(source_questions, start=1):
         if not isinstance(source_question, dict):
             continue
-        source_id = str(source_question.get("id") or f"q_{index}")
+        source_id = unique_import_source_question_id(source_question, index, source_id_counts)
         metadata = enriched.get(source_id, {})
         difficulty = normalize_difficulty(metadata.get("difficulty"))
         images = normalize_question_images(source_question.get("images", []))
@@ -541,7 +1001,7 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
             {
                 "id": make_id("import_question"),
                 "sourceQuestionId": source_id,
-                "number": source_question.get("number", index),
+                "number": index,
                 "status": "待校验",
                 "type": normalize_question_type(metadata.get("type") or source_question.get("type")),
                 "stemMarkdown": stem_markdown,
@@ -585,22 +1045,24 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
 def top_level_ocr_questions(outputs: dict[str, Any]) -> list[dict[str, Any]]:
     """优先从 sections 读取父题，避免扁平 questions 中的小问变成独立导入题。"""
     top_level: list[dict[str, Any]] = []
-    seen: set[str] = set()
     for section in outputs.get("sections") or []:
         if not isinstance(section, dict):
             continue
         for question in section.get("questions") or []:
             if not isinstance(question, dict):
                 continue
-            question_id = str(question.get("id") or "")
-            if question_id and question_id in seen:
-                continue
-            if question_id:
-                seen.add(question_id)
             top_level.append(question)
     if top_level:
         return top_level
     return [question for question in outputs.get("questions", []) if isinstance(question, dict)]
+
+
+def unique_import_source_question_id(source_question: dict[str, Any], index: int, counts: dict[str, int]) -> str:
+    """Return a stable per-import source id even when OCR repeats q_1..q_n in answer sections."""
+    base_id = str(source_question.get("id") or f"q_{index}").strip() or f"q_{index}"
+    occurrence = counts.get(base_id, 0) + 1
+    counts[base_id] = occurrence
+    return base_id if occurrence == 1 else f"{base_id}__occurrence_{occurrence}"
 
 
 def import_sync_ai_enrich_enabled() -> bool:
@@ -687,14 +1149,17 @@ def normalize_sub_questions(value: Any, enriched_value: Any = None) -> list[dict
             continue
         enriched = match_sub_question_enrichment(item, enriched_items, index)
         images = normalize_question_images(item.get("images", []))
+        label = str(item.get("label") or f"({index})")
         stem_markdown = strip_question_images_from_markdown(
             enriched.get("stemMarkdown") or item.get("stemMarkdown") or item.get("stem") or item.get("manualMarkdown") or "",
             images,
         )
+        stem_markdown = strip_sub_label(stem_markdown, label)
         manual_markdown = strip_question_images_from_markdown(
             enriched.get("manualMarkdown") or item.get("manualMarkdown") or stem_markdown,
             images,
         )
+        manual_markdown = strip_sub_label(manual_markdown, label)
         try:
             score = float(enriched.get("score", item.get("score", 0)) or 0)
         except (TypeError, ValueError):
@@ -703,7 +1168,7 @@ def normalize_sub_questions(value: Any, enriched_value: Any = None) -> list[dict
         result.append(
             {
                 "id": str(item.get("id") or f"sub_{index}"),
-                "label": str(item.get("label") or f"({index})"),
+                "label": label,
                 "type": normalize_question_type(enriched.get("type") or item.get("type")),
                 "difficulty": normalize_difficulty(enriched.get("difficulty") or item.get("difficulty")),
                 "score": score,
@@ -717,7 +1182,10 @@ def normalize_sub_questions(value: Any, enriched_value: Any = None) -> list[dict
                 else [],
                 "knowledgePoints": normalize_string_values(enriched.get("knowledgePoints") or item.get("knowledgePoints")),
                 "images": images,
-                "options": enriched.get("options", item.get("options", [])) if isinstance(enriched.get("options", item.get("options", [])), list) else [],
+                "options": normalize_question_options_image_refs(
+                    enriched.get("options", item.get("options", [])),
+                    images,
+                ),
                 "aiMetadata": {
                     "contextMatched": bool(enriched.get("contextMatched")),
                     "answerEvidence": str(enriched.get("answerEvidence") or ""),
@@ -856,7 +1324,7 @@ def update_import_question_from_payload(question: dict[str, Any], payload: Impor
     if payload.score is not None:
         question["score"] = payload.score
     if payload.options is not None:
-        question["options"] = payload.options
+        question["options"] = normalize_question_options_image_refs(payload.options, question.get("images"))
     if payload.status is not None:
         if payload.status not in QUESTION_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid question status")

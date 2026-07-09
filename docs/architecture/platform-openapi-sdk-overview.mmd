@@ -1,3 +1,6 @@
+%% Version: 2026-07-08 / OpenAPI 1.1.0
+%% Status: current-primary
+%% Scope: platform integration contract, OpenAPI, generated SDKs, and engine capabilities.
 flowchart LR
   PlatformApps["公司教育生态平台应用<br/>教研 / 作业 / 资源中心 / 管理后台"]:::platform
   PlatformCore["平台主系统<br/>用户 / 权限 / 组织 / 审核流 / 最终题库 / 文件中心"]:::platform
@@ -12,11 +15,12 @@ flowchart LR
 
   OcrFlow["ocr-flow<br/>试卷/答案文件解析<br/>provider contract"]:::capability
   QuestionProcessing["question-processing<br/>ProcessingJob<br/>question-package.v1"]:::capability
-  ReviewFlow["review-workbench<br/>人工校验数据与嵌入页面契约"]:::capability
+  ReviewFlow["review-workbench<br/>人工校验数据、重扫 OCR、题图与嵌入页面契约"]:::capability
   AiFlow["ai-flow<br/>标准化候选 / 解析 / 答案解析匹配<br/>LaTeX 分隔符修复"]:::capability
   ExportFlow["export-flow<br/>Markdown / DOCX / PDF 导出"]:::capability
   FileFlow["file-flow<br/>原文件 / 题图 / OCR 产物 / 导出文件"]:::capability
   CallbackFlow["callback-flow<br/>状态回调 / 签名 / 重试 / 幂等键"]:::capability
+  RescanSdk["rescanImportTask(jobId)<br/>OpenAPI 1.1.0<br/>重新投递原始 OCR job，不覆盖已编辑题目"]:::sdk
 
   EngineDb[("engine 元数据<br/>任务 / job / 文件 / callback 事件<br/>本地 H2 或企业 MySQL")]:::store
   ObjectStorage[("对象存储协议<br/>本地文件或 MinIO<br/>平台可替换为文件中心")]:::store
@@ -32,6 +36,9 @@ flowchart LR
   TsSdk --> OpenApi
   JavaSdk --> OpenApi
   EmbeddedWorkbench --> OpenApi
+  TsSdk --> RescanSdk
+  JavaSdk --> RescanSdk
+  RescanSdk --> OpenApi
 
   OpenApi --> EngineGateway
   EngineGateway --> CapabilityCatalog

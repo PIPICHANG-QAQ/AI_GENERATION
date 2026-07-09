@@ -50,6 +50,17 @@ public final class QuestionEngineModels {
     public record OcrStatus(String kind, String jobId, String status, Map<String, Object> raw) {
     }
 
+    public record ImportTaskRescanResult(
+            String taskId,
+            String status,
+            String paperOcrStatus,
+            String answerOcrStatus,
+            Boolean rescanInProgress,
+            Map<String, Object> rescannedJobs,
+            Map<String, Object> raw
+    ) {
+    }
+
     public record ProcessingJob(
             String jobId,
             String title,

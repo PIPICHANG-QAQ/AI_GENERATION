@@ -18,6 +18,7 @@ CHECKS = {
         "TenantHeader",
         "OperatorHeader",
         "/api/import-tasks/{jobId}/image-library",
+        "/api/import-tasks/{jobId}/rescan",
         "/api/import-tasks/{jobId}/questions/{questionId}/images/select",
         "/api/import-tasks/{jobId}/questions/{questionId}/standardize/ai",
         "/api/import-tasks/{jobId}/questions/{questionId}/analysis",
@@ -25,6 +26,7 @@ CHECKS = {
         "/api/question-bank/questions/{questionId}/standardize/ai",
         "/api/question-bank/questions/{questionId}/analysis",
         "QuestionImageLibrary",
+        "ImportTaskRescanResult",
         "SelectQuestionImagesRequest",
         "AiStandardizeRequest",
         "AiStandardizeResult",
@@ -34,6 +36,7 @@ CHECKS = {
         "AiAnalysisResult",
     ],
     "question-engine/sdk/generated/typescript/QuestionEngineClient.ts": [
+        "rescanImportTask",
         "getImportTaskImageLibrary",
         "selectImportQuestionImages",
         "standardizeImportQuestion",
@@ -44,6 +47,7 @@ CHECKS = {
     ],
     "question-engine/sdk/generated/typescript/models.ts": [
         "QuestionImageLibrary",
+        "ImportTaskRescanResult",
         "SelectQuestionImagesInput",
         "QuestionImageMutationResult",
         "AiStandardizeInput",
@@ -53,6 +57,7 @@ CHECKS = {
         "AiAnalysisResult",
     ],
     "question-engine/sdk/generated/java/src/main/java/com/aigeneration/questionengine/sdk/QuestionEngineClient.java": [
+        "rescanImportTask",
         "getImportTaskImageLibrary",
         "selectImportQuestionImages",
         "standardizeImportQuestion",
@@ -61,6 +66,7 @@ CHECKS = {
     ],
     "question-engine/sdk/generated/java/src/main/java/com/aigeneration/questionengine/sdk/QuestionEngineModels.java": [
         "QuestionImageLibrary",
+        "ImportTaskRescanResult",
         "SelectQuestionImagesRequest",
         "QuestionImageMutationResult",
         "AiStandardizeRequest",
@@ -78,6 +84,7 @@ CHECKS = {
         "candidateSevereIssues",
         "question-engine/sdk/USAGE.md",
         "docs/product/LOCAL_PLATFORM_AS_EXAMPLE.md",
+        "rescanImportTask",
     ],
     "question-engine/sdk/README.md": [
         "USAGE.md",
@@ -96,6 +103,7 @@ CHECKS = {
         "QuestionEngineClient",
         "createProcessingJob",
         "getQuestionPackage",
+        "rescanImportTask",
         "writeResult 默认是 false",
         "writeSkippedReason",
         "latexDelimiterRepaired",
@@ -222,6 +230,10 @@ CHECKS = {
         "allowsCapabilityRequestWithPlatformHeaders",
     ],
     "docs/delivery/DELIVERY_PACKAGE.md": [
+        "Dockerfile",
+        "docker-compose.server.yml",
+        "deploy/nginx.conf",
+        "--release-name",
         "backend/storage/",
         "backend/target/",
         "backend/python-worker/.venv/",
@@ -359,6 +371,8 @@ CHECKS = {
     ],
     "scripts/package_question_engine_delivery.py": [
         "REQUIRED_IN_PACKAGE",
+        "--release-name",
+        "contractVersion",
         "storage",
         "protocal",
         "question-engine/openapi/question-engine.v1.yaml",

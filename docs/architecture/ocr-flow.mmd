@@ -1,51 +1,98 @@
+%% Version: 2026-07-09 / product v14 / OpenAPI 1.1.0
+%% Status: current-primary
+%% Scope: authoritative end-to-end OCR-Flow algorithm, LLM routing, review, layout overlay, rescan, and AI assistance flow.
 flowchart TD
   LegendLocal["绿色：本地算力 / 本地存储"]:::local
-  LegendExternal["黄色：外部 API 算力"]:::external
-  LegendMixed["蓝色：混合编排 / 本地兜底"]:::mixed
+  LegendExternal["黄色：外部 API 算力<br/>本地开发全节点 external-only"]:::external
+  LegendMixed["蓝色：混合编排 / 服务器 hybrid"]:::mixed
+  LegendGpu["紫色：服务器 GPU 资源<br/>MinerU: GPU0 / vLLM: GPU1"]:::gpu
 
   Start(["新建导入任务<br/>填写标题、学段、学科、年级、地区、年份"]):::local
   Validate["后端校验必填项与任务标题查重<br/>拒绝同名任务"]:::local
-  Upload["保存试卷文件与可选答案文件<br/>backend/storage/import_uploads"]:::local
-  Jobs["创建试卷 / 答案 OCR-Flow job<br/>写入 jobs JSON"]:::local
+  Upload["保存试卷文件与可选答案文件<br/>Java file-flow / 本地或 MinIO 存储"]:::local
+  Jobs["创建试卷 / 答案 OCR-Flow job<br/>写入 Java 快照和 worker 兼容 store"]:::local
   JavaSnapshot["Java 持久快照<br/>java_import_tasks / java_import_questions / java_import_question_images"]:::local
   WorkerSafeStore["worker 兼容 store<br/>原子写入 + .bak 备份回退"]:::local
   FlowConfig["OCR-Flow 配置<br/>OCR_FLOW_PROVIDER / OCR_FLOW_EXTENSIONS"]:::local
+  GpuPolicy["服务器 GPU 策略<br/>MinerU / AI_GENERATION：物理 GPU0<br/>NVIDIA_VISIBLE_DEVICES=0，容器内 CUDA_VISIBLE_DEVICES=0<br/>vLLM / aux-qwen3：物理 GPU1"]:::gpu
   Provider["OCR provider<br/>默认 MinerU，可替换"]:::local
   OcrPaper["provider 解析试卷<br/>输出 Markdown、JSON、图片资源"]:::local
   OcrAnswer["可选：provider 解析答案文件<br/>作为答案与解析上下文"]:::local
-  Collect["收集 OCR 产物<br/>统一图片路径与原文件预览资源"]:::local
+  Collect["ocr-collect<br/>保留 Markdown、content_list、页码、块顺序、图片 assets"]:::local
   ImageLibrary["建立本导入任务题图库<br/>OCR 图片进入 imageLibrary"]:::local
-  LocalBoundary["local-boundary-detect<br/>本地候选边界：大题、题号、小问、选项、题图"]:::local
 
-  LlmAvailable{"DeepSeek / OpenAI 兼容 API<br/>是否已配置且可用？"}:::mixed
-  LlmBoundary["llm-boundary-refine<br/>外部 API 只确认 start/end、label、path<br/>禁止生成题干、答案、解析"]:::external
+  LocalBoundary["local-boundary-detect<br/>本地候选边界：大题、题号、小问、选项、题图"]:::local
+  BoundaryConfidence["boundaryConfidence<br/>题号连续、选项稳定、小问和题图路径可回溯"]:::mixed
+  BoundaryHigh{"本地边界高置信？"}:::mixed
+  BoundarySkip["跳过 llm-boundary-refine<br/>splitter.source=local-boundary<br/>splitter.llmCalls=[]"]:::local
+  LlmAvailable{"外部 deepseek-v4-pro<br/>或服务器本地 aux-qwen3<br/>是否已配置且可用？"}:::mixed
+  BoundaryChunks["低置信边界按题段分片<br/>LLM_BOUNDARY_CHUNK_SIZE"]:::mixed
+  LlmRoutePolicy["LLM 路由策略<br/>本地：LLM_ROUTER_MODE=external<br/>服务器：LLM_ROUTER_MODE=hybrid"]:::mixed
+  LocalAuxModel["服务器本地模型<br/>aux-qwen3-32b-fp8 on GPU1<br/>小问/标准化等低风险结构任务"]:::gpu
+  ExternalFullModel["外部满血模型<br/>deepseek-v4-pro<br/>复杂推理/高风险兜底/AI 解析"]:::external
+  LlmBoundary["llm-boundary-refine<br/>只确认 start/end、label、path<br/>禁止生成正文"]:::mixed
+  ChunkFallback["失败分片回退本地边界<br/>记录 warnings 和 llmCalls[].status"]:::mixed
+  MergeBoundary["合并分片边界<br/>保留绝对 offset 和图片归属"]:::mixed
+  BoundaryValidate{"AI 边界能否证据回溯？"}:::mixed
+  BoundaryLocalFallback["使用本地边界候选<br/>模型不可用、分片失败或校验失败"]:::local
+  BoundarySource["确定结构边界源<br/>AI merged 或 local fallback"]:::mixed
+
   BuildByEvidence["question-structure-build<br/>按 OCR 原文边界切片生成题目结构"]:::local
+  ImageCanonical["题图引用标签化<br/>原始路径 / API URL / 文件名 / 换行图片语法 -> ![](图N)<br/>选项图保留在 options；无可靠位置才追加题干并写 warning"]:::local
   SubSplit["sub-question-split<br/>大题内小问写入 subQuestions/children"]:::local
   ChoiceBlankProtect["choice-blank-structure-protect<br/>选项边界、____ 占位、题图回收"]:::mixed
   VisualRepair["visual-repair<br/>题目 crop、横线检测、可选 Pix2Text"]:::mixed
   StructureValidate{"structure-validate<br/>选项、小问、题图和证据回溯是否通过？"}:::mixed
-  RuleFallback["旧版规则拆题兜底<br/>模型不可用或结构校验失败时使用"]:::local
+  RuleFallback["旧版规则拆题兜底<br/>结构校验失败时使用"]:::local
 
   MathNormalize["本地公式标准化与校验<br/>修复常见 LaTeX 边界与风险标记"]:::local
   LatexDelimiter["确定性 LaTeX 分隔符修复<br/>展示公式嵌套 $ / 行内公式被运算符切断"]:::mixed
-  SemanticRisk{"是否命中高置信<br/>语义 OCR 风险？"}:::mixed
+  AutoRepairMode{"OCR_AUTO_SEMANTIC_REPAIR_MODE"}:::mixed
+  AutoRepairSkip["默认 skip<br/>不阻塞 OCR 主链路<br/>只记录候选数量"]:::local
+  SemanticRisk{"inline 模式下是否命中<br/>高置信语义 OCR 风险？"}:::mixed
   SemanticApi["外部 API：AI 语义修复<br/>只处理本地检测出的高置信风险"]:::external
-  SemanticVerify["本地复核 AI 修复结果<br/>低置信则保留原文并标记需复核"]:::mixed
+  SemanticVerify["本地复核 AI 修复结果<br/>低置信或仍有风险则不写回"]:::mixed
 
   MetadataDecision{"是否可调用模型补全<br/>答案、解析与元数据？"}:::mixed
   MetadataApi["外部 API：题目元数据补全<br/>题型、答案、解析、知识点、难度、分值<br/>按 subQuestions 归属答案/解析"]:::external
   MetadataFallback["本地默认元数据<br/>保留空答案/解析，难度 medium"]:::local
   BuildQuestions["生成待校验导入题目<br/>状态：待校验，保留 images、options、subQuestions"]:::local
+  PaperLayoutBuild["PaperLayoutCapability<br/>_middle.json page_size + bbox 优先<br/>父题级范围；绑定 questionId"]:::local
+  PaperPageApi["试卷分页页图 API<br/>GET /api/import-tasks/{taskId}/source/paper/pages/{pageIndex}<br/>多页 PDF 从 0 开始；答案文件暂不支持"]:::local
+  PaperLayoutWarnings["layout warnings<br/>缺 bbox、原文件缺失、页图渲染失败或类型不支持"]:::mixed
   SubQuestionNormalize["小问结构归一化<br/>children 与 subQuestions 双字段<br/>父题答案/解析为空"]:::local
+  AutoRepairSummary["autoSemanticRepair<br/>mode、candidate、applied、skipped、failed"]:::mixed
+  LlmMetrics["llmMetrics<br/>callCount、duration、chunk/item 数<br/>不记录 prompt、密钥、OCR 全文或图片 base64"]:::mixed
+  OcrOutputs["OCR outputs<br/>questions、splitter、boundaryConfidence、mathValidation、autoSemanticRepair、llmMetrics"]:::mixed
   DetailRecovery{"详情轮询发现<br/>worker task 缺失或陈旧？"}:::mixed
   RecoverFromOcr["Java 触发 worker 恢复<br/>按 OCR job 快照重建题目并回写 Java"]:::mixed
 
   Workbench["导入 OCR 工作台<br/>左侧原文件预览，右侧复合人工校验"]:::local
+  LayoutToggle["布局解析框开关<br/>开启后在试卷页图上叠加父题范围框"]:::local
+  LayoutClick["点击范围框<br/>右侧滚动到对应父题并高亮<br/>移动端切到校验题目视图"]:::local
+  RescanRequest["重新 OCR 扫描<br/>POST /api/import-tasks/{taskId}/rescan"]:::mixed
+  RescanGuard{"任务或任一 OCR job<br/>是否处理中？"}:::mixed
+  RescanReject["拒绝重复触发<br/>返回 409，前端继续轮询"]:::local
+  RescanRetry["重新投递已有试卷/答案 OCR job<br/>状态切为处理中；已有 questions 不覆盖"]:::mixed
   ManualEdit["复合编辑器<br/>大题题干 + 小问题干/答案/解析/分值/知识点"]:::local
-  AddImages["题图维护<br/>从本卷题图库导入或本地多图上传<br/>AI 解析跳过无效图片"]:::local
+  BatchAiAll["AI 解析全部<br/>前端批处理：默认补缺失解析，可选择覆盖"]:::local
+  BatchAiUnits["批量解析单元<br/>普通题整题；复合大题按小问<br/>进度 AI 解析中 n/m，失败不中断"]:::external
+  AddImages["题图维护<br/>从本卷题图库导入或本地多图上传"]:::local
+  ImageMarkdown["题图引用同步<br/>新增题图自动补稳定 图N 标签<br/>删除关联图片同步清理题干/答案/解析/小问字段<br/>剩余编号不自动重排"]:::local
   KnowledgePick["知识点库联动搜索多选<br/>保存 id 与名称"]:::local
-  SubAiStandardize["小问级 AI 标准化<br/>当前小问候选源码/预览<br/>人工应用后只更新该小问"]:::external
-  AiAnalysis["外部 API：AI 解析<br/>根据题干、答案、题型、知识点生成解析草稿<br/>含小问时返回 subQuestions 解析"]:::external
+
+  StdStart["整题 / 小问级 AI 标准化请求<br/>当前编辑稿 markdown + 可信 rawOcrContext 分离"]:::mixed
+  StdLocal["本地确定性修复<br/>LaTeX 分隔符、块公式边界、严重风险检测"]:::local
+  StdLocalSafe{"本地候选是否<br/>可渲染且无严重风险？"}:::mixed
+  StdOcr["可信 OCR 兜底<br/>同题原始 OCR 更干净时返回 source=ocr-fallback"]:::local
+  StdOcrSafe{"OCR 候选是否<br/>可渲染且更可靠？"}:::mixed
+  StdCache["LLM 标准化缓存<br/>AI_STANDARDIZE_CACHE_TTL_SECONDS"]:::mixed
+  StdApi["AI 标准化 LLM 路由<br/>本地开发：外部 deepseek-v4-pro<br/>服务器：本地 aux-qwen3 优先，失败外部兜底"]:::mixed
+  StdChoiceGuard["选择题结构保护<br/>AI 候选丢选项时恢复原 OCR options<br/>图片选项原位保留 ![](图N)"]:::mixed
+  StdGate["候选安全闸门<br/>renderValidation / applyBlocked / candidateSevereIssues"]:::mixed
+  StdPanel["候选面板<br/>区分本地修复、原始 OCR 兜底、AI 修复<br/>不可应用候选禁用按钮"]:::local
+
+  AiAnalysis["外部 API：AI 解析<br/>根据题干、答案、题型、知识点和有效题图生成解析草稿<br/>含小问时返回 subQuestions 解析"]:::external
   SubAiAnalysis["小问级 AI 解析<br/>大题材料 + 当前小问 + 题图<br/>只回填当前小问答案/解析"]:::external
   SaveReview["保存校验结果<br/>PUT /api/import-tasks/{taskId}/questions/{questionId}<br/>写回 subQuestions"]:::local
   BankDedup["题目入库查重<br/>重复题跳过或拒绝，避免重复入库"]:::local
@@ -56,31 +103,70 @@ flowchart TD
   Start --> Validate --> Upload --> Jobs
   Jobs --> JavaSnapshot
   Jobs --> WorkerSafeStore
-  Jobs --> FlowConfig --> Provider
+  Jobs --> FlowConfig --> GpuPolicy --> Provider
   Provider --> OcrPaper --> Collect
   Provider --> OcrAnswer --> Collect
-  Collect --> ImageLibrary --> LocalBoundary --> LlmAvailable
-  LlmAvailable -- "可用" --> LlmBoundary --> BuildByEvidence
-  LlmAvailable -- "不可用 / 失败" --> BuildByEvidence
-  BuildByEvidence --> SubSplit --> ChoiceBlankProtect --> VisualRepair --> StructureValidate
+  Collect --> ImageLibrary --> LocalBoundary --> BoundaryConfidence --> BoundaryHigh
+  BoundaryHigh -- "是" --> BoundarySkip --> BoundarySource
+  BoundaryHigh -- "否" --> LlmAvailable
+  LlmAvailable -- "不可用" --> BoundaryLocalFallback --> BoundarySource
+  LlmAvailable -- "可用" --> BoundaryChunks --> LlmRoutePolicy
+  LlmRoutePolicy -- "本地开发 external-only" --> ExternalFullModel --> LlmBoundary
+  LlmRoutePolicy -- "服务器低/中风险" --> LocalAuxModel --> LlmBoundary
+  LlmRoutePolicy -- "高风险 / 本地失败 / schema 失败" --> ExternalFullModel
+  LlmBoundary --> ChunkFallback --> MergeBoundary --> BoundaryValidate
+  BoundaryValidate -- "通过" --> BoundarySource
+  BoundaryValidate -- "失败" --> BoundaryLocalFallback
+  BoundarySource --> BuildByEvidence
+  BuildByEvidence --> ImageCanonical --> SubSplit --> ChoiceBlankProtect --> VisualRepair --> StructureValidate
   StructureValidate -- "通过" --> MathNormalize
   StructureValidate -- "失败" --> RuleFallback --> MathNormalize
-  MathNormalize --> LatexDelimiter --> SemanticRisk
+  MathNormalize --> LatexDelimiter --> AutoRepairMode
+  AutoRepairMode -- "skip" --> AutoRepairSkip --> MetadataDecision
+  AutoRepairMode -- "inline / inline-concurrent" --> SemanticRisk
   SemanticRisk -- "是" --> SemanticApi --> SemanticVerify --> MathNormalize
   SemanticRisk -- "否" --> MetadataDecision
-  MathNormalize --> MetadataDecision
   MetadataDecision -- "可用" --> MetadataApi --> BuildQuestions
   MetadataDecision -- "不可用 / 失败" --> MetadataFallback --> BuildQuestions
-  BuildQuestions --> SubQuestionNormalize
-  SubQuestionNormalize --> JavaSnapshot
-  SubQuestionNormalize --> WorkerSafeStore
-  SubQuestionNormalize --> DetailRecovery
+  BuildQuestions --> SubQuestionNormalize --> OcrOutputs
+  BuildQuestions --> PaperLayoutBuild
+  Collect --> PaperLayoutBuild
+  PaperLayoutBuild --> PaperPageApi
+  PaperLayoutBuild --> PaperLayoutWarnings
+  PaperLayoutBuild --> OcrOutputs
+  BoundarySkip --> LlmMetrics
+  LlmBoundary --> LlmMetrics
+  LocalAuxModel --> LlmMetrics
+  ExternalFullModel --> LlmMetrics
+  SemanticApi --> LlmMetrics
+  MetadataApi --> LlmMetrics
+  AutoRepairSkip --> AutoRepairSummary --> OcrOutputs
+  SemanticVerify --> AutoRepairSummary
+  LlmMetrics --> OcrOutputs
+  OcrOutputs --> JavaSnapshot
+  OcrOutputs --> WorkerSafeStore
+  OcrOutputs --> DetailRecovery
   DetailRecovery -- "是" --> RecoverFromOcr --> JavaSnapshot --> Workbench
   DetailRecovery -- "否" --> Workbench
+  PaperPageApi --> LayoutToggle
+  PaperLayoutWarnings --> Workbench
+  Workbench --> LayoutToggle --> LayoutClick --> ManualEdit
+  Workbench --> RescanRequest --> RescanGuard
+  RescanGuard -- "是" --> RescanReject --> Workbench
+  RescanGuard -- "否" --> RescanRetry --> OcrPaper
+  RescanRetry --> OcrAnswer
   Workbench --> ManualEdit
-  ManualEdit --> AddImages --> SaveReview
+  ManualEdit --> AddImages --> ImageMarkdown --> SaveReview
   ManualEdit --> KnowledgePick --> SaveReview
-  ManualEdit --> SubAiStandardize --> SaveReview
+  ManualEdit --> StdStart --> StdLocal --> StdLocalSafe
+  StdLocalSafe -- "是" --> StdGate
+  StdLocalSafe -- "否" --> StdOcr --> StdOcrSafe
+  StdOcrSafe -- "是" --> StdGate
+  StdOcrSafe -- "否" --> StdCache --> StdApi --> StdChoiceGuard --> StdGate
+  StdGate --> StdPanel
+  StdPanel -- "人工应用" --> SaveReview
+  StdPanel -- "不可应用 / 取消" --> ManualEdit
+  ManualEdit --> BatchAiAll --> BatchAiUnits --> SaveReview
   ManualEdit --> AiAnalysis --> SaveReview
   ManualEdit --> SubAiAnalysis --> SaveReview
   SaveReview --> BankDedup --> Bank --> PaperSelect --> PaperPreview
@@ -88,3 +174,4 @@ flowchart TD
   classDef local fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;
   classDef external fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1px;
   classDef mixed fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1px;
+  classDef gpu fill:#f3e8ff,stroke:#7e22ce,color:#581c87,stroke-width:1px;

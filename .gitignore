@@ -1,4 +1,6 @@
 .DS_Store
+.idea/
+.run/
 node_modules/
 dist/
 .venv/
@@ -17,3 +19,4 @@ local-platform/dist/
 server-data/
 tmp/
 protocal/
+vendor/

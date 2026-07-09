@@ -6,6 +6,7 @@ import com.aigeneration.questionengine.sdk.QuestionEngineModels.CapabilitySummar
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.DeliveryBoundary;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.EngineCatalog;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.EngineInterfaceDescriptor;
+import com.aigeneration.questionengine.sdk.QuestionEngineModels.ImportTaskRescanResult;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.AiAnalysisRequest;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.AiAnalysisResult;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.AiStandardizeRequest;
@@ -79,6 +80,13 @@ public class QuestionEngineClient {
 
     public QuestionPackage getQuestionPackage(String jobId) throws IOException, InterruptedException {
         return objectMapper.readValue(get("/api/capabilities/question-processing/jobs/" + encode(jobId) + "/question-package"), QuestionPackage.class);
+    }
+
+    public ImportTaskRescanResult rescanImportTask(String jobId) throws IOException, InterruptedException {
+        return objectMapper.readValue(postJson(
+                "/api/import-tasks/" + encode(jobId) + "/rescan",
+                Map.of()
+        ), ImportTaskRescanResult.class);
     }
 
     public QuestionImageLibrary getImportTaskImageLibrary(String jobId) throws IOException, InterruptedException {

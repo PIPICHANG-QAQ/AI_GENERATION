@@ -6,7 +6,7 @@ Accepted
 
 ## 背景
 
-OCR provider、Markdown/LaTeX 处理、AI prompt 编排和 Pandoc 导出已有稳定 Python 实现。完全重写到 Java 会增加风险，并拖慢交付。
+OCR provider、Markdown/LaTeX 处理、AI prompt 编排、DOCX Pandoc 导出和 PDF XeLaTeX 渲染已有稳定 Python 实现。完全重写到 Java 会增加风险，并拖慢交付。
 
 同时，平台不能直接依赖 Python worker 的兼容 `/api/*` 路由，否则会绕过 Java 能力契约、OpenAPI、SDK、任务状态和安全边界。
 
@@ -19,7 +19,7 @@ Python worker 只保留执行能力：
 - 拆题。
 - Markdown/LaTeX 标准化。
 - AI 标准化和 AI 解析。
-- Pandoc/XeLaTeX 导出。
+- DOCX Pandoc 导出和 PDF XeLaTeX 预览模板导出；环境缺失时保留旧 fallback。
 - Java 仍需调用的短期兼容桥。
 
 平台正式集成只调用 Java backend。

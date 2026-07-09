@@ -146,6 +146,36 @@ def normalize_asset_path(path: str) -> str:
     return path.split("?", 1)[0].split("#", 1)[0].lstrip("./")
 
 
+def normalize_question_image_label(value: Any) -> str:
+    """归一化题图标签为 图N。"""
+    match = re.match(r"^(?:题图|图|#)?\s*([1-9]\d*)$", str(value or "").strip(), flags=re.I)
+    return f"图{int(match.group(1))}" if match else ""
+
+
+def question_image_label(image: dict[str, Any], index: int) -> str:
+    """返回题图稳定标签。"""
+    for key in ("label", "refLabel", "imageLabel"):
+        label = normalize_question_image_label(image.get(key))
+        if label:
+            return label
+    raw = image.get("raw")
+    if isinstance(raw, dict):
+        for key in ("label", "refLabel", "imageLabel"):
+            label = normalize_question_image_label(raw.get(key))
+            if label:
+                return label
+    name_label = normalize_question_image_label(image.get("name"))
+    if name_label:
+        return name_label
+    return f"图{index + 1}"
+
+
+def image_label_number(label: str) -> int:
+    """返回 图N 中的 N。"""
+    match = re.match(r"^图([1-9]\d*)$", str(label or "").strip())
+    return int(match.group(1)) if match else 0
+
+
 def image_from_path(image_path: str, assets: list[dict[str, Any]]) -> dict[str, Any]:
     """根据图片路径和资源列表构造题图对象。"""
     normalized_image_path = normalize_asset_path(image_path)
@@ -265,7 +295,8 @@ def detect_choice_option_markers(markdown: str) -> list[dict[str, Any]]:
     return sorted(deduped.values(), key=lambda item: (item["marker_start"], item["content_start"]))
 
 
-TRAILING_IMAGE_BLOCK_RE = re.compile(r"(?:\s*!\[[^\]]*]\([^)]+\)\s*)+$")
+MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*]\s*\(\s*<?([^>)\s]+)>?(?:\s+['\"][^)]*['\"])?\s*\)")
+TRAILING_IMAGE_BLOCK_RE = re.compile(r"(?:\s*!\[[^\]]*]\s*\([^)]+\)\s*)+$")
 
 
 def split_trailing_image_block(content: str) -> tuple[str, str]:
@@ -291,6 +322,10 @@ def normalize_image_ref(value: Any) -> str:
 def markdown_contains_question_image(markdown: str, image: dict[str, Any]) -> bool:
     """判断 Markdown 是否已包含指定题图。"""
     haystack = str(markdown or "").lower()
+    label = question_image_label(image, int(image.get("index", 0) or 0))
+    label_number = image_label_number(label)
+    if label and re.search(rf"!\[[^\]]*]\s*\(\s*(?:{re.escape(label)}|题图{label_number}|#{label_number})\s*\)", str(markdown or "")):
+        return True
     for key in ("path", "name", "url"):
         normalized = normalize_image_ref(image.get(key))
         if not normalized:
@@ -303,11 +338,9 @@ def markdown_contains_question_image(markdown: str, image: dict[str, Any]) -> bo
 
 def question_image_markdown(image: dict[str, Any], index: int) -> str:
     """生成题图 Markdown 片段。"""
-    src = str(image.get("path") or image.get("url") or image.get("name") or "").strip()
-    if not src:
+    if not isinstance(image, dict):
         return ""
-    alt = re.sub(r"[\[\]\r\n]+", " ", str(image.get("name") or f"题图 {index + 1}")).strip()
-    return f"![{alt}]({src})"
+    return f"![]({question_image_label(image, index)})"
 
 
 def append_question_images_to_markdown(markdown: str, images: Any) -> str:
@@ -336,15 +369,28 @@ def append_question_images_to_markdown(markdown: str, images: Any) -> str:
     return f"{base}{separator}{image_block}".strip()
 
 
-def strip_question_images_from_markdown(markdown: str, images: Any) -> str:
-    """从 Markdown 中移除已结构化的题图片段。"""
+def strip_question_images_from_markdown(
+    markdown: str,
+    images: Any,
+    *,
+    append_missing: bool = True,
+    sibling_texts: Any = None,
+) -> str:
+    """把 Markdown 题图引用规范为稳定 图N 标签，并补齐缺失引用。"""
     text = str(markdown or "")
     if not text or not isinstance(images, list):
         return text.strip()
-    refs: set[str] = set()
-    for image in images:
+    normalized_images = normalize_question_images(images)
+    refs_by_label: dict[str, set[str]] = {}
+    for index, image in enumerate(normalized_images):
         if not isinstance(image, dict):
             continue
+        label = question_image_label(image, index)
+        refs: set[str] = {normalize_image_ref(label)}
+        label_number = image_label_number(label)
+        if label_number:
+            refs.add(normalize_image_ref(f"题图{label_number}"))
+            refs.add(normalize_image_ref(f"#{label_number}"))
         for key in ("path", "url", "name"):
             value = str(image.get(key) or "").strip()
             if not value:
@@ -353,19 +399,89 @@ def strip_question_images_from_markdown(markdown: str, images: Any) -> str:
             refs.add(value)
             refs.add(normalized)
             refs.add(Path(normalized).name)
-    if not refs:
+        refs_by_label[label] = {normalize_image_ref(ref) for ref in refs if ref}
+    if not refs_by_label:
         return text.strip()
 
-    def should_remove(line: str) -> bool:
-        """执行 should remove 逻辑。"""
-        match = re.search(r"!\[[^\]]*\]\(([^)]+)\)", line)
-        if not match:
-            return False
-        src = match.group(1).strip()
-        candidates = {src, normalize_asset_path(src), Path(normalize_asset_path(src)).name}
-        return any(candidate and candidate in refs for candidate in candidates)
+    used_labels: set[str] = set()
 
-    return "\n".join(line for line in text.splitlines() if not should_remove(line)).strip()
+    def replace_ref(match: re.Match[str]) -> str:
+        src = match.group(1).strip().strip("<>")
+        normalized = normalize_image_ref(src)
+        filename = Path(normalize_asset_path(src)).name.lower()
+        for label, refs in refs_by_label.items():
+            if normalized in refs or filename in refs:
+                used_labels.add(label)
+                return f"![]({label})"
+        return match.group(0)
+
+    normalized_text = MARKDOWN_IMAGE_RE.sub(replace_ref, text)
+    if not append_missing:
+        return normalized_text.strip()
+
+    sibling_markdowns = [str(item or "") for item in sibling_texts] if isinstance(sibling_texts, list) else []
+    missing_lines = []
+    for index, image in enumerate(normalized_images):
+        label = question_image_label(image, index)
+        is_referenced_elsewhere = any(markdown_contains_question_image(item, image) for item in sibling_markdowns)
+        if label and label not in used_labels and not markdown_contains_question_image(normalized_text, image) and not is_referenced_elsewhere:
+            missing_lines.append(question_image_markdown(image, index))
+    if missing_lines:
+        separator = "\n\n" if normalized_text.strip() else ""
+        missing_block = "\n\n".join(missing_lines)
+        normalized_text = f"{normalized_text.strip()}{separator}{missing_block}"
+    return normalized_text.strip()
+
+
+def first_text_value(*values: Any) -> str:
+    """返回第一个非空文本值。"""
+    for value in values:
+        normalized = str(value or "").strip()
+        if normalized:
+            return normalized
+    return ""
+
+
+def normalize_question_options_image_refs(options: Any, images: Any) -> list[dict[str, Any]]:
+    """规范选择题选项中的题图引用，但不把缺失题图追加到选项里。"""
+    if not isinstance(options, list):
+        return []
+    normalized_options: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for index, item in enumerate(options):
+        raw = item if isinstance(item, dict) else {}
+        fallback_label = chr(65 + index)
+        label = normalize_choice_label(
+            str(raw.get("label") or raw.get("key") or raw.get("name") or raw.get("option") or fallback_label)
+            if isinstance(raw, dict)
+            else fallback_label
+        )
+        content = (
+            first_text_value(raw.get("contentMarkdown"), raw.get("markdown"), raw.get("text"), raw.get("content"), raw.get("value"))
+            if isinstance(raw, dict)
+            else str(item or "").strip()
+        )
+        if images:
+            content = strip_question_images_from_markdown(content, images, append_missing=False)
+        if not label or not content or label in seen_labels:
+            continue
+        seen_labels.add(label)
+        normalized_options.append({"label": label, "content": content, "contentMarkdown": content})
+    return normalized_options
+
+
+def option_texts(options: Any) -> list[str]:
+    """提取选项正文，用于题图引用去重。"""
+    if not isinstance(options, list):
+        return []
+    texts = []
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        content = first_text_value(option.get("contentMarkdown"), option.get("content"), option.get("markdown"), option.get("text"))
+        if content:
+            texts.append(content)
+    return texts
 
 
 def normalize_question_images(images: Any) -> list[dict[str, Any]]:
@@ -374,6 +490,7 @@ def normalize_question_images(images: Any) -> list[dict[str, Any]]:
         return []
     normalized_images: list[dict[str, Any]] = []
     seen: set[str] = set()
+    max_label = 0
     for index, image in enumerate(images):
         if not isinstance(image, dict):
             continue
@@ -386,7 +503,13 @@ def normalize_question_images(images: Any) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
-        normalized_image = {"name": name, "path": path, "url": url}
+        label = question_image_label(image, index)
+        label_number = image_label_number(label)
+        if label_number <= max_label and not normalize_question_image_label(image.get("label")):
+            label_number = max_label + 1
+            label = f"图{label_number}"
+        max_label = max(max_label, label_number)
+        normalized_image = {"name": name, "path": path, "url": url, "label": label, "refLabel": label}
         for key in (
             "source",
             "size",
@@ -410,17 +533,32 @@ def normalize_question_images(images: Any) -> list[dict[str, Any]]:
 def ensure_question_images_in_markdown(question: dict[str, Any]) -> bool:
     """确保题目 Markdown 中包含题图引用。"""
     changed = False
-    images = question.get("images") or []
+    images = normalize_question_images(question.get("images") or [])
+    if images != (question.get("images") or []):
+        question["images"] = images
+        changed = True
+    if question.get("options"):
+        next_options = normalize_question_options_image_refs(question.get("options"), images)
+        if next_options != question.get("options"):
+            question["options"] = next_options
+            changed = True
     if images:
+        sibling_texts = option_texts(question.get("options")) + [
+            str(question.get("answer") or ""),
+            str(question.get("analysis") or ""),
+        ]
         stem_markdown = str(question.get("stemMarkdown") or "")
-        next_stem_markdown = strip_question_images_from_markdown(stem_markdown, images)
+        had_positioned_ref = any(markdown_contains_question_image(stem_markdown, image) for image in images)
+        next_stem_markdown = strip_question_images_from_markdown(stem_markdown, images, sibling_texts=sibling_texts)
         if next_stem_markdown != stem_markdown:
             question["stemMarkdown"] = next_stem_markdown
             changed = True
+            if not had_positioned_ref:
+                add_question_image_warning(question)
 
         if question.get("manualMarkdown"):
             manual_markdown = str(question.get("manualMarkdown") or "")
-            next_manual_markdown = strip_question_images_from_markdown(manual_markdown, images)
+            next_manual_markdown = strip_question_images_from_markdown(manual_markdown, images, sibling_texts=sibling_texts)
             if next_manual_markdown != manual_markdown:
                 question["manualMarkdown"] = next_manual_markdown
                 changed = True
@@ -431,13 +569,24 @@ def ensure_question_images_in_markdown(question: dict[str, Any]) -> bool:
     return changed
 
 
+def add_question_image_warning(question: dict[str, Any]) -> None:
+    """记录题图无 OCR 位置时的追加提示。"""
+    warning = "OCR 已识别题图但未提供可靠插入位置，已追加到题干末尾，请人工复核题图位置"
+    warnings = question.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    if warning not in warnings:
+        warnings.append(warning)
+    question["warnings"] = warnings
+
+
 def question_to_edit_markdown(question: dict[str, Any]) -> str:
     """将题目转换为人工编辑 Markdown。"""
-    if question.get("manualMarkdown"):
-        return strip_question_images_from_markdown(str(question["manualMarkdown"]), question.get("images"))
-    markdown = strip_question_images_from_markdown(str(question.get("stemMarkdown") or ""), question.get("images"))
-    options = question.get("options") or []
-    if options:
+    options = normalize_question_options_image_refs(question.get("options") or [], question.get("images"))
+    siblings = option_texts(options)
+    source_markdown = str(question.get("manualMarkdown") or question.get("stemMarkdown") or "")
+    markdown = strip_question_images_from_markdown(source_markdown, question.get("images"), sibling_texts=siblings)
+    if options and not split_tasks_options(markdown)[1]:
         option_lines = ["", r"\begin{tasks}(2)"]
         for option in options:
             if isinstance(option, dict):

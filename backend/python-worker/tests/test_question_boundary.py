@@ -3,11 +3,60 @@ import unittest
 from app.question_boundary import (
     build_structure_from_boundaries,
     detect_local_boundaries,
+    evaluate_boundary_confidence,
+    plan_boundary_chunks,
     validate_structure,
 )
+from app.question_markdown import question_to_edit_markdown
 
 
 class QuestionBoundaryTest(unittest.TestCase):
+    def test_high_confidence_choice_boundaries_can_skip_llm(self):
+        markdown = """一、选择题
+1. 下列说法正确的是（ ）
+A. 甲
+B. 乙
+C. 丙
+D. 丁
+2. 下列说法错误的是（ ）
+A. 甲
+B. 乙
+C. 丙
+D. 丁
+"""
+        boundaries = detect_local_boundaries(markdown, [])
+        confidence = evaluate_boundary_confidence(markdown, boundaries, [])
+
+        self.assertTrue(confidence["highConfidence"])
+        self.assertEqual([], confidence["lowConfidenceQuestionIds"])
+
+    def test_low_confidence_when_question_numbers_are_not_monotonic(self):
+        markdown = """一、选择题
+1. 第一题
+3. 第三题
+"""
+        boundaries = detect_local_boundaries(markdown, [])
+        confidence = evaluate_boundary_confidence(markdown, boundaries, [])
+
+        self.assertFalse(confidence["highConfidence"])
+        self.assertIn("question-number-gap", confidence["reasons"])
+
+    def test_boundary_chunks_preserve_absolute_offsets(self):
+        markdown = """一、选择题
+1. 第一题
+2. 第二题
+3. 第三题
+4. 第四题
+"""
+        boundaries = detect_local_boundaries(markdown, [])
+        chunks = plan_boundary_chunks(markdown, boundaries, chunk_size=2)
+
+        self.assertEqual(2, len(chunks))
+        self.assertEqual(0, chunks[0]["index"])
+        self.assertLess(chunks[0]["start"], chunks[0]["end"])
+        self.assertGreaterEqual(chunks[1]["start"], chunks[0]["start"])
+        self.assertTrue(all(question["start"] >= chunks[0]["start"] for question in chunks[0]["localBoundaries"]["questions"]))
+
     def test_detects_sub_questions_inside_parent_question(self):
         markdown = """## 三、解答题
 21. 已知函数 $f(x)=x^3-3x+1$。
@@ -129,6 +178,45 @@ $\\angle AOD + \\angle BOD = 180^{\\circ}$
         self.assertIn("180", question["options"][-1]["content"])
         self.assertNotIn("![]", question["options"][-1]["content"])
 
+    def test_choice_option_images_are_labelized_without_moving_to_stem(self):
+        markdown = """一、选择题
+1. 观察图形，选择正确选项。
+
+![](images/stem.png)
+
+\\begin{tasks}(4)
+\\task ![]
+(images/a.png)
+\\task ![]
+(images/b.png)
+\\task ![]
+(images/c.png)
+\\task ![]
+(images/d.png)
+\\end{tasks}
+"""
+        assets = [
+            {"name": "stem.png", "path": "images/stem.png", "url": "/stem.png"},
+            {"name": "a.png", "path": "images/a.png", "url": "/a.png"},
+            {"name": "b.png", "path": "images/b.png", "url": "/b.png"},
+            {"name": "c.png", "path": "images/c.png", "url": "/c.png"},
+            {"name": "d.png", "path": "images/d.png", "url": "/d.png"},
+        ]
+
+        boundaries = detect_local_boundaries(markdown, assets)
+        structured = build_structure_from_boundaries(markdown, boundaries, assets)
+        question = structured["sections"][0]["questions"][0]
+        edit_markdown = question_to_edit_markdown(question)
+
+        self.assertEqual("choice", question["type"])
+        self.assertIn("![](图1)", question["stemMarkdown"])
+        self.assertNotIn("![](图2)", question["stemMarkdown"])
+        self.assertNotIn("images/a.png", question["stemMarkdown"])
+        self.assertEqual(["![](图2)", "![](图3)", "![](图4)", "![](图5)"], [option["content"] for option in question["options"]])
+        self.assertIn("\\task ![](图2)", edit_markdown)
+        self.assertNotIn("images/a.png", edit_markdown)
+        self.assertEqual(1, edit_markdown.count("![](图2)"))
+
     def test_completion_fill_blank_keeps_placeholders_and_image(self):
         markdown = """三、解答题
 22. （8分）完成推理填空
@@ -159,6 +247,8 @@ $\\therefore A D / / B C ($ ).
         self.assertEqual([], question["subQuestions"])
         self.assertIn("____", question["stemMarkdown"])
         self.assertNotIn("11 C", question["stemMarkdown"])
+        self.assertIn("![](图1)", question["stemMarkdown"])
+        self.assertNotIn("images/proof.png", question["stemMarkdown"])
         self.assertEqual(["images/proof.png"], [image["path"] for image in question["images"]])
 
     def test_blank_slot_task_normalization_is_cue_based(self):
@@ -216,6 +306,33 @@ $x ^ { 2 } + 4 x + 4 =$ $1 6 x ^ { 2 } + 2 4 x + 9 =$ $9 x ^ { 2 } - 1 2 x + 4 =
         self.assertEqual([], parent["images"])
         self.assertEqual(["images/sub1.png"], [image["path"] for image in parent["subQuestions"][0]["images"]])
         self.assertEqual([], parent["subQuestions"][1]["images"])
+
+    def test_trims_answer_section_title_from_last_sub_question(self):
+        markdown = """## 三、解答题
+28. （12分）如图，抛物线经过 A、B、C 三点。
+(1) 求抛物线的函数表达式；
+(2) 求点 C' 和点 D 的坐标；
+(3) 设 P 是抛物线上位于对称轴右侧的一点，点 Q 在抛物线的对称轴上，求直线BP的函数表达式
+
+![](images/q28-3.png)
+
+# 2019年四川省成都市中考数学试卷
+
+参考答案与试题解析
+1. 答案 A
+"""
+        assets = [{"name": "q28-3.png", "path": "images/q28-3.png", "url": "/q28-3.png"}]
+
+        boundaries = detect_local_boundaries(markdown, assets)
+        structured = build_structure_from_boundaries(markdown, boundaries, assets)
+        child = structured["sections"][0]["questions"][0]["subQuestions"][2]
+
+        self.assertIn("设 P 是抛物线", child["stemMarkdown"])
+        self.assertIn("![](图1)", child["stemMarkdown"])
+        self.assertNotIn("images/q28-3.png", child["stemMarkdown"])
+        self.assertNotIn("2019年四川省成都市中考数学试卷", child["stemMarkdown"])
+        self.assertNotIn("参考答案与试题解析", child["stemMarkdown"])
+        self.assertEqual(["images/q28-3.png"], [image["path"] for image in child["images"]])
 
     def test_trims_overlapping_llm_child_boundaries(self):
         markdown = """## 三、解答题

@@ -208,7 +208,7 @@ flowchart LR
 - `[封装能力]` 题目内容来自 `question-package.v1` 或平台题库。
 - `[封装能力]` 导出渲染能力可由 export-flow/Python worker 提供。
 - `[本地演示]` `subSelections` 验证按小问组卷；正式平台应在自己的试卷模型中保存等价选择关系。
-- `[需配置]` Pandoc、XeLaTeX、中文字体、导出文件存储需要配置。
+- `[需配置]` Pandoc、XeLaTeX/中文 LaTeX 包和导出文件存储需要配置；PDF 公式质量依赖 XeLaTeX 主路径，缺失时会回退文本版。
 
 平台必须自研：
 
@@ -288,7 +288,7 @@ flowchart LR
 - 平台前端：实现上传入口、复核页、题库页、组卷页、知识点页、权限展示和业务交互。
 - 平台 Java 服务：统一调用 SDK，保存平台任务、权限、审计、重试、回调、MQ、最终入库。
 - question-engine Java backend：提供能力目录、任务状态、标准题目包、题图、AI、回调和运行时入口。
-- Python worker：只做 OCR、AI 标准化、AI 解析、Pandoc/LaTeX 渲染等计算任务。
+- Python worker：只做 OCR、AI 标准化、AI 解析、DOCX Pandoc 渲染和 PDF XeLaTeX 渲染等计算任务。
 
 ## 不推荐接入方式
 

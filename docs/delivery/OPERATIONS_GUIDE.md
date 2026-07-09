@@ -7,14 +7,15 @@
 | 组件 | 必选 | 职责 |
 | --- | --- | --- |
 | Java backend | 必选 | 对外能力 API、任务状态、文件元数据、OpenAPI/SDK 契约、callback-flow |
-| Python worker | 必选 | OCR provider 调用、拆题、公式处理、AI 标准化/解析、Pandoc 导出 |
+| Python worker | 必选 | OCR provider 调用、拆题、公式处理、AI 标准化/解析、DOCX/PDF 导出 |
 | MySQL | 生产必选 | Java 业务表、任务表、题目快照、callback event |
 | 对象存储 / MinIO | 生产必选 | 上传原文件、题图、OCR 产物、导出文件 |
 | Redis | 推荐 | 缓存、限流、分布式锁或后续任务队列辅助 |
 | MQ | 推荐 | 生产异步任务、重试、削峰和死信 |
 | OCR provider | 必选 | 默认 MinerU，可替换其它 provider |
 | LLM provider | 可选但推荐 | AI 拆题、AI 标准化、AI 解析 |
-| Pandoc + XeLaTeX | 可选 | DOCX/PDF 导出 |
+| Pandoc | 可选 | DOCX 主路径导出；缺失时使用旧 DOCX fallback |
+| XeLaTeX + 中文 LaTeX 包 | 可选但推荐 | 高质量 PDF 主路径导出，要求公式、题型徽标、小问卡片和作答区稳定渲染 |
 
 Python worker 的 `.venv` 必须在目标机器本地创建，不得从开发机或交付包复制。虚拟环境里的 Python 解释器和 `mineru`、`uvicorn` 等 console script 会记录绝对路径；换用户、换目录或换机器后通常不可用。
 
@@ -89,6 +90,10 @@ curl http://<java-host>:8018/api/engine/interfaces
 | `MINERU_COMMAND` | 绝对路径 | MinerU CLI 路径 |
 | `MINERU_WHEELHOUSE` | `vendor/mineru-wheelhouse` | 可选 MinerU 离线 wheelhouse 路径 |
 | `MINERU_TIMEOUT_SECONDS` | 按文件页数调整 | OCR 超时 |
+| `NVIDIA_VISIBLE_DEVICES` | `0` | 服务器 Docker 只给 AI_GENERATION / MinerU 暴露物理 GPU0；vLLM / aux-qwen3-32b-fp8 使用物理 GPU1 |
+| `OCR_CUDA_VISIBLE_DEVICES` | `0` | 容器内 CUDA 设备号；当只暴露物理 GPU0 时，容器内应使用 `0` |
+| `MINERU_VIRTUAL_VRAM_SIZE` | `48` | MinerU 按 48GB 级别显存选择批处理策略，给 4090 保留少量冗余 |
+| `MINERU_HYBRID_BATCH_RATIO` | `16` | MinerU hybrid 模式 batch ratio，适配 32GB 以上显存 |
 | `ENABLE_LLM_SPLIT` | `true` 或 `false` | 是否启用大模型拆题 |
 | `DEEPSEEK_API_KEY` | 密钥管理注入 | DeepSeek API Key，新部署推荐使用 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek 官方 OpenAI 兼容地址 |
@@ -99,18 +104,49 @@ curl http://<java-host>:8018/api/engine/interfaces
 | `LLM_PROVIDER` | `deepseek` / `dashscope` | 模型 provider 标识 |
 | `LLM_SPLIT_TIMEOUT_SECONDS` | 按模型 SLA 调整 | LLM 超时 |
 | `LLM_BOUNDARY_TIMEOUT_SECONDS` | 按模型 SLA 调整 | AI 边界确认超时 |
+| `LLM_STANDARDIZE_TIMEOUT_SECONDS` | `60` | 人工触发 AI 标准化的单次 LLM 调用超时 |
+| `AI_STANDARDIZE_CACHE_TTL_SECONDS` | `300` | AI 标准化 LLM 成功结果短期缓存 TTL；设为 `0` 可关闭 |
+| `LLM_STANDARDIZE_MAX_CONCURRENCY` | `4` | 人工触发 AI 标准化同步请求的任务级并发上限 |
+| `LLM_ANALYSIS_MAX_CONCURRENCY` | `4` | 人工触发 AI 解析同步请求的任务级并发上限 |
+| `LLM_STANDARDIZE_MAX_ATTEMPTS` | `2` | AI 标准化 LLM schema/超时失败后的最多尝试次数，建议 `1` 到 `3` |
+| `LLM_ANALYSIS_MAX_ATTEMPTS` | `2` | AI 解析 LLM schema/超时失败后的最多尝试次数，建议 `1` 到 `3` |
+| `LLM_STANDARDIZE_RETRY_AFTER_SECONDS` | `10` | AI 标准化兜底响应建议前端/用户多久后重试 |
+| `LLM_ANALYSIS_RETRY_AFTER_SECONDS` | `10` | AI 解析兜底响应建议前端/用户多久后重试 |
+| `LLM_ROUTER_MODE` | 本地 `external`，服务器 `hybrid` | LLM 路由模式：AI 边界确认默认走外部满血模型；服务器 hybrid 下其它低风险结构任务可本地优先、外部兜底 |
+| `LOCAL_LLM_ENABLED` | `false` | 是否启用服务器本地 OpenAI 兼容模型 |
+| `LOCAL_LLM_BASE_URL` | `http://127.0.0.1:8001/v1` | 本地模型 OpenAI 兼容地址，例如 aux-qwen3-32b-fp8 服务 |
+| `LOCAL_LLM_MODEL` | `aux-qwen3-32b-fp8` | 本地模型名 |
+| `LOCAL_LLM_MAX_CONCURRENCY` | `4` | 本地模型并发上限；应按 GPU 显存和服务吞吐调整 |
+| `LOCAL_LLM_DISABLE_THINKING` | `true` | 对 Qwen3 类本地模型关闭 thinking 模式，降低 JSON/schema 输出被 reasoning 文本污染的概率 |
+| `LLM_EXTERNAL_FALLBACK_ENABLED` | `true` | 本地模型失败、schema 失败或结构校验失败时是否升级外部模型 |
+| `LLM_EXTERNAL_MAX_CONCURRENCY` | `4` | 外部满血模型 endpoint 并发上限；必须按模型网关限流调整 |
+| `LLM_ROUTER_EXTERNAL_FIRST_RISK_THRESHOLD` | `0.92` | 风险评分达到阈值时直接外部优先 |
+| `LLM_ROUTER_CACHE_ENABLED` | `true` | 是否缓存同一模型、同一 prompt 版本、同一输入的成功 LLM 响应 |
+| `LLM_ROUTER_CACHE_TTL_SECONDS` | `300` | 路由层 LLM 响应缓存 TTL |
+| `LLM_MAX_CONCURRENCY` | `1` 起步，预发按限流调到 `2` 到 `4` | OCR-Flow 通用 LLM 最大并发 |
+| `LLM_BOUNDARY_CHUNK_SIZE` | `5` | 低置信边界确认时每个题段包含的题目数 |
+| `LLM_BOUNDARY_MAX_CONCURRENCY` | `4` | AI 边界确认分片并发上限；20 道题按每 5 题可并发 4 路 |
+| `LLM_METRICS_ENABLED` | `true` | 是否在 OCR outputs 中记录脱敏 LLM 调用耗时 |
+| `OCR_AUTO_SEMANTIC_REPAIR_MODE` | `skip` | OCR 主链路自动语义修复模式：`skip` / `inline` / `inline-concurrent` |
 | `OCR_VISUAL_REPAIR_ENABLED` | `true` | 是否启用题目 crop、横线检测和可选二次 OCR |
 | `OCR_VISUAL_REPAIR_PDF_RENDER_SCALE` | `2.0` | PDF 页面 crop 渲染倍率 |
 | `OCR_VISUAL_REPAIR_MIN_UNDERLINE_WIDTH_RATIO` | `0.12` | 横线检测的最小宽度比例 |
 | `OCR_VISUAL_REPAIR_APPLY_PIX2TEXT` | `true` | 是否允许高置信 Pix2Text 结果覆盖低置信空位题题干 |
 | `PIX2TEXT_COMMAND` | 可选 | Pix2Text 命令模板，例如 `p2t {image}`；未配置且 PATH 无命令时跳过二次 OCR |
 | `PIX2TEXT_TIMEOUT_SECONDS` | `45` | 单题 crop 二次 OCR 超时 |
-| `PANDOC_CJK_FONT` | 平台安装字体 | PDF 中文字体 |
+| `PANDOC_CJK_FONT` | 平台安装字体 | Pandoc 相关导出的中文字体配置；新版 PDF 主路径使用 XeLaTeX `ctex` 模板 |
+| `APP_CORS_ALLOWED_ORIGIN_PATTERNS` | 按访问域名配置 | 前端跨域白名单；公网 80/443 访问必须同时包含无端口 Origin，例如 `http://120.211.112.121` |
 | `PLATFORM_SECURITY_CONTEXT_VALIDATION_ENABLED` | `true` | 生产启用 Java 侧上下文 header 兜底校验 |
 | `PLATFORM_SECURITY_AUTHORIZATION_REQUIRED` | `true` | 生产要求 `Authorization` header |
 | `PLATFORM_SECURITY_REQUIRED_HEADERS` | `X-Tenant-Id,X-Operator-Id` | 生产必填平台上下文 |
 
-当前新部署推荐使用 DeepSeek OpenAI 兼容配置；`DASHSCOPE_*` / DashScope 变量继续保留，用于旧部署、阿里云百炼或平台自建 OpenAI 兼容模型网关。
+当前新部署推荐使用 DeepSeek OpenAI 兼容配置；`DASHSCOPE_*` / DashScope 变量继续保留，用于旧部署、阿里云百炼或平台自建 OpenAI 兼容模型网关。本地开发必须保持 `LLM_ROUTER_MODE=external` 和 `LOCAL_LLM_ENABLED=false`。服务器部署可使用 `LLM_ROUTER_MODE=hybrid` 和 `LOCAL_LLM_ENABLED=true`，但 AI 边界确认 `boundary-refine` 默认直接走外部 `deepseek-v4-pro`，避免本地小模型拖慢低置信边界确认；本地 `aux-qwen3-32b-fp8` 只承担小问结构、标准化等快速结构类任务，复杂解析和高风险兜底仍走外部模型。
+
+LLM 并发配置必须以模型网关限流为准。混合路由下本地模型优先用 `LOCAL_LLM_MAX_CONCURRENCY` 提高吞吐；AI 边界确认用 `LLM_BOUNDARY_MAX_CONCURRENCY` 控制分片并发，同时受 `LLM_EXTERNAL_MAX_CONCURRENCY` 的外部 endpoint 限流约束。人工触发的 AI 标准化和 AI 解析保持同步请求语义，但分别受 `LLM_STANDARDIZE_MAX_CONCURRENCY` 和 `LLM_ANALYSIS_MAX_CONCURRENCY` 控制；它们还会继续受本地/外部 endpoint semaphore 约束，因此实际并发取两层上限的较小值。上线后重点观察 `llmMetrics.localCallCount`、`llmMetrics.externalCallCount`、`llmMetrics.cacheHitCount`、AI job 成功率、失败率和限流错误；如果外部调用比例持续偏高，说明本地模型或风险阈值需要调优。Qwen3 本地模型应保持 `LOCAL_LLM_DISABLE_THINKING=true`，业务层仍会从响应中剥离 `<think>` 段并只接收可解析 JSON。服务器上 `vllm-aux` 必须配置 `AUX_LLM_GPU_DEVICE=1` 使用物理 GPU1，AI_GENERATION 容器必须配置 `NVIDIA_VISIBLE_DEVICES=0` 使用物理 GPU0，避免 OCR 和 vLLM 抢同一张卡。`OCR_AUTO_SEMANTIC_REPAIR_MODE=skip` 是生产默认建议，人工触发 AI 标准化仍是权威修复路径；`inline-concurrent` 只建议在受控压测或明确需要 OCR 返回前自动修复时启用。
+
+人工触发 AI 标准化会先执行本地确定性修复和可信 OCR 兜底，只有仍需模型判断时才调用 LLM。若 LLM 超时、限流或返回非法 JSON，worker 不再把该请求硬失败为 `409`，而是返回 `source=rules-fallback`、`fallbackUsed=true`、`retryable=true` 的本地候选，并保留 `llmCalls` 失败明细；前端展示候选但不自动覆盖人工内容。`AI_STANDARDIZE_CACHE_TTL_SECONDS` 只缓存成功的 LLM 标准化候选，缓存 key 包含当前编辑稿、可信 OCR 上下文和结构提示；重复点击同一题时应直接返回缓存，避免重复消耗模型额度。设置为 `0` 可以关闭该缓存，适合排查模型输出变化或灰度验证。
+
+人工触发 AI 解析失败时，worker 返回同步兜底响应：`metadata.fallbackUsed=true`、`metadata.retryable=true`、`analysis=""`，Java 仍记录 AI job 成功响应但不会写回空答案/空解析；前端收到该元数据只提示“稍后重试或人工填写”，不得清空当前编辑区。大量用户上线或批量解析/标准化成为主路径时，应把这些同步按钮升级为 Java `ai-flow` 后台 job + MQ/Redis 队列，按租户、用户和模型 endpoint 做限流、重试、死信和幂等回放；同步接口只保留单题人工辅助。
 
 首次部署或迁移机器时，推荐直接使用一键部署入口：
 
@@ -182,11 +218,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --app-dir backend/python-worker
 如果目标是单台服务器上的演示、预发或轻量联调，可使用 `docker-compose.server.yml` 构建一个应用容器。该镜像包含：
 
 - nginx：对外提供前端静态资源，并把 `/api/*`、`/actuator/*`、`/v3/api-docs`、`/swagger-ui/*`、`/doc.html` 和 `/webjars/*` 转发到 Java backend。
-- Java backend：监听容器内 `8018`，也默认映射到宿主机 `APP_JAVA_PORT`。
+- Java backend：监听容器内 `8018`，宿主机只绑定 `127.0.0.1:${APP_JAVA_PORT}` 作为本机调试入口；对外统一走 nginx 的 `APP_HTTP_PORT`。
 - Python worker：监听容器内 `127.0.0.1:8000`，不映射到宿主机。
 - MinerU：默认通过 `HOST_MINERU_VENV` 挂载服务器本机 venv，默认命令为 `${HOST_MINERU_VENV}/bin/mineru`。
 
-默认基础镜像为 `SERVER_BASE_IMAGE=nvcr.io/nvidia/tensorrt:23.09-py3`，适合已有 NVIDIA Docker runtime 的 GPU 服务器；Compose 配置包含 `gpus: all`，使 MinerU 在容器内可访问宿主机 GPU。如果服务器没有该基础镜像，也可改为 `python:3.11-slim-bookworm`，但首次拉取 Docker Hub 可能较慢。
+默认基础镜像为 `SERVER_BASE_IMAGE=nvcr.io/nvidia/tensorrt:23.09-py3`，适合已有 NVIDIA Docker runtime 的 GPU 服务器。当前服务器 `docker-compose.server.yml` 默认通过 `device_ids: ["${NVIDIA_VISIBLE_DEVICES:-0}"]` 只给 AI_GENERATION / MinerU 申请物理 GPU0；vLLM / aux-qwen3-32b-fp8 固定在物理 GPU1。容器内只暴露这一张卡，因此 MinerU / PyTorch 使用 `OCR_CUDA_VISIBLE_DEVICES=0`。如果服务器没有该基础镜像，也可改为 `python:3.11-slim-bookworm`，但首次拉取 Docker Hub 可能较慢。
 
 构建镜像前先生成 Java jar 和前端静态资源：
 
@@ -205,7 +241,7 @@ docker compose -f docker-compose.server.yml up -d --build
 
 ```text
 Web 和同源 API：http://<server-host>/
-Java backend：http://<server-host>:8018
+Java backend 本机调试：http://127.0.0.1:<APP_JAVA_PORT>
 ```
 
 运行时配置仍通过项目根目录 `.env` 或平台密钥管理注入。大模型密钥只配置为环境变量，例如 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY` 或 `ALIYUN_LLM_API_KEY`，不要写入 Dockerfile、镜像层或 Compose 文件。
@@ -225,7 +261,7 @@ JAVA_DOMAIN_LIBRARY_STORE_PATH=/data/library_store.json
 APP_HTTP_PORT=80
 APP_JAVA_PORT=8018
 SERVER_BASE_IMAGE=nvcr.io/nvidia/tensorrt:23.09-py3
-HOST_MINERU_VENV=/aa/AI_GENERATION_TOGO/backend/python-worker/.venv
+HOST_MINERU_VENV=/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv
 ```
 
 检查：
@@ -323,6 +359,8 @@ python scripts/acceptance_question_engine_plugin.py --base-url http://<pre-java-
 - Python worker CPU、内存、进程存活。
 - OCR job 耗时、失败率、超时率。
 - AI job 耗时、失败率、token 或费用指标。
+- OCR outputs 中的 `llmMetrics.callCount`、`llmMetrics.totalDurationMs` 和 `llmMetrics.calls[].status`。
+- OCR flow 中的 `ocrFlow.steps[].durationMs`，特别是 `llm-boundary-refine`、`visual-repair`、`ai-enrich`。
 - callback event `failed` / `dead_letter` 数量。
 - 文件存储写入失败数量。
 - MySQL 连接池和慢查询。
@@ -361,9 +399,11 @@ curl http://<java-host>:8018/api/capabilities/callback-flow/runtime
 
 如果 OCR provider 不可用，优先运行 `python scripts/check_mineru.py` 并检查 `MINERU_COMMAND`、worker 临时目录权限、`OCR_FLOW_EXTENSIONS`、OCR 超时、输入文件是否损坏或加密。`check_mineru.py` 中 `installed=true` 表示入口可用；`versionProbeOk=false` 只表示 `mineru --version` 探测失败或超时。恢复动作包括修复 MinerU 安装、调整 `MINERU_TIMEOUT_SECONDS`、重传清晰文件，或切换到平台指定 OCR provider。
 
-如果 DeepSeek / LLM 失败，优先检查 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`DASHSCOPE_MODEL`、模型限流、余额、题图 base64 大小、`LLM_BOUNDARY_TIMEOUT_SECONDS` 和 `LLM_SPLIT_TIMEOUT_SECONDS`。如果沿用旧 Key，必须保留旧平台 OpenAI 兼容网关，不要把旧 Key 发到 DeepSeek 官方域名。AI 边界确认失败时会回退本地边界候选；AI 标准化失败不应阻断人工校验，可以降级为 OCR 结果人工修复。
+如果 DeepSeek / LLM 失败，优先检查 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`DASHSCOPE_MODEL`、模型限流、余额、题图 base64 大小、`LLM_BOUNDARY_TIMEOUT_SECONDS`、`LLM_SPLIT_TIMEOUT_SECONDS`、`LLM_MAX_CONCURRENCY`、`LLM_BOUNDARY_CHUNK_SIZE`、`LLM_STANDARDIZE_MAX_CONCURRENCY` 和 `LLM_ANALYSIS_MAX_CONCURRENCY`。如果沿用旧 Key，必须保留旧平台 OpenAI 兼容网关，不要把旧 Key 发到 DeepSeek 官方域名。高置信本地边界会跳过 AI 边界确认；低置信分片失败时会回退本地边界候选。AI 标准化失败不应阻断人工校验，应返回本地兜底候选；AI 解析失败不应清空当前内容，应返回可重试元数据并提示人工或稍后重试。
 
-如果 Pandoc / XeLaTeX 导出失败，优先检查 `pandoc`、`xelatex`、`PANDOC_CJK_FONT`、Markdown 中 LaTeX 语法和 worker 临时目录权限。恢复动作包括安装依赖、配置中文字体、先导出 Markdown 或修复题目 LaTeX。
+如果 DOCX 导出失败，优先检查 `pandoc`、Markdown 中 LaTeX 语法、worker 临时目录权限和 `PANDOC_CJK_FONT`。恢复动作包括安装 Pandoc、配置中文字体、先导出 Markdown 或修复题目 LaTeX。
+
+如果 PDF 导出公式变成 `a ^ 2`、`\frac` 文本或方程组被拍平，说明正在走 ReportLab fallback，优先检查 `xelatex` 是否在 PATH 中，以及 LaTeX 是否安装 `ctex`、`amsmath`、`amssymb`、`graphicx`、`tabularx`、`array`、`tcolorbox`。恢复动作包括安装 TeX Live/MacTeX 或平台等价包，重启 Python worker，再用包含分式、方程组、上下标、角度和科学计数法的试卷导出 PDF 做视觉复验。
 
 如果 MinIO / 对象存储写入失败，优先检查 `ENTERPRISE_MINIO_ENABLED`、`MINIO_ENDPOINT`、bucket、access key、secret key、服务账号权限和文件大小限制。必要时可临时切回本地文件 fallback，但必须记录迁移回对象存储的计划。
 
@@ -415,7 +455,7 @@ callback event id:
 | 单文件大小 | 200 MB 以内 | 100 MB 以内 | 50 MB 以内，按平台容量调整 |
 | 单任务页数 | 50 页以内 | 30 页以内 | 20 页以内，超出拆分 |
 | OCR 并发 | 1 | 2 到 4 | 按 worker 实测扩容 |
-| AI 并发 | 1 | 2 到 5 | 由模型网关限流 |
+| AI 并发 | 1 | 2 到 4 | 由 `LLM_MAX_CONCURRENCY` 和模型网关限流共同决定 |
 | Java read timeout | 300 秒 | 300 到 900 秒 | 生产建议异步 + callback |
 | callback 重试 | 本地手动 | 3 次 | 3 到 5 次，超过进死信 |
 
@@ -438,11 +478,19 @@ python scripts/acceptance_question_engine_plugin.py \
   --timeout-seconds 900
 ```
 
+性能记录时至少保留：
+
+- `llmMetrics.callCount`
+- `llmMetrics.totalDurationMs`
+- `ocrFlow.steps[].durationMs`
+- 高置信本地边界导致 `llm-boundary-refine` 跳过的次数
+- 低置信分片失败并回退本地边界的次数
+
 记录模板：
 
-| 日期 | 环境 | 文件类型 | 页数 | 大小 | 题数 | OCR 耗时 | AI 耗时 | 总耗时 | 成功率 | 备注 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 待填写 | pre | PDF |  |  |  |  |  |  |  |  |
+| 日期 | 环境 | 文件类型 | 页数 | 大小 | 题数 | OCR 耗时 | LLM 调用数 | LLM 总耗时 | 跳过边界 AI | 分片回退 | 总耗时 | 成功率 | 备注 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 待填写 | pre | PDF |  |  |  |  |  |  |  |  |  |  |  |
 
 初始 SLA 建议：
 

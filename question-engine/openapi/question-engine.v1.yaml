@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Question Engine API
-  version: 1.0.0
+  version: 1.1.0
   description: >
     question-engine 本期稳定能力契约。该契约面向公司教育生态平台，
     覆盖能力目录、题目加工任务、标准题目包、OCR/AI/导出/file/callback
@@ -153,6 +153,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/QuestionPackage"
+  /api/import-tasks/{jobId}/rescan:
+    post:
+      tags: [review-workbench, question-processing]
+      operationId: rescanImportTask
+      summary: 重新 OCR 扫描原始试卷/答案文件
+      description: 只重新投递当前导入任务已有的试卷/答案 OCR job，并把任务和 OCR 状态切为处理中；已提取和已编辑题目不会被清空或覆盖。任务或任一 OCR job 正在处理中时返回 409。
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Rescan accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportTaskRescanResult"
+        "409":
+          description: Task or OCR job is already processing
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
   /api/capabilities/ocr-flow:
     get:
       tags: [runtime]
@@ -763,6 +785,26 @@ components:
         raw:
           type: object
           additionalProperties: true
+    ImportTaskRescanResult:
+      type: object
+      required: [taskId, status, rescanInProgress, rescannedJobs]
+      properties:
+        taskId:
+          type: string
+        status:
+          type: string
+          description: 重扫启动后的导入任务状态，通常为“处理中”。
+        paperOcrStatus:
+          type: string
+        answerOcrStatus:
+          type: string
+        rescanInProgress:
+          type: boolean
+        rescannedJobs:
+          type: object
+          description: 已重新投递的 paper/answer OCR job 摘要。
+          additionalProperties: true
+      additionalProperties: true
     QuestionPackage:
       type: object
       required: [packageVersion, capability, job, questions, warnings]

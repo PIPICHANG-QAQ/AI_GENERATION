@@ -30,6 +30,9 @@ RUN apt-get update \
         openjdk-17-jre-headless \
         poppler-utils \
         python3-venv \
+        texlive-lang-chinese \
+        texlive-latex-extra \
+        texlive-xetex \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -3,14 +3,26 @@
 Java 负责任务状态和数据归属；本模块只把 OCR provider 输出整理成题目结构、图片资源和公式校验结果。
 """
 
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
 from app.worker_base import *
 from app.question_markdown import *
+from app.llm_splitter import (
+    boundary_refinement_skipped_metadata,
+    llm_runtime_options,
+    refine_question_boundaries_in_chunks,
+)
 from app.question_boundary import (
     build_structure_from_boundaries,
     detect_local_boundaries,
+    evaluate_boundary_confidence,
     merge_legacy_images,
+    plan_boundary_chunks,
     validate_structure,
 )
+from app.question_layout import question_image_refs_by_layout
 from app.visual_repair import apply_visual_repairs
 
 def parse_structured_questions_from_v2(content_v2: Any, assets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -125,6 +137,87 @@ def parse_structured_questions(markdown: str, output_dir: Path, assets: list[dic
     return parse_structured_questions_legacy(markdown, output_dir, assets)
 
 
+def realign_question_images_from_layout(structured: dict[str, Any], output_dir: Path, assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """用 MinerU bbox 几何顺序重新分配父题题图。"""
+    questions = [question for question in structured.get("questions") or [] if isinstance(question, dict)]
+    if not questions:
+        return {"applied": False, "reason": "no-questions", "changed": 0}
+    image_refs_groups = question_image_refs_by_layout(output_dir, len(questions))
+    if not image_refs_groups:
+        return {"applied": False, "reason": "no-layout-image-groups", "changed": 0}
+
+    changed_count = 0
+    for index, question in enumerate(questions):
+        if index >= len(image_refs_groups):
+            continue
+        image_refs = image_refs_groups[index]
+        next_images = unique_images_from_refs(image_refs, assets)
+        current_images = normalize_question_images(question.get("images") or [])
+        if image_key_list(next_images) == image_key_list(current_images):
+            continue
+        strip_images = normalize_question_images([*current_images, *next_images])
+        for field in ("stemMarkdown", "manualMarkdown"):
+            value = question.get(field)
+            if isinstance(value, str) and strip_images:
+                question[field] = remove_question_image_refs_from_markdown(value, strip_images)
+        question["images"] = next_images
+        ensure_question_images_in_markdown(question)
+        changed_count += 1
+    return {"applied": True, "changed": changed_count}
+
+
+def unique_images_from_refs(image_refs: list[str], assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """将 MinerU 图片路径转成题图对象并去重。"""
+    images: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for image_ref in image_refs:
+        image = image_from_path(image_ref, assets)
+        key = str(image.get("path") or image.get("url") or image.get("name") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        images.append(image)
+    return normalize_question_images(images)
+
+
+def image_key_list(images: list[dict[str, Any]]) -> list[str]:
+    """返回稳定题图 key 列表。"""
+    return [str(image.get("path") or image.get("url") or image.get("name") or "") for image in normalize_question_images(images)]
+
+
+def remove_question_image_refs_from_markdown(markdown: str, images: list[dict[str, Any]]) -> str:
+    """删除指定题图的 Markdown 引用。"""
+    text = str(markdown or "")
+    normalized_images = normalize_question_images(images)
+    refs: set[str] = set()
+    for index, image in enumerate(normalized_images):
+        label = question_image_label(image, index)
+        if label:
+            refs.add(normalize_image_ref(label))
+            label_number = image_label_number(label)
+            if label_number:
+                refs.add(normalize_image_ref(f"题图{label_number}"))
+                refs.add(normalize_image_ref(f"#{label_number}"))
+        for key in ("path", "url", "name"):
+            value = str(image.get(key) or "").strip()
+            if not value:
+                continue
+            normalized = normalize_asset_path(value)
+            refs.add(normalize_image_ref(value))
+            refs.add(normalize_image_ref(normalized))
+            refs.add(normalize_image_ref(Path(normalized).name))
+
+    def replace_ref(match: re.Match[str]) -> str:
+        src = match.group(1).strip().strip("<>")
+        normalized = normalize_image_ref(src)
+        filename = normalize_image_ref(Path(normalize_asset_path(src)).name)
+        if normalized in refs or filename in refs:
+            return ""
+        return match.group(0)
+
+    return re.sub(r"\n{3,}", "\n\n", MARKDOWN_IMAGE_RE.sub(replace_ref, text)).strip()
+
+
 def parse_structured_questions_legacy(markdown: str, output_dir: Path, assets: list[dict[str, Any]]) -> dict[str, Any]:
     """旧版规则拆题，作为证据驱动流水线的回滚结构。"""
     content_v2_files = sorted(output_dir.rglob("*_content_list_v2.json"), key=lambda path: path.as_posix())
@@ -233,6 +326,7 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
 
         legacy_structured = parse_structured_questions_legacy(markdown, output_dir, assets)
         local_boundaries = detect_local_boundaries(markdown, assets)
+        boundary_confidence = evaluate_boundary_confidence(markdown, local_boundaries, assets)
         job = read_job(job_id)
         mark_ocr_flow_step(
             job,
@@ -244,11 +338,60 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         mark_ocr_flow_step(job, current_step, "running", "正在让大模型确认边界，不改写题干")
         write_job(job)
 
-        llm_boundaries, boundary_splitter = refine_question_boundaries_with_llm(markdown, assets, local_boundaries)
+        if boundary_confidence.get("highConfidence"):
+            llm_boundaries = None
+            boundary_splitter = boundary_refinement_skipped_metadata(boundary_confidence)
+        else:
+            runtime_options = llm_runtime_options()
+            chunks = plan_boundary_chunks(
+                markdown,
+                local_boundaries,
+                runtime_options["boundaryChunkSize"],
+                runtime_options["boundaryChunkMaxChars"],
+            )
+            llm_boundaries, boundary_splitter = refine_question_boundaries_in_chunks(
+                chunks,
+                assets,
+                local_boundaries,
+                risk_context=boundary_confidence,
+            )
+            candidate_structured = build_structure_from_boundaries(markdown, llm_boundaries, assets) if llm_boundaries else {}
+            candidate_validation = validate_structure(candidate_structured, markdown, assets) if candidate_structured.get("questions") else {"valid": False}
+            if llm_boundaries and not candidate_validation.get("valid"):
+                previous_llm_calls = boundary_splitter.get("llmCalls") if isinstance(boundary_splitter, dict) else []
+                external_boundaries, external_splitter = refine_question_boundaries_in_chunks(
+                    chunks,
+                    assets,
+                    local_boundaries,
+                    risk_context={**boundary_confidence, "forceExternal": True, "forceReason": "structure-validation-failed"},
+                    force_external=True,
+                )
+                external_structured = build_structure_from_boundaries(markdown, external_boundaries, assets) if external_boundaries else {}
+                external_validation = validate_structure(external_structured, markdown, assets) if external_structured.get("questions") else {"valid": False}
+                if external_boundaries and external_validation.get("valid"):
+                    llm_boundaries = external_boundaries
+                    boundary_splitter = external_splitter
+                    boundary_splitter["llmCalls"] = [
+                        *previous_llm_calls,
+                        *(external_splitter.get("llmCalls") if isinstance(external_splitter, dict) else []),
+                    ]
+                    boundary_splitter.setdefault("warnings", []).append("本地模型边界结果结构校验失败，已升级外部模型兜底")
+                else:
+                    external_calls = external_splitter.get("llmCalls") if isinstance(external_splitter, dict) else []
+                    boundary_splitter = rule_splitter_metadata("分片 AI 边界确认结构校验失败，外部兜底也未通过，已回退本地边界候选")
+                    boundary_splitter["llmCalls"] = [*previous_llm_calls, *external_calls]
+                    llm_boundaries = None
         boundary_source = llm_boundaries or local_boundaries
         splitter = boundary_splitter
-        boundary_step_status = "success" if llm_boundaries else "skipped"
-        boundary_step_message = "AI 边界确认完成" if llm_boundaries else str(boundary_splitter.get("error") or "使用本地边界候选")
+        boundary_step_status = "skipped" if boundary_confidence.get("highConfidence") else ("success" if llm_boundaries else "skipped")
+        boundary_step_message = (
+            "本地边界高置信，跳过 AI 边界确认"
+            if boundary_confidence.get("highConfidence")
+            else ("AI 边界确认完成" if llm_boundaries else str(boundary_splitter.get("error") or "使用本地边界候选"))
+        )
+        boundary_metrics = build_llm_metrics(boundary_splitter)
+        if boundary_metrics["callCount"] > 0:
+            boundary_step_message = f"{boundary_step_message}，LLM {boundary_metrics['callCount']} 次/{boundary_metrics['totalDurationMs']}ms"
         job = read_job(job_id)
         mark_ocr_flow_step(job, current_step, boundary_step_status, boundary_step_message)
         current_step = "question-structure-build"
@@ -257,9 +400,13 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
 
         structured = build_structure_from_boundaries(markdown, boundary_source, assets)
         merge_legacy_images(structured, legacy_structured)
+        layout_image_realign = realign_question_images_from_layout(structured, output_dir, assets)
         if not structured.get("questions"):
             structured = legacy_structured
+            layout_image_realign = realign_question_images_from_layout(structured, output_dir, assets)
+            previous_llm_calls = splitter.get("llmCalls") if isinstance(splitter, dict) else []
             splitter = rule_splitter_metadata("证据边界未生成题目，已回滚旧版规则拆题")
+            splitter["llmCalls"] = previous_llm_calls
         job = read_job(job_id)
         mark_ocr_flow_step(job, current_step, "success", f"已生成 {len(structured.get('questions') or [])} 道父题")
         current_step = "sub-question-split"
@@ -295,16 +442,20 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         structure_validation = validate_structure(structured, markdown, assets)
         if not structure_validation.get("valid"):
             structured = legacy_structured
+            layout_image_realign = realign_question_images_from_layout(structured, output_dir, assets)
             fallback_validation = validate_structure(structured, markdown, assets)
             structure_validation = {
                 **structure_validation,
                 "fallback": True,
                 "fallbackValidation": fallback_validation,
             }
+            previous_llm_calls = splitter.get("llmCalls") if isinstance(splitter, dict) else []
             splitter = rule_splitter_metadata("结构校验失败，已回滚旧版规则拆题")
+            splitter["llmCalls"] = previous_llm_calls
         else:
             structure_validation["fallback"] = False
         structured["structureValidation"] = structure_validation
+        structured["layoutImageRealign"] = layout_image_realign
         question_count = len(structured.get("questions") or [])
         job = read_job(job_id)
         validation_message = (
@@ -333,6 +484,9 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         if not auto_semantic_repair.get("enabled", True) or not auto_semantic_repair.get("configured", False):
             ai_status = "skipped"
             ai_message = str(auto_semantic_repair.get("error") or "AI 增强未启用")
+        ai_metrics = build_llm_metrics(auto_semantic_repair)
+        if ai_metrics["callCount"] > 0:
+            ai_message = f"{ai_message}，LLM {ai_metrics['callCount']} 次/{ai_metrics['totalDurationMs']}ms"
         job = read_job(job_id)
         mark_ocr_flow_step(job, current_step, ai_status, ai_message)
         write_job(job)
@@ -342,6 +496,7 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         write_job(job)
         raise
 
+    llm_metrics = build_llm_metrics(splitter, auto_semantic_repair)
     return {
         "markdown": markdown,
         "json": json_content,
@@ -352,25 +507,74 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         "questions": structured["questions"],
         "splitter": splitter,
         "boundaryCandidates": local_boundaries,
+        "boundaryConfidence": boundary_confidence,
         "structureValidation": structured.get("structureValidation"),
         "visualRepair": visual_repair,
         "mathValidation": math_validation,
         "autoSemanticRepair": auto_semantic_repair,
+        "llmMetrics": llm_metrics,
+    }
+
+
+def append_llm_calls(target: list[dict[str, Any]], source: Any) -> None:
+    """Append sanitized LLM call metrics from a metadata object."""
+    if not isinstance(source, dict):
+        return
+    llm_call = source.get("llmCall")
+    if isinstance(llm_call, dict):
+        target.append(llm_call)
+    for item in source.get("llmCalls") or []:
+        if isinstance(item, dict):
+            target.append(item)
+
+
+def build_llm_metrics(*sources: Any) -> dict[str, Any]:
+    """Aggregate OCR-level LLM call metrics."""
+    enabled = llm_runtime_options()["metricsEnabled"]
+    calls: list[dict[str, Any]] = []
+    if enabled:
+        for source in sources:
+            append_llm_calls(calls, source)
+
+    def duration_ms(item: dict[str, Any]) -> int:
+        try:
+            return max(0, int(item.get("durationMs") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    local_calls = [item for item in calls if item.get("route") == "local"]
+    external_calls = [item for item in calls if item.get("route") == "external"]
+
+    return {
+        "enabled": enabled,
+        "callCount": len(calls),
+        "totalDurationMs": sum(duration_ms(item) for item in calls),
+        "localCallCount": len(local_calls),
+        "localDurationMs": sum(duration_ms(item) for item in local_calls),
+        "externalCallCount": len(external_calls),
+        "externalDurationMs": sum(duration_ms(item) for item in external_calls),
+        "cacheHitCount": sum(1 for item in calls if item.get("cacheHit") is True),
+        "calls": calls,
     }
 
 
 def apply_auto_semantic_repairs(structured: dict[str, Any]) -> dict[str, Any]:
     """对结构化题目应用自动语义修复。"""
     status = llm_status()
+    options = llm_runtime_options()
+    repair_mode = options["autoSemanticRepairMode"]
     summary: dict[str, Any] = {
         "enabled": True,
         "configured": status["configured"],
         "provider": status["provider"],
         "model": status["model"],
+        "mode": "skipped" if repair_mode == "skip" else repair_mode,
+        "candidateCount": 0,
         "appliedCount": 0,
         "skippedCount": 0,
         "failedCount": 0,
         "repairs": [],
+        "llmCalls": [],
         "error": None,
     }
     if not status["enabled"]:
@@ -381,6 +585,7 @@ def apply_auto_semantic_repairs(structured: dict[str, Any]) -> dict[str, Any]:
         summary["error"] = "未配置 DEEPSEEK_API_KEY / DASHSCOPE_API_KEY / ALIYUN_LLM_API_KEY，跳过自动 AI 语义修复"
         return summary
 
+    candidates: list[tuple[dict[str, Any], str]] = []
     seen_question_ids: set[str] = set()
     for question in iter_structured_questions(structured):
         question_id = str(question.get("id") or id(question))
@@ -389,9 +594,31 @@ def apply_auto_semantic_repairs(structured: dict[str, Any]) -> dict[str, Any]:
         seen_question_ids.add(question_id)
         if not needs_auto_semantic_repair(question):
             continue
+        candidates.append((question, question_to_edit_markdown(question)))
 
-        before_markdown = question_to_edit_markdown(question)
+    summary["candidateCount"] = len(candidates)
+    if repair_mode == "skip":
+        summary["skippedCount"] = len(candidates)
+        summary["error"] = "OCR 主链路跳过自动 AI 语义修复，保留人工校验和 AI 标准化入口"
+        return summary
+
+    def repair_candidate(candidate: tuple[dict[str, Any], str]) -> tuple[dict[str, Any], str, str | None, dict[str, Any]]:
+        question, before_markdown = candidate
         repaired_markdown, metadata = standardize_markdown_with_llm(before_markdown)
+        return question, before_markdown, repaired_markdown, metadata
+
+    repair_results: list[tuple[dict[str, Any], str, str | None, dict[str, Any]]] = []
+    max_workers = min(options["maxConcurrency"], max(1, len(candidates)))
+    if repair_mode == "inline-concurrent" and max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(repair_candidate, candidate) for candidate in candidates]
+            for future in as_completed(futures):
+                repair_results.append(future.result())
+    else:
+        repair_results = [repair_candidate(candidate) for candidate in candidates]
+
+    for question, before_markdown, repaired_markdown, metadata in repair_results:
+        append_llm_calls(summary["llmCalls"], metadata)
         repair_record = {
             "questionId": question.get("id"),
             "status": "failed",

@@ -9,6 +9,7 @@ from app.ocr_processing import *
 from app.import_services import *
 from app.export_service import *
 from app.ocr_execution import *
+from app.question_layout import attach_paper_layout, render_source_page
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
@@ -62,6 +63,7 @@ def recover_import_task(payload: dict[str, Any]) -> dict[str, Any]:
         store["importTasks"].append(task)
 
     sync_import_task(task, store)
+    attach_paper_layout(task, safe_read_job(task.get("paperOcrJobId")))
     write_store(store)
     return task
 
@@ -124,7 +126,11 @@ async def create_import_task(
 def get_import_task(task_id: str) -> dict[str, Any]:
     """查询单个导入任务。"""
     store = read_store()
-    return get_import_task_or_404(store, task_id)
+    task = get_import_task_or_404(store, task_id)
+    sync_import_task(task, store)
+    attach_paper_layout(task, safe_read_job(task.get("paperOcrJobId")))
+    write_store(store)
+    return task
 
 
 @app.put("/api/import-tasks/{task_id}")
@@ -185,7 +191,11 @@ def get_import_task_source_file(task_id: str, kind: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Source OCR job not found")
     target = Path(str(job.get("uploadPath") or "")).resolve()
     upload_root = IMPORT_UPLOAD_ROOT.resolve()
-    if not str(target).startswith(str(upload_root)) or not target.exists() or not target.is_file():
+    try:
+        target.relative_to(upload_root)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Source file not found")
+    if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="Source file not found")
     return FileResponse(
         target,
@@ -193,6 +203,17 @@ def get_import_task_source_file(task_id: str, kind: str) -> FileResponse:
         filename=job.get("filename") or target.name,
         content_disposition_type="inline",
     )
+
+
+@app.get("/api/import-tasks/{task_id}/source/paper/pages/{page_index}")
+def get_import_task_source_paper_page(task_id: str, page_index: int) -> FileResponse:
+    """返回试卷原文件指定页预览图，用于布局解析框叠加。"""
+    store = read_store()
+    task = get_import_task_or_404(store, task_id)
+    job = safe_read_job(task.get("paperOcrJobId"))
+    if not job:
+        raise HTTPException(status_code=404, detail="Source OCR job not found")
+    return render_source_page(task, job, page_index)
 
 
 @app.get("/api/import-tasks/{task_id}/image-library")
@@ -931,12 +952,14 @@ def worker_retry_ocr_job(background_tasks: BackgroundTasks, job_id: str) -> dict
     upload_path = str(job.get("uploadPath") or "")
     if not upload_path or not Path(upload_path).exists():
         raise HTTPException(status_code=404, detail="OCR upload file not found")
+    retry_started_at = now_iso()
     job.update({
         "status": "pending",
         "startedAt": None,
         "finishedAt": None,
         "error": None,
         "retryCount": int(job.get("retryCount") or 0) + 1,
+        "ocrFlow": build_ocr_flow(retry_started_at),
     })
     write_job(job)
     background_tasks.add_task(run_ocr_job, job_id, upload_path)

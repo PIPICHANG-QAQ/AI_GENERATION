@@ -260,6 +260,23 @@ public class ImportTaskMetadataBridgeService {
     }
 
     /**
+     * 获取试卷单页预览图。
+     *
+     * <p>布局解析框依赖 worker 的 OCR 输出和 PDF 渲染尺寸，因此页图固定从 worker 获取，
+     * 不走 Java 原文件回退。</p>
+     *
+     * @param taskId 任务 ID
+     * @param pageIndex 从 0 开始的页码
+     * @return 文件响应
+     */
+    public ResponseEntity<?> sourcePaperPage(String taskId, int pageIndex) {
+        if (pageIndex < 0) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Page not found");
+        }
+        return getPythonFile("/api/import-tasks/" + taskId + "/source/paper/pages/" + pageIndex);
+    }
+
+    /**
      * 更新导入任务并同步 Java 快照。
      *
      * @param taskId 任务 ID

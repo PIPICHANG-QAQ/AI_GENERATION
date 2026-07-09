@@ -1,0 +1,87 @@
+%% Version: 2026-07-08 / server deployment v13
+%% Status: current-support
+%% Scope: server deployment OCR/AI compute boundary, GPU assignment, MinerU API, and public demo runtime.
+flowchart TD
+  LegendLocal["绿色：服务器本地算力 / 本地服务<br/>Java、Python、规则拆题、公式校验、文件读写"]:::local
+  LegendGpu["紫色：服务器本地 GPU 算力<br/>MinerU: 物理 GPU0，容器内 CUDA 0<br/>aux-qwen3-32b-fp8 / vLLM: 物理 GPU1"]:::gpu
+  LegendExternal["黄色：外部大模型 API<br/>DeepSeek / DashScope / OpenAI-compatible"]:::external
+  LegendHybrid["蓝色：混合路由<br/>边界确认外部优先；其它低风险结构任务本地优先"]:::hybrid
+  LegendStore["灰色：持久化 / 可选基础设施"]:::store
+
+  Client["浏览器 / 平台调用方<br/>local-platform 或公司平台"]:::local
+  ServerCompose["docker-compose.server.yml<br/>question-engine 单容器<br/>HTTP :80/:5173 -> nginx :8080 -> Java :8018<br/>Python worker :8000 内部访问"]:::local
+  Java["Java 主后端<br/>Spring Boot 3.3.5 / Java 17<br/>能力 API、任务状态、文件元数据、状态同步"]:::local
+  Worker["Python worker<br/>FastAPI<br/>OCR / AI 路由 / LaTeX / 导出执行"]:::local
+
+  ServerData[("server-data /data<br/>OCR job、输出、Java 文件副本<br/>默认 H2 文件库")]:::store
+  OptionalDeps[("docker-compose.local.yml<br/>MySQL / Redis / MinIO<br/>本地或联调可选依赖，不是 OCR 算力")]:::store
+  JavaTables[("Java domain 表<br/>importTasks、importQuestions、images、storageFiles、aiJobs")]:::store
+  WorkerStore[("worker 兼容 JSON store<br/>jobs/*.json + .bak")]:::store
+
+  Upload["upload 文件上传<br/>保存试卷/答案原文件<br/>创建 OCR job"]:::local
+  Preprocess["preprocess 预处理<br/>识别扩展名，Markdown 直读或 DOC 转 DOCX"]:::local
+  OcrProvider["ocr-provider OCR 引擎<br/>OCR_FLOW_PROVIDER=mineru"]:::gpu
+  MinerU["常驻 MinerU API + CLI 调用<br/>mineru-api :8002，CLI 追加 --api-url<br/>GPU0 复用模型，避免每任务重新初始化"]:::gpu
+  Collect["collect-outputs 收集产物<br/>Markdown、content_list、页码、图片 assets"]:::local
+  LocalBoundary["local-boundary-detect 本地边界候选<br/>大题、题号、小问、选项、题图候选"]:::local
+  Confidence{"boundaryConfidence<br/>本地边界是否高置信？"}:::hybrid
+  SkipBoundaryLlm["跳过 llm-boundary-refine<br/>splitter.source=local-boundary"]:::local
+
+  BoundaryRoute["llm-boundary-refine AI 边界确认<br/>默认外部满血模型<br/>只确认边界，不生成题干正文"]:::external
+  LocalLLM["服务器本地小模型<br/>LOCAL_LLM_BASE_URL<br/>aux-qwen3-32b-fp8<br/>小问结构、标准化等低风险任务优先"]:::gpu
+  ExternalLLM["外部满血模型<br/>DEEPSEEK_API_KEY / DASHSCOPE_API_KEY<br/>deepseek-v4-pro 等<br/>高风险、失败兜底、复杂解析"]:::external
+  BoundaryFallback["边界失败兜底<br/>超时、JSON/schema 错误、证据回溯失败 -> 本地候选"]:::hybrid
+
+  BuildStructure["question-structure-build 结构构建<br/>按 OCR 原文 offset 切片生成题目"]:::local
+  SubQuestion["sub-question-split 小问拆解<br/>写入 subQuestions / children"]:::hybrid
+  VisualRepair["visual-repair 视觉修复<br/>题目 crop、横线检测<br/>可选 Pix2Text 二次 OCR"]:::hybrid
+  StructureValidate["structure-validate 结构校验<br/>选项、小问、题图、空位、证据回溯"]:::local
+  MathNormalize["math-normalize 公式校验<br/>本地 LaTeX 归一化和风险标记"]:::local
+
+  AiEnrichDecision{"ai-enrich / 人工触发 AI<br/>需要语义修复、标准化、答案解析或元数据？"}:::hybrid
+  LocalStandardize["本地优先 AI 标准化<br/>规则修复 + 本地 LLM 候选<br/>候选需通过安全闸门"]:::hybrid
+  ExternalAnalysis["外部模型 AI 解析 / 高风险补全<br/>答案、解析、知识点、复杂推理"]:::external
+  AiGate["候选安全闸门<br/>renderValidation、applyBlocked、严重风险检查"]:::local
+
+  Outputs["OCR outputs<br/>questions、splitter、boundaryConfidence、mathValidation、autoSemanticRepair、llmMetrics"]:::local
+  JavaSync["Java 同步快照<br/>导入题、题图、OCR 状态、失败原因"]:::local
+  Workbench["OCR 工作台<br/>轮询任务、人工校验、题图维护、入库"]:::local
+  Rescan["重新 OCR 扫描<br/>Java /rescan 重投原始 OCR job<br/>已有题目和编辑内容不覆盖"]:::hybrid
+  BatchAnalysis["AI 解析全部<br/>前端批处理单题/小问解析<br/>默认补缺失，进度 n/m"]:::external
+
+  Client --> ServerCompose --> Java
+  Java --> ServerData
+  Java -. 可选企业化依赖 .-> OptionalDeps
+  Java --> JavaTables
+  Java --> Worker
+  Worker --> WorkerStore
+  Worker --> ServerData
+
+  Java --> Upload --> Preprocess --> OcrProvider --> MinerU --> Collect
+  Collect --> LocalBoundary --> Confidence
+  Confidence -- 高置信 --> SkipBoundaryLlm --> BuildStructure
+  Confidence -- 低置信 --> BoundaryRoute
+  BoundaryRoute -- "默认 external-first" --> ExternalLLM --> BoundaryFallback
+  BoundaryFallback --> BuildStructure
+
+  BuildStructure --> SubQuestion
+  SubQuestion -- "本地规则可完成" --> VisualRepair
+  SubQuestion -- "低置信小问确认：服务器 hybrid 本地优先" --> LocalLLM
+  SubQuestion -- "本地失败兜底" --> ExternalLLM
+  VisualRepair --> StructureValidate --> MathNormalize --> AiEnrichDecision
+
+  AiEnrichDecision -- "不需要 / 未配置" --> Outputs
+  AiEnrichDecision -- "标准化候选" --> LocalStandardize --> AiGate --> Outputs
+  AiEnrichDecision -- "复杂解析 / 高风险补全" --> ExternalAnalysis --> AiGate
+  AiGate -- "候选不可安全应用" --> Outputs
+  Outputs --> WorkerStore
+  Outputs --> JavaSync --> JavaTables
+  JavaSync --> Workbench
+  Workbench --> Rescan --> OcrProvider
+  Workbench --> BatchAnalysis --> ExternalAnalysis
+
+  classDef local fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;
+  classDef gpu fill:#f3e8ff,stroke:#7e22ce,color:#581c87,stroke-width:1px;
+  classDef external fill:#fef3c7,stroke:#d97706,color:#78350f,stroke-width:1px;
+  classDef hybrid fill:#dbeafe,stroke:#2563eb,color:#1e3a8a,stroke-width:1px;
+  classDef store fill:#f1f5f9,stroke:#64748b,color:#334155,stroke-width:1px;

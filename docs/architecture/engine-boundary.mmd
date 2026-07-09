@@ -1,7 +1,10 @@
+%% Version: 2026-07-09 / OpenAPI 1.1.0 / product v14
+%% Status: current-support
+%% Scope: module responsibility boundary between platform, question-engine, local-platform demo, and Python worker.
 flowchart LR
   Platform["公司教育生态平台<br/>用户 / 权限 / 组织 / 审核 / 最终题库 / 文件中心"]:::platform
-  Engine["question-engine<br/>题库能力发动机<br/>Java 能力 API"]:::engine
-  LocalAdmin["local-admin 本地小平台<br/>Vite React 页面<br/>仅用于演示和闭环验证"]:::local
+  Engine["question-engine<br/>题库能力发动机<br/>Java 能力 API / OpenAPI 1.1.0"]:::engine
+  LocalAdmin["local-platform 本地小平台<br/>Vite React 页面<br/>仅用于演示和闭环验证"]:::local
   Python["Python worker<br/>OCR / AI / LaTeX / Pandoc"]:::worker
 
   Import["question-import<br/>题目导入"]:::module
@@ -9,12 +12,12 @@ flowchart LR
   Paper["paper-assembly<br/>组卷能力<br/>按小问选题 / subSelections"]:::module
   Knowledge["knowledge-base<br/>知识点能力"]:::module
   OcrFlow["ocr-flow<br/>provider contract"]:::worker
-  Review["review-workbench<br/>可嵌入人工校验"]:::capability
-  AiFlow["ai-flow<br/>标准化候选 / 解析 / 匹配<br/>LaTeX 分隔符修复"]:::capability
+  Review["review-workbench<br/>人工校验 / 原文件预览 / 布局解析框 / 重扫 OCR / 题图"]:::capability
+  AiFlow["ai-flow<br/>标准化候选 / 解析 / 匹配<br/>LaTeX 分隔符修复<br/>批量解析由工作台编排"]:::capability
   ExportFlow["export-flow<br/>Markdown / DOCX / PDF"]:::capability
   FileFlow["file-flow<br/>原文件 / 题图 / 产物"]:::capability
   CallbackFlow["callback-flow<br/>完成 / 失败 / 可重试回调"]:::capability
-  SdkOpenapi["sdk-openapi<br/>OpenAPI / SDK"]:::capability
+  SdkOpenapi["sdk-openapi<br/>OpenAPI 1.1.0 / SDK<br/>rescanImportTask"]:::capability
 
   Platform -->|OpenAPI / SDK / 嵌入工作台| Engine
   LocalAdmin -->|本地演示调用| Engine

@@ -1,10 +1,14 @@
+%% Version: 2026-07-08
+%% Status: historical-reference
+%% Scope: migration history from prototype/legacy worker toward Java main backend. Do not use as current runtime source of truth.
 flowchart LR
-  Browser["浏览器 / Vite React\nReplit 原型迁移前端"]
+  Note["历史迁移参考图<br/>当前主架构以 engine-boundary / ocr-flow / platform-openapi-sdk-overview 为准"]:::note
+  Browser["浏览器 / Vite React\nlocal-platform 本地演示前端"]
   Platform["公司教育生态平台 / 其它应用\nOpenAPI / SDK / 嵌入式工作台"]
   Capability["题目加工能力 API\n/api/capabilities/question-processing\nProcessingJob / question-package.v1"]
   Java["Java 主后端\nSpring Boot 3.3.5 / Java 17\nCapabilities API\n知识点 / 题库题目 / 试卷 CRUD\n导入任务状态机 bridge\n导入题/题图/原文件存储与预览 + 入库 bridge\nAI job 编排与候选返回\n/api/java/* + /api/* 代理兜底"]
   Python["Python Worker\nFastAPI OCR / AI / LaTeX 分隔符修复 / 导出执行\nlegacy /api/* + internal /worker/*"]
-  MinerU["MinerU CLI"]
+  MinerU["MinerU provider\n本地 CLI / 服务器常驻 API"]
   DashScope["DeepSeek / OpenAI 兼容 LLM"]
   JsonStore["历史 JSON 数据\nlibrary_store.json"]
   JavaDb["Java 数据层\nH2 本地库 / MySQL profile\nimportTasks + 状态机 / OCR status / failureReason\nimportQuestions / importQuestionImages\nstorageFiles\nquestions / papers / knowledgePoints"]
@@ -12,6 +16,7 @@ flowchart LR
   LocalStore["Python 本地文件存储\nbackend/storage"]
   FutureDeps["企业化依赖入口\nRedis / MinIO / MQ / Prometheus\n默认本地不强制连接"]
 
+  Note -.-> Java
   Browser -->|默认 API 入口 8018| Java
   Browser -->|本地小平台调用能力| Capability
   Platform -->|平台集成稳定边界| Capability
@@ -32,3 +37,5 @@ flowchart LR
   Python --> JsonStore
   Python --> LocalStore
   Java -. 后续迁移 .-> FutureDeps
+
+  classDef note fill:#fef2f2,stroke:#dc2626,color:#7f1d1d,stroke-width:1px;

@@ -23,6 +23,10 @@
 | --- | --- | --- |
 | `README.md` | 必选 | 仓库和本地启动总入口 |
 | `.env.example` | 必选 | 环境变量模板，不含真实密钥 |
+| `.dockerignore` | 必选 | Docker 构建上下文排除规则，避免把运行数据和依赖缓存打进镜像 |
+| `Dockerfile` | 必选 | 单容器演示/预发镜像构建入口 |
+| `docker-compose.server.yml` | 必选 | GPU 服务器单容器部署模板 |
+| `deploy/nginx.conf` | 必选 | 容器内 nginx 同源前端/API 代理配置 |
 | `backend/README.md` | 必选 | 后端代码结构说明 |
 | `backend/pom.xml` | 必选 | Java backend 构建配置 |
 | `backend/src/main/java/` | 必选 | Java 主后端源码 |
@@ -31,6 +35,7 @@
 | `backend/python-worker/README.md` | 必选 | Python worker 边界说明 |
 | `backend/python-worker/pyproject.toml` | 必选 | Python worker 依赖和可编辑安装配置 |
 | `backend/python-worker/app/` | 必选 | OCR、AI、导出 worker 源码 |
+| `backend/python-worker/app/question_layout.py` | 必选 | 复核工作台布局解析框能力，封装 `PaperLayoutCapability`、页图渲染和题目 bbox |
 | `backend/python-worker/tests/` | 必选 | Python worker 单元测试源码，供迁移后自检 |
 | `question-engine/README.md` | 必选 | engine 交付入口 |
 | `question-engine/openapi/question-engine.v1.yaml` | 必选 | 平台接入机器可读契约 |
@@ -63,6 +68,7 @@
 | 路径或模式 | 排除原因 |
 | --- | --- |
 | `.git/` | 版本库元数据，不属于交付物 |
+| `.DS_Store` | macOS 本地系统文件 |
 | `.idea/`、`.vscode/` | IDE 本地配置 |
 | `.env`、`.env.*` | 可能包含真实密钥，`.env.example` 例外 |
 | `backend/storage/` | 本地 OCR、上传、导出运行数据 |
@@ -77,6 +83,8 @@
 | `*.key`、`*.pem`、`*.p12` | 密钥和证书 |
 
 `backend/python-worker/.venv/` 绝不能通过压缩包、网盘或 rsync 交付给另一台机器。Python venv 内的 `bin/python` 和 console script shebang 通常包含创建机器上的绝对路径；跨用户或跨目录复制后会出现 `no such file or directory: backend/python-worker/.venv/bin/python`。目标机器必须用 `./scripts/install_backend.sh` 或 `./scripts/install_mineru.sh` 本地重建。
+
+交付包也不携带系统级 TeX 环境。目标机器如果需要高质量 PDF 导出，必须自行安装 `xelatex` 以及 `ctex`、`amsmath`、`amssymb`、`graphicx`、`tabularx`、`array`、`tcolorbox` 等 LaTeX 包；缺失时 PDF 会自动回退 ReportLab 文本版，复杂公式会降级。
 
 ## 4. 打包命令
 
@@ -97,6 +105,21 @@ python scripts/package_question_engine_delivery.py
 ```text
 dist/question-engine-delivery.tar.gz
 dist/question-engine-delivery-manifest.json
+```
+
+生成带明确版本名的 TOGO 移交包：
+
+```bash
+python scripts/package_question_engine_delivery.py \
+  --include-local-platform \
+  --release-name AI_GENERATION_TOGO_20260709_v14
+```
+
+输出：
+
+```text
+dist/AI_GENERATION_TOGO_20260709_v14.tar.gz
+dist/AI_GENERATION_TOGO_20260709_v14_MANIFEST.json
 ```
 
 如需把本地小平台演示壳也打进包：
@@ -123,16 +146,26 @@ TOGO_DIR="${TOGO_DIR:-$HOME/AI_GENERATION_TOGO}"
 rm -rf "$TOGO_DIR"
 python scripts/package_question_engine_delivery.py \
   --include-local-platform \
-  --include-mineru-wheelhouse \
+  --release-name AI_GENERATION_TOGO_20260709_v14 \
   --output /tmp/ai-generation-delivery.tar.gz \
   --manifest /tmp/ai-generation-delivery-manifest.json
 mkdir -p "$TOGO_DIR"
 tar -xzf /tmp/ai-generation-delivery.tar.gz -C "$TOGO_DIR"
-(cd "$TOGO_DIR" && python scripts/package_question_engine_delivery.py --check-only --include-local-platform --include-mineru-wheelhouse)
+(cd "$TOGO_DIR" && python scripts/package_question_engine_delivery.py --check-only --include-local-platform)
 ```
 
 该目录不得包含 `.venv`、`backend/storage`、`backend/target`、`node_modules`、`local-platform/dist` 或真实 `.env`。目标机器必须重新安装依赖。
 `python scripts/check_project_portability.py` 需要在目标机器执行依赖安装后再运行，因为干净交付目录按设计不包含 `backend/python-worker/.venv/` 和 `local-platform/node_modules/`。
+
+如果要在目标服务器使用 `docker-compose.server.yml`，需先在 TOGO 目录本机生成镜像构建产物：
+
+```bash
+(cd backend && mvn -DskipTests package)
+(cd local-platform && npm ci && npm run build)
+docker compose -f docker-compose.server.yml up -d --build
+```
+
+Docker 部署仍不得复用其它机器的 `vendor/mineru-venv`；`HOST_MINERU_VENV` 指向目标服务器本机重建后的 MinerU venv。
 
 ## 5. 迁移后启动流程
 
@@ -218,7 +251,9 @@ question-engine/sdk/generated/typescript/QuestionEngineClient.ts
 question-engine/sdk/generated/java/src/main/java/com/aigeneration/questionengine/sdk/QuestionEngineClient.java
 backend/src/main/java/com/aigeneration/questionbank/capability/controller/QuestionProcessingCapabilityController.java
 backend/python-worker/app/ocr_flow.py
+backend/python-worker/app/question_layout.py
 backend/python-worker/tests/test_ocr_flow.py
+docs/architecture/CODE_STRUCTURE_PORTABILITY_REVIEW.md
 docs/development/DEVELOPMENT_GUIDE.md
 docs/delivery/OPERATIONS_GUIDE.md
 docs/delivery/SECURITY_AND_INTEGRATION_CONTRACT.md
@@ -258,6 +293,7 @@ python scripts/acceptance_question_engine_plugin.py --base-url http://localhost:
 
 ```text
 question-engine-delivery-{YYYYMMDD}-{contractVersion}.tar.gz
+AI_GENERATION_TOGO_{YYYYMMDD}_v{productVersion}.tar.gz
 ```
 
 当前契约版本来自：

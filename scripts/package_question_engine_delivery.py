@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import tarfile
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,11 @@ DEFAULT_MANIFEST = ROOT / "dist" / "question-engine-delivery-manifest.json"
 INCLUDE_ROOTS = [
     "README.md",
     ".env.example",
+    ".dockerignore",
+    "Dockerfile",
     "docker-compose.local.yml",
+    "docker-compose.server.yml",
+    "deploy",
     "backend/README.md",
     "backend/pom.xml",
     "backend/src",
@@ -71,6 +76,10 @@ EXCLUDE_SUFFIXES = {
     ".p12",
 }
 
+EXCLUDE_NAMES = {
+    ".DS_Store",
+}
+
 REQUIRED_IN_PACKAGE = [
     "README.md",
     "backend/src/main/java/com/aigeneration/questionbank/capability/controller/QuestionProcessingCapabilityController.java",
@@ -87,6 +96,10 @@ REQUIRED_IN_PACKAGE = [
     "docs/delivery/SECURITY_AND_INTEGRATION_CONTRACT.md",
     "docs/delivery/ERROR_AND_STATUS_GUIDE.md",
     "docs/delivery/ACCEPTANCE.md",
+    ".dockerignore",
+    "Dockerfile",
+    "docker-compose.server.yml",
+    "deploy/nginx.conf",
     "scripts/deploy_local.sh",
     "scripts/build_mineru_wheelhouse.sh",
     "scripts/acceptance_question_engine_plugin.py",
@@ -101,18 +114,28 @@ REQUIRED_IN_PACKAGE = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--release-name", help="Optional archive basename, for example AI_GENERATION_TOGO_20260709_v14")
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--include-local-platform", action="store_true")
     parser.add_argument("--include-mineru-wheelhouse", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.release_name:
+        args.output = args.output or ROOT / "dist" / f"{args.release_name}.tar.gz"
+        args.manifest = args.manifest or ROOT / "dist" / f"{args.release_name}_MANIFEST.json"
+    else:
+        args.output = args.output or DEFAULT_OUTPUT
+        args.manifest = args.manifest or DEFAULT_MANIFEST
+    return args
 
 
 def should_exclude(path: Path) -> bool:
     relative = path.relative_to(ROOT)
     parts = set(relative.parts)
     if parts & EXCLUDE_PARTS:
+        return True
+    if path.name in EXCLUDE_NAMES:
         return True
     if path.name.startswith(".env") and path.name != ".env.example":
         return True
@@ -156,10 +179,20 @@ def validate(files: list[Path]) -> list[str]:
     return failures
 
 
-def write_manifest(files: list[Path], manifest: Path) -> None:
+def read_contract_version() -> str:
+    openapi = ROOT / "question-engine" / "openapi" / "question-engine.v1.yaml"
+    if not openapi.exists():
+        return "unknown"
+    match = re.search(r"^  version:\s*(.+)$", openapi.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    return match.group(1).strip() if match else "unknown"
+
+
+def write_manifest(files: list[Path], manifest: Path, release_name: str | None = None) -> None:
     manifest.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "generatedAt": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "releaseName": release_name,
+        "contractVersion": read_contract_version(),
         "fileCount": len(files),
         "files": [path.relative_to(ROOT).as_posix() for path in files],
     }
@@ -198,7 +231,7 @@ def main() -> None:
         return
 
     write_archive(files, args.output)
-    write_manifest(files, args.manifest)
+    write_manifest(files, args.manifest, args.release_name)
     print(f"created {args.output}")
     print(f"created {args.manifest}")
     print(f"files={len(files)}")

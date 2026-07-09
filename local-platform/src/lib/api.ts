@@ -13,21 +13,30 @@ async function fetcher(endpoint: string, options: RequestInit = {}) {
   const url = `${BASE_URL}${endpoint}`;
   const isFormData =
     typeof FormData !== "undefined" && options.body instanceof FormData;
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...options.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: {
+        ...(isFormData ? {} : { "Content-Type": "application/json" }),
+        ...options.headers,
+      },
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `无法连接 API：${url}。请检查服务地址、Nginx 代理、CORS/HTTPS 配置和后端容器日志。${detail}`,
+    );
+  }
   if (!response.ok) {
     const raw = await response.text();
     let message = raw;
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed.error === "string") message = parsed.error;
-        else if (parsed && typeof parsed.detail === "string") message = parsed.detail;
+        if (parsed && typeof parsed.detail === "string") message = parsed.detail;
+        else if (parsed && typeof parsed.message === "string") message = parsed.message;
+        else if (parsed && typeof parsed.error === "string") message = parsed.error;
       } catch {
         // not JSON, keep raw text
       }
@@ -153,6 +162,8 @@ export const api = {
     }),
   bankAllImportQuestions: (taskId: string) =>
     fetcher(`/api/import-tasks/${taskId}/bank`, { method: "POST" }),
+  rescanImportTask: (id: string) =>
+    fetcher(`/api/import-tasks/${id}/rescan`, { method: "POST" }),
 
   // Question bank
   getQuestions: (params: Record<string, unknown> = {}) =>

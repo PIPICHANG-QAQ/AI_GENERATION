@@ -34,6 +34,22 @@ function firstSubQuestionPayload(payload: any): any {
   return {};
 }
 
+function subQuestionHasAiContent(item: any): boolean {
+  return Boolean(text(item?.answer) || text(item?.analysis) || text(item?.explanation));
+}
+
+export function aiAnalysisFallbackMessage(payload: any): string | null {
+  const metadata = payload?.metadata || {};
+  const warnings = Array.isArray(metadata?.warnings) ? metadata.warnings.map((item: unknown) => text(item)).filter(Boolean) : [];
+  const hasTopLevelContent = Boolean(text(payload?.analysis) || text(payload?.explanation));
+  const subQuestions = [payload?.subQuestions, payload?.children, metadata?.subQuestions].find((items) => Array.isArray(items)) || [];
+  const hasSubContent = Array.isArray(subQuestions) && subQuestions.some(subQuestionHasAiContent);
+  if (!metadata?.fallbackUsed || hasTopLevelContent || hasSubContent) {
+    return null;
+  }
+  return warnings[0] || text(metadata?.error) || "AI 解析暂时不可用，已保留当前内容，可稍后重试";
+}
+
 export function uniqueQuestionImages(...groups: Array<QuestionImage[] | undefined>): QuestionImage[] {
   const seen = new Set<string>();
   const result: QuestionImage[] = [];
@@ -80,10 +96,11 @@ export function subStandardizePatch(markdown: string, payload: any): Partial<any
   const sub = firstSubQuestionPayload(payload);
   const question = payload?.question || {};
   const patch: Partial<any> = {};
-  const nextMarkdown = firstText(markdown, payload?.markdown, payload?.standardizedMarkdown, sub?.markdown, sub?.stemMarkdown);
+  const nextMarkdown = firstText(payload?.markdown, payload?.standardizedMarkdown, sub?.markdown, sub?.stemMarkdown, markdown);
   const nextAnswer = firstText(payload?.answer, payload?.suggestedAnswer, sub?.answer, question?.answer);
   const nextAnalysis = firstText(payload?.analysis, payload?.explanation, sub?.analysis, question?.analysis);
-  const nextOptions: QuestionOption[] = normalizeQuestionOptions(payload?.options ?? sub?.options ?? question?.options);
+  const images = uniqueQuestionImages(payload?.images, question?.images, sub?.images);
+  const nextOptions: QuestionOption[] = normalizeQuestionOptions(payload?.options ?? sub?.options ?? question?.options, images);
 
   if (nextMarkdown) patch.markdown = nextMarkdown;
   if (nextAnswer) patch.answer = nextAnswer;

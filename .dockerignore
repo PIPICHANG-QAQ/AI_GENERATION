@@ -16,8 +16,10 @@ local-platform/node_modules
 node_modules
 protocal
 server-data
+dist
 tmp
 vendor/mineru-wheelhouse
+vendor/mineru-venv
 __pycache__
 *.pyc
 *.egg-info

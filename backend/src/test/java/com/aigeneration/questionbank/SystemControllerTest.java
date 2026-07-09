@@ -2,6 +2,7 @@ package com.aigeneration.questionbank;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -60,6 +61,17 @@ class SystemControllerTest {
                 .andExpect(result -> org.assertj.core.api.Assertions.assertThat(
                                 result.getResponse().getHeader("Access-Control-Allow-Origin"))
                         .isEqualTo("https://demo-120-211-112-121.run.pinggy-free.link"));
+    }
+
+    /**
+     * 验证重新 OCR 扫描入口由 Java 编排控制器处理，而不是被 Python worker 代理截获。
+     *
+     * @throws Exception MockMvc 调用失败时抛出
+     */
+    @Test
+    void rescanRouteIsHandledByJavaDomainController() throws Exception {
+        mockMvc.perform(post("/api/import-tasks/__missing_task__/rescan"))
+                .andExpect(status().isNotFound());
     }
 
     /**

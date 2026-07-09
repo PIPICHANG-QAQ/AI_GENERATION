@@ -2,11 +2,12 @@ import React, { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { MarkdownRenderer } from "@/components/ui/MarkdownRenderer";
 import { KnowledgePointSelect } from "@/components/question-bank/KnowledgePointSelect";
 import { QuestionImageUploader } from "@/components/question-bank/QuestionImageUploader";
+import { MarkdownChipEditor } from "@/components/question-bank/MarkdownChipEditor";
 import {
+  AiStandardizeJobStatus,
   StandardizeCandidatePanel,
   standardizeCandidateFromPayload,
   type StandardizeCandidate,
@@ -25,17 +26,24 @@ import {
   addSubQuestionForm,
   appendMissingImageRefs,
   appendNewImageRefs,
+  ensureQuestionImageLabels,
+  filterRemovedQuestionImages,
+  getRemovedQuestionImages,
   getQuestionImages,
   getQuestionMarkdown,
   getQuestionMarkdownParts,
   getSubQuestions,
   mergeSubQuestionSuggestions,
   normalizeQuestionOptions,
+  removeQuestionImageRefsFromOptions,
+  removeQuestionImageRefsFromMarkdown,
+  serializeQuestionOptions,
   removeSubQuestionForm,
   subQuestionEditorForm,
   type QuestionImage,
 } from "@/lib/question";
 import {
+  aiAnalysisFallbackMessage,
   buildSubQuestionAnalysisPayload,
   subAnalysisPatch,
   subStandardizePatch,
@@ -52,25 +60,31 @@ function LatexPreviewField({
   onChange,
   placeholder,
   images,
+  editorId,
+  readOnly = false,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   images?: QuestionImage[];
+  editorId: string;
+  readOnly?: boolean;
 }) {
   return (
     <div className="space-y-1.5">
       <Label>{label}</Label>
-      <Textarea
+      <MarkdownChipEditor
+        editorId={editorId}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={onChange}
+        readOnly={readOnly}
         rows={4}
         className="font-mono text-sm"
         placeholder={placeholder}
       />
       {value.trim() ? (
-        <div className="rounded-md border border-border bg-muted/30">
+        <div className="rounded-md border border-border bg-card">
           <div className="px-3 py-1.5 border-b border-border text-xs font-medium text-muted-foreground">
             实时预览
           </div>
@@ -97,7 +111,7 @@ export function QuestionEditor({
   onVerified?: (data: any) => void
 }) {
   const { toast } = useToast();
-  const initialImages = getQuestionImages(question);
+  const initialImages = ensureQuestionImageLabels(getQuestionImages(question));
   const initialMarkdown = getQuestionMarkdown(question);
   const [formData, setFormData] = useState({
     markdown: appendMissingImageRefs(initialMarkdown, initialImages, [question.answer || "", question.analysis || ""]),
@@ -113,7 +127,7 @@ export function QuestionEditor({
     year: question.year || "",
     source: question.source || "",
     images: initialImages,
-    options: normalizeQuestionOptions(question.options),
+    options: normalizeQuestionOptions(question.options, initialImages),
   });
   const [subForms, setSubForms] = useState(() =>
     getSubQuestions(question).map((sub: any, index: number) => {
@@ -170,12 +184,43 @@ export function QuestionEditor({
   }, [allPoints.length]);
 
   const handleImagesChange = (nextImages: QuestionImage[]) => {
+    const previousImages = ensureQuestionImageLabels(formData.images);
+    const labeledNextImages = ensureQuestionImageLabels(nextImages, previousImages);
+    const removedImages = getRemovedQuestionImages(previousImages, labeledNextImages);
+    const cleanedSubForms = subForms.map((sub) => ({
+      ...sub,
+      markdown: removeQuestionImageRefsFromMarkdown(sub.markdown, removedImages),
+      answer: removeQuestionImageRefsFromMarkdown(sub.answer, removedImages),
+      analysis: removeQuestionImageRefsFromMarkdown(sub.analysis, removedImages),
+      options: removeQuestionImageRefsFromOptions(sub.options, removedImages),
+      images: filterRemovedQuestionImages(sub.images, removedImages),
+    }));
     setFormData((f) => ({
       ...f,
-      images: nextImages,
-      markdown: appendNewImageRefs(f.markdown, f.images, nextImages, [f.answer, f.analysis]),
+      images: labeledNextImages,
+      markdown: appendNewImageRefs(
+        removeQuestionImageRefsFromMarkdown(f.markdown, removedImages),
+        previousImages,
+        labeledNextImages,
+        [
+          removeQuestionImageRefsFromMarkdown(f.answer, removedImages),
+          removeQuestionImageRefsFromMarkdown(f.analysis, removedImages),
+          ...removeQuestionImageRefsFromOptions(f.options, removedImages).map((option) => option.content),
+          ...cleanedSubForms.flatMap((sub) => [
+            sub.markdown,
+            sub.answer,
+            sub.analysis,
+            ...normalizeQuestionOptions(sub.options, sub.images).map((option) => option.content),
+          ]),
+        ],
+      ),
+      answer: removeQuestionImageRefsFromMarkdown(f.answer, removedImages),
+      analysis: removeQuestionImageRefsFromMarkdown(f.analysis, removedImages),
+      options: removeQuestionImageRefsFromOptions(f.options, removedImages),
     }));
+    setSubForms(cleanedSubForms);
     setStandardizeCandidate(null);
+    setSubStandardizeCandidate(null);
   };
 
   const withSubImageRefs = (subs: typeof subForms) =>
@@ -201,7 +246,7 @@ export function QuestionEditor({
     const updatedQuestion = res?.question || {};
     const suggestedAnswer = String(res?.answer ?? res?.suggestedAnswer ?? updatedQuestion.answer ?? "").trim();
     const suggestedAnalysis = String(res?.analysis ?? updatedQuestion.analysis ?? "").trim();
-    const updatedOptions = normalizeQuestionOptions(res?.options ?? updatedQuestion.options);
+    const updatedOptions = normalizeQuestionOptions(res?.options ?? updatedQuestion.options, formData.images);
     const nextSubForms = withSubImageRefs(
       mergeSubQuestionSuggestions(
         subForms,
@@ -238,6 +283,11 @@ export function QuestionEditor({
         : api.generateAnalysisAi(payload);
     },
     onSuccess: (res: any) => {
+      const fallbackMessage = aiAnalysisFallbackMessage(res);
+      if (fallbackMessage) {
+        toast({ title: "AI 解析暂时不可用", description: fallbackMessage });
+        return;
+      }
       const suggestedAnswer = String(res?.answer ?? res?.suggestedAnswer ?? "").trim();
       const nextSubForms = withSubImageRefs(
         mergeSubQuestionSuggestions(subForms, res?.subQuestions ?? res?.metadata?.subQuestions, question),
@@ -284,6 +334,11 @@ export function QuestionEditor({
     },
     onMutate: ({ subIndex }) => setActiveSubAnalysisIndex(subIndex),
     onSuccess: (res: any, { subIndex }) => {
+      const fallbackMessage = aiAnalysisFallbackMessage(res);
+      if (fallbackMessage) {
+        toast({ title: "小问 AI 解析暂时不可用", description: fallbackMessage });
+        return;
+      }
       const patch = subAnalysisPatch(res);
       if (!patch.answer && !patch.analysis) {
         toast({ title: "小问 AI 解析未返回可应用内容", description: "请检查题干、答案或题图是否完整" });
@@ -306,9 +361,9 @@ export function QuestionEditor({
 
   const prepareData = () => {
     const { markdown, ...rest } = formData;
-    const questionParts = getQuestionMarkdownParts(markdown, formData.type, formData.options);
+    const questionParts = getQuestionMarkdownParts(markdown, formData.type, formData.options, formData.images);
     const subQuestions = subForms.map((sub) => {
-      const subParts = getQuestionMarkdownParts(sub.markdown, sub.type, sub.options);
+      const subParts = getQuestionMarkdownParts(sub.markdown, sub.type, sub.options, sub.images);
       const knowledgePointNames = sub.knowledgePointIds
         .map((id: string) => allPoints.find((p) => String(p.id) === String(id))?.name)
         .filter(Boolean);
@@ -326,7 +381,7 @@ export function QuestionEditor({
         knowledgePointIds: sub.knowledgePointIds,
         knowledgePoints: knowledgePointNames,
         images: sub.images,
-        options: subParts.options,
+        options: serializeQuestionOptions(subParts.options, sub.images),
         contextMatched: sub.contextMatched,
         answerEvidence: sub.answerEvidence,
         analysisEvidence: sub.analysisEvidence,
@@ -345,7 +400,7 @@ export function QuestionEditor({
       knowledgePoints: formData.knowledgePointIds
         .map((id: string) => allPoints.find((p) => String(p.id) === String(id))?.name)
         .filter(Boolean),
-      options: questionParts.options,
+      options: serializeQuestionOptions(questionParts.options, formData.images),
       images: formData.images,
       subQuestions,
       children: subQuestions,
@@ -412,13 +467,15 @@ export function QuestionEditor({
           </div>
         </div>
         <div className="flex-1 flex flex-col min-h-[300px]">
-          <textarea
+          <MarkdownChipEditor
+            editorId={`q-editor-${question.id || "new"}-stem`}
             value={formData.markdown}
-            onChange={e => {
-              setFormData(f => ({ ...f, markdown: e.target.value }));
+            onChange={(value) => {
+              setFormData(f => ({ ...f, markdown: value }));
               setStandardizeCandidate(null);
             }}
-            className="flex-1 p-4 bg-secondary text-secondary-foreground font-mono text-sm resize-none focus:outline-none"
+            variant="source"
+            className="flex-1 min-h-0 font-mono text-sm"
             placeholder="在此输入题干 Markdown..."
           />
         </div>
@@ -445,6 +502,11 @@ export function QuestionEditor({
               options={formData.options}
               questionType={formData.type}
             />
+          </div>
+        ) : null}
+        {!standardizeCandidate ? (
+          <div className="px-4 pb-4 shrink-0">
+            <AiStandardizeJobStatus active={localStdMutation.isPending} />
           </div>
         ) : null}
       </div>
@@ -494,7 +556,9 @@ export function QuestionEditor({
           <div className="space-y-1.5">
             <Label>题图（关联图片）</Label>
             <p className="text-[11px] leading-relaxed text-muted-foreground/80">
-              新增题图后会自动追加 <code className="px-1 py-0.5 rounded bg-muted font-mono">![](图N)</code> 到题干源码；也可拖拽题图或复制引用到指定位置。
+              上传或从题图库添加题图后，会自动在题干源码中插入{" "}
+              <code className="px-1 py-0.5 rounded bg-muted font-mono">![](图N)</code>{" "}
+              引用，并显示为「图N」小标签；标签可整体拖拽到题干、答案或解析，双击可编辑文字。
             </p>
             <QuestionImageUploader
               images={formData.images}
@@ -507,7 +571,7 @@ export function QuestionEditor({
             />
           </div>
 
-          <div className="space-y-3 rounded-md border border-primary/15 bg-primary/5 p-3">
+          <div className="space-y-3 rounded-md border border-border bg-card p-3">
             <div className="flex items-center justify-between gap-2">
               <div className="text-sm font-medium text-foreground">小问编辑（{subForms.length} 个）</div>
               <Button
@@ -582,6 +646,12 @@ export function QuestionEditor({
                       questionType={sub.type}
                     />
                   ) : null}
+                  {subStandardizeCandidate?.subIndex !== subIndex ? (
+                    <AiStandardizeJobStatus
+                      active={subStdMutation.isPending && activeSubStandardizeIndex === subIndex}
+                      label="小问 AI 标准化"
+                    />
+                  ) : null}
                   <div className="grid grid-cols-2 gap-2">
                     <div className="space-y-1.5">
                       <Label>标签</Label>
@@ -632,14 +702,17 @@ export function QuestionEditor({
                   </div>
                   <div className="space-y-1.5">
                     <Label>小问题干 (Markdown + LaTeX)</Label>
-                    <Textarea
+                    <MarkdownChipEditor
+                      editorId={`q-editor-${question.id || "new"}-sub-${subIndex}-stem`}
                       value={sub.markdown}
-                      onChange={(e) => patchSub(subIndex, { markdown: e.target.value })}
+                      onChange={(value) => patchSub(subIndex, { markdown: value })}
                       rows={4}
+                      readOnly={false}
+                      variant="source"
                       className="font-mono text-sm"
                     />
                     {sub.markdown.trim() && (
-                      <div className="rounded-md border border-border bg-muted/30">
+                      <div className="rounded-md border border-border bg-card">
                         <div className="px-3 py-1.5 border-b border-border text-xs font-medium text-muted-foreground">
                           实时预览
                         </div>
@@ -659,6 +732,7 @@ export function QuestionEditor({
                     label="小问答案 (支持 LaTeX)"
                     value={sub.answer}
                     onChange={(answer) => patchSub(subIndex, { answer })}
+                    editorId={`q-editor-${question.id || "new"}-sub-${subIndex}-answer`}
                     placeholder="填写该小问的参考答案"
                     images={sub.images}
                   />
@@ -666,6 +740,7 @@ export function QuestionEditor({
                     label="小问解析 (支持 LaTeX)"
                     value={sub.analysis}
                     onChange={(analysis) => patchSub(subIndex, { analysis })}
+                    editorId={`q-editor-${question.id || "new"}-sub-${subIndex}-analysis`}
                     placeholder="填写该小问的解析"
                     images={sub.images}
                   />
@@ -681,6 +756,7 @@ export function QuestionEditor({
                 label="答案 (支持 LaTeX)"
                 value={formData.answer}
                 onChange={(answer) => setFormData(f => ({ ...f, answer }))}
+                editorId={`q-editor-${question.id || "new"}-answer`}
                 placeholder="支持 Markdown 与 LaTeX，例如：$x=\\frac{-b\\pm\\sqrt{b^2-4ac}}{2a}$"
                 images={formData.images}
               />
@@ -689,6 +765,7 @@ export function QuestionEditor({
                 label="解析 (支持 LaTeX)"
                 value={formData.analysis}
                 onChange={(analysis) => setFormData(f => ({ ...f, analysis }))}
+                editorId={`q-editor-${question.id || "new"}-analysis`}
                 placeholder="支持 Markdown 与 LaTeX 公式渲染..."
                 images={formData.images}
               />

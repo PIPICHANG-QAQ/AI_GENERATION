@@ -1,7 +1,71 @@
 # 变更记录
 
+## 2026-07-09
+
+- 布局解析框封装为 `PaperLayoutCapability`：保留 `attach_paper_layout`、`build_paper_layout`、`render_source_page`、`question_image_refs_by_layout` 兼容入口，内部收敛为能力对象和 private helper；`paperLayout` 增加 capability 元数据，对外仍只暴露 `pages[]`、`regions[]`、`warnings[]`。
+- 布局解析框正式题目绑定版落地：优先读取 MinerU `_middle.json` 的 `page_size` 和 bbox，过滤标题、章节说明、页码等多余区域，只输出父题级 region，并绑定平台 `questionId`；点击框后右侧校验题卡滚动并高亮。
+- 新增 `docs/architecture/CODE_STRUCTURE_PORTABILITY_REVIEW.md`，评审当前项目可迁移性、模块化、OCR provider 替换边界和后续治理项；同步更新产品规格、OCR 规格、技术设计、接口说明和验收标准。
+- 外部大模型配置切换：本地 `.env` 与服务器 `/home/user/AI_GENERATION_DOCKER/.env` 已切到 TokenHub OpenAI 兼容接口 `https://tokenhub.shwfl.edu.cn/v1`，外部模型统一为 `qwen3.7-max`，provider 标记为 `tokenhub`；旧 API Key 已保存到各自 `.run/secret-backups/` 下的 `.env.before-tokenhub-*` 备份文件，文档不记录密钥。
+- 导入工作台新增“布局解析框”开关：任务详情返回父题级 `paperLayout`，前端在试卷原文件页图上按原始 OCR bbox 叠加可点击题目范围框；支持多页 PDF，框编号使用平台顺序编号，点击后右侧校验题卡自动滚动并高亮。
+- 新增试卷分页预览接口：`GET /api/import-tasks/{taskId}/source/paper/pages/{pageIndex}` 由 Java bridge 接管并从 Python worker 渲染页图，保证 overlay 坐标与 OCR 渲染尺寸一致；答案文件暂不显示布局框。
+- 布局解析框精度优化：不再优先用 Markdown offset 猜测题目范围；现在优先使用 MinerU `_middle.json` 中与页图同源的 `page_size` 和 bbox，再按题号锚点顺序切分父题区域，过滤标题、章节说明和页码；缺少 `_middle.json` 时才回退 `content_list`。
+- MinerU bbox 坐标优先用于题图归属：当 MinerU `content_list` 中图片在 JSON 顺序上早于所属题目文本、但坐标上落在后一道题区域时，按 `(page_idx, y0, x0)` 几何阅读顺序重新分配题图，避免第 7 题误挂第 8 题图片。
+- 布局框 warning 机制：缺少可靠 OCR 坐标、原文件缺失、PDF 渲染不可用或文件类型不支持时，任务详情返回 `paperLayout.warnings`，前端在原文件区域提示人工复核。
+- Python worker 正式依赖补齐 `pypdfium2`，确保新容器和 TOGO/服务器环境都能渲染 PDF 页图供布局框叠加使用。
+- 题图引用一致性升级：前端为关联图片维护稳定 `图N` 标签，删除图片后不自动重排编号；从「题图（关联图片）」移除图片时，会同步清理题干、答案、解析、小问题干以及小问答案/解析中的对应 Markdown 图片引用。
+- OCR 图片标签化升级：Python worker 在结构化题目时把 `![](images/xxx.jpg)`、API URL 和文件名引用规范为 `![](图N)`；有 OCR 位置时原位替换，没有可靠位置时追加到题干末尾并写入人工复核 warning。
+- 选择题选项图片标签化补强：OCR 边界检测和 Markdown 规范化现在支持 `![]` 与 `(images/xxx.jpg)` 被换行拆开的图片语法；选项里的题图会保留在 `options` / `tasks` 中并规范为 `![](图N)`，不再被误判为题干缺失图片后追加到题干顶部。
+- AI 标准化选择题保护：标准化 prompt 明确禁止删除、合并、重排 A/B/C/D 选项和图片选项；后端新增结构闸门，AI 候选丢失选择题选项时自动恢复原 OCR 结构化选项，图片选项保留 `![](图N)`。
+- 回归测试补充：覆盖 OCR 图片路径标签化、尾部图片标签保留、AI 标准化丢失图片选项时恢复原选项结构。
+
+## 2026-07-08
+
+- 导入校验工作台同步 v13 原型能力：工具栏新增“AI 解析全部”和“重新 OCR 扫描”。批量 AI 解析默认只补齐未入库且缺少解析的题目，可勾选覆盖已有解析；普通题按整题生成，复合大题按小问逐个生成，失败项不阻断整批，结束后汇总成功/失败数，校验状态不自动改变。
+- 新增 `POST /api/import-tasks/{taskId}/rescan` Java 编排接口：仅重新投递原始试卷/答案 OCR job，保留当前已提取和已编辑题目；处理中重复触发返回 `409`。前端扫描期间显示任务/OCR 为“处理中”、自动轮询，并禁用“重新 OCR 扫描”“AI 解析全部”“批量入库”。
+- 修复 `/api/import-tasks/{taskId}/rescan` 生产路由代理：该路径现在明确由 Java domain controller 接管，避免被 Python worker API proxy 误转发为 FastAPI 404。
+- OpenAPI 契约升级到 `1.1.0`：TypeScript / Java SDK 新增 `rescanImportTask(jobId)`，SDK 使用说明、接口说明书、契约校验和 TOGO 打包脚本同步更新；`question-package.v1` 保持兼容。
+- TOGO 交付脚本新增 `--release-name`，交付包 manifest 写入 `contractVersion`；交付包纳入 `Dockerfile`、`docker-compose.server.yml`、`.dockerignore` 和 `deploy/nginx.conf`，方便开发团队按本地脚本或服务器 Docker 模式接手。
+- `docs/architecture` 流程图完成版本治理：新增 `docs/architecture/README.md`，标记 current-primary/current-support/historical-reference 状态，明确重复边界、合并策略和 Mermaid 渲染规则；同步更新 engine boundary、local-platform、导入工作台、服务器算力和历史迁移图。
+- 本地小平台 Markdown 预览增强 OCR HTML 表格渲染：`MarkdownRenderer` 现在会受控解析 `<table>/<tr>/<td>/<th>` 片段并保留 `rowspan/colspan`，题目源码仍保留原 OCR HTML，预览不再把表格标签当普通文本显示。
+- Python worker 导入任务详情查询会同步 OCR job 最新状态，但仍只在任务没有题目时从 OCR 输出构建题目，保证重扫不会覆盖人工编辑内容。
+- 服务器部署进入客户体验状态：当前运行目录固定为 `/home/user/AI_GENERATION_DOCKER`，公网入口为 `http://120.211.112.121:5173/`；旧目录 `/aa/AI_GENERATION_TOGO` 不再作为运行目录。
+- MinerU OCR 加速落地：服务器改为常驻 `mineru-api`，应用调用 `MINERU_API_URL=http://127.0.0.1:8002`，并将 `/root/.cache/modelscope` 持久挂载到宿主机，避免容器重建后重复下载或校验模型。
+- 服务器 GPU 资源确认：AI_GENERATION / MinerU 固定使用物理 GPU0，vLLM / `aux-qwen3-32b-fp8` 固定使用物理 GPU1；MinerU venv 已安装并验证 `onnxruntime-gpu==1.23.2`，可用 provider 包含 TensorRT / CUDA / CPU。
+- AI 边界确认服务器默认走外部满血模型，并启用分片并发：`LLM_BOUNDARY_CHUNK_SIZE=5`、`LLM_BOUNDARY_MAX_CONCURRENCY=4`、`LLM_EXTERNAL_MAX_CONCURRENCY=4`，20 道题可拆成 4 片并发确认边界。
+- 修复 OCR 正文最后一题尾部污染：当题干末尾紧跟“参考答案与试题解析”、答案解析标题或重复试卷标题时，结构构建阶段会截断非题干尾部，避免把试卷标题并入最后一题。
+- 导入题显示编号改为平台顺序编号：不再用 OCR 扫描题号去重或对齐展示编号；重复 `q_1..q_n` 会保留全部父题，并在内部 `sourceQuestionId` 追加 `__occurrence_2` 等后缀。服务器同类样本已验证可从旧的 28 题恢复为 56 题，当前可见任务 `1` 也保持 56 题。
+- 本地小平台人工校验 UI 与原型同步：Markdown + LaTeX 编辑区中只有题干源码/小问题干源码使用蓝色背景，预览、答案、解析、AI 候选源码和其它表单区域保持白底。
+- AI 标准化和 AI 解析鲁棒性增强：标准化 LLM 超时/限流/非法 JSON 时返回 `rules-fallback` 本地候选和可重试元数据，不再直接 `409`；AI 解析失败时返回可重试兜底响应，前端只提示、不清空当前题目内容。
+- AI 标准化和 AI 解析新增同步请求有界并发：`LLM_STANDARDIZE_MAX_CONCURRENCY`、`LLM_ANALYSIS_MAX_CONCURRENCY`、`LLM_STANDARDIZE_MAX_ATTEMPTS`、`LLM_ANALYSIS_MAX_ATTEMPTS` 已纳入 worker runtime options 和服务器 Compose 默认配置；后续大规模用户上线时预留 Java ai-flow 队列/MQ 异步化路径。
+- 补齐服务器部署文档版本管理：新增并维护 `docs/server/README.md`、`docs/server/CHANGELOG.md`、`docs/server/RUNBOOK.md`，服务器相关部署状态、变更和操作命令不再散落在临时对话里。
+
+## 2026-07-07
+
+- 明确本地/服务器 LLM 路由边界：本地开发默认 `LLM_ROUTER_MODE=external`、`LOCAL_LLM_ENABLED=false`，所有 AI 节点稳定走外部 `deepseek-v4-pro`；服务器部署可使用 `LLM_ROUTER_MODE=hybrid`，但 AI 边界确认默认直接走外部满血模型，本地 `aux-qwen3-32b-fp8` 只默认承接小问结构确认、AI 标准化等快速结构类任务，复杂解析和高风险兜底继续走外部模型。
+- 服务器 GPU 资源拆分：`docker-compose.server.yml` 默认只给 AI_GENERATION / MinerU 申请物理 GPU0（`NVIDIA_VISIBLE_DEVICES=0`，容器内 `OCR_CUDA_VISIBLE_DEVICES=0`），`vllm-aux` 使用物理 GPU1（`AUX_LLM_GPU_DEVICE=1`），避免 OCR 和 vLLM 抢同一张卡。
+- OCR-Flow 接入混合 LLM 路由：`boundary_refine` 默认走外部 `deepseek-v4-pro`；小问结构确认和 AI 标准化先走服务器本地 `aux-qwen3-32b-fp8`，失败、schema 错误、结构校验失败或高风险样本再升级外部模型；本地模型并发和外部模型并发独立配置，外部默认严格限流。
+- 本地 Qwen3 路由新增 JSON 稳定性兼容：默认通过 `LOCAL_LLM_DISABLE_THINKING=true` 关闭 thinking 模式，并在响应解析前剥离 `<think>` 段、扫描首个可解析 JSON 对象，减少 reasoning 文本导致的 schema 失败。
+- 新增路由层 LLM 短期缓存和脱敏指标：`llmMetrics` 现在记录本地/外部调用次数、耗时和缓存命中数，单次调用只记录 route、provider、model、riskScore、耗时和短错误，不记录 prompt、密钥、OCR 全文或图片 base64。
+- 新增离线回归脚本 `scripts/regression_ocr_flow_router.py`，覆盖选择题错拆、小问漏拆、填空题缺失、答案解析串题和题图 path 冲突等路由风险样本。
+- 图库引用体验升级：题目编辑器与导入人工校验统一采用图片引用芯片化显示（`![](图N)` / `![](题图N)` / `![](#N)` / `![](N)`），拖拽与双击编辑均保持源码语义不变，复制/剪切会原样保留 Markdown 引用代码；删除为原子单位，避免半截字符串残留。题库中心与导入人工校验的小问题干/答案/解析字段同时接入该编辑器，支持题目字段间跨位置移动题图引用（按需移动，不改接口）。
+- PDF 导出改为预览样式 XeLaTeX 主路径：Python worker 在 `format=pdf` 时优先生成专用 XeLaTeX 试卷模板，保留 `$...$` / `$$...$$` 数学公式，由 XeLaTeX 渲染分式、方程组、上下标、角度和科学计数法；若环境缺少 `xelatex` 或 LaTeX 包，再回退 ReportLab 文本版。
+- PDF 预览样式继续保留卷头、题型徽标、所选小问徽标、小问卡片、题图和两列选项；解答题会自动预留浅色横线作答区，带小问的解答题会在每个小问卡片内预留作答空间。
+- 导出测试补齐 XeLaTeX 路径：覆盖 LaTeX 数学命令不被转义、XeLaTeX PDF 可编译、解答题留白只作用于解答题或继承父题型的小问；本地真实导出已渲染检查 2 页 PDF，公式不再降级为 `a ^ 2` / `\frac` 文本。
+- 同步导出相关文档：产品规格、技术设计、接口说明、运维、验收、交付包边界、PRD、开发手册和文档索引均更新为 DOCX Pandoc / PDF XeLaTeX 分支链路。
+
 ## 2026-07-06
 
+- AI 标准化可靠候选链路落地：worker 现在按“本地确定性 LaTeX 修复 -> 原始 OCR 兜底 -> LLM 修复”顺序执行；当前编辑稿严重损坏但同题 OCR 题段干净时，会直接返回 `source=ocr-fallback` 候选，不再等待大模型。
+- AI 标准化候选新增渲染安全闸门：worker 会规范化 `$$...$$` 展示公式块边界，返回 `renderValidation` 和 `applyBlocked`；前端候选面板区分“本地修复 / 原始 OCR 兜底 / AI 修复”，不可应用候选禁用“应用”并展示原因；耗时超过短阈值时显示 AI job 正在执行；Java 显式写回同样拒绝 `applyBlocked=true` 或 `renderValidation.valid=false` 的候选。
+- AI 标准化效率优化：新增 `AI_STANDARDIZE_CACHE_TTL_SECONDS`，按当前编辑稿、可信 OCR 上下文和结构提示缓存成功的 LLM 标准化候选，重复点击同一题不再重复消耗模型。
+- Java AI-flow 标准化上下文分离：`rawOcrContext` 不再拼接题目当前 `manualMarkdown`，当前编辑稿只通过 request `markdown` 传递，避免坏稿污染可信 OCR 兜底证据。
+- 核验并补齐文档与流程图：`ocr-flow`、导入 OCR 工作台流程图和 local-platform example 图示同步高置信本地边界跳过、低置信分片 AI 边界确认、AI 标准化本地修复/OCR 兜底/缓存或 LLM/渲染闸门链路；技术设计、规格、接口说明和文档索引同步可靠候选与题图引用规则。
+- 复验 AI 标准化链路：Python worker 49 条测试、Java 33 条测试、前端 `tsc + vite build`、基础部署 smoke、contract/portability/package 检查均通过；通过 Java 创建 Markdown 导入任务后，用损坏第 20 题样本触发 AI 标准化，14ms 返回 `source=ocr-fallback`、`rawOcrFallbackUsed=true`、`candidateSevereIssues=[]`、`renderValidation.valid=true`。
+- 优化 OCR-Flow LLM 调用策略：高置信本地边界跳过 AI 边界确认，低置信边界支持按题段分片并发确认。
+- 新增 LLM 调用耗时指标，用于后续性能基准和容量规划。
+- 新增 OCR 自动语义修复模式配置，默认不阻塞 OCR 主链路。
+- 复验 OCR-Flow LLM 效率优化：高置信 Markdown smoke 样本成功跳过边界模型，`outputs.boundaryConfidence.highConfidence=true`，`outputs.llmMetrics.callCount=0`，`outputs.autoSemanticRepair.mode=skipped`；相关 Python worker 测试、完整 worker 测试和 portability 检查均通过。
+- 修复并验证迁移检查脚本的扫描边界：`scripts/check_project_portability.py` 的源码树扫描会剪枝 `.venv`、`node_modules` 等本机依赖目录，避免迁移自检卡住。
 - 本地小平台补齐小问级 AI 操作：题库中心编辑题目和题目导入人工校验中，每个可编辑小问都显示独立 `AI 标准化` 与 `AI 解析` 按钮；标准化候选只应用到当前小问，解析会组合大题材料、当前小问题干、答案、知识点和题图，只回填当前小问答案/解析，不污染父题或其它小问。
 - 修复新建 OCR 任务后任务记录加载/跳转卡住：`GET /api/import-tasks` 改为直接返回 Java 持久化快照，不再同步等待 Python worker；任务创建和详情继续同步 worker 状态。开发启动的 `uvicorn --reload` 只监听 worker 应用源码，避免 `.venv/site-packages` 文件事件导致 worker 反复重启。
 - 通用 AI 解析入口补齐题图上下文转换：无题目 ID 的 ad-hoc 解析也会复用 Java `file-flow` 图片读取和 data URL 转换逻辑，保证小问级 AI 解析在带题图场景下能把有效题图传给多模态模型。

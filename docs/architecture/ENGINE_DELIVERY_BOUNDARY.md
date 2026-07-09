@@ -34,7 +34,7 @@ GET /api/engine/delivery-boundary
 | --- | --- | --- | --- |
 | `question-import` 题目导入 | 试卷/答案上传、OCR-Flow、任务状态、原文件预览、待校验题目、标准题目包 | Java 管任务元数据、状态机、文件记录、导入题、导入题图、重试入口和标准题目包 | OCR worker、AI worker |
 | `question-bank` 题库 | 题目 CRUD、搜索筛选、题图、答案解析、来源追踪、入库 bridge | Java 管题库题目主快照、题库题图上传/访问、AI 解析结果写回 | AI worker |
-| `paper-assembly` 组卷中心 | 手动选题、规则选题、排序赋分、卷头、预览、导出 | Java 管试卷定义、题目引用、分值、导出任务元数据和导出文件存储 | Pandoc/LaTeX 导出 worker |
+| `paper-assembly` 组卷中心 | 手动选题、规则选题、排序赋分、卷头、预览、导出 | Java 管试卷定义、题目引用、分值、导出任务元数据和导出文件存储 | DOCX Pandoc / PDF XeLaTeX 导出 worker |
 | `knowledge-base` 知识点库 | 知识点 CRUD、搜索、题目知识点候选关联 | Java 已管本地知识点快照 | 无 |
 
 ## 已补充封装能力
@@ -58,7 +58,7 @@ GET /api/capabilities/sdk-openapi
 | --- | --- | --- | --- |
 | `review-workbench` | 可嵌入人工校验工作台，包含题干、答案、解析、题图、原文件预览和保存状态协议 | Java 提供任务、题目、题图和题目包 API；本地 React 页面只是演示壳 | 无 |
 | `ai-flow` | AI 标准化候选、AI 解析、答案解析匹配、确定性 LaTeX 分隔符修复、题图随解析进入多模态模型上下文和模型运行时状态 | Java 创建 AI job、从 file-flow 读取题图并转为 worker 内部图片输入、调用 Python worker、记录成功/失败；标准化默认返回候选并等待人工应用保存，解析结果写回导入题或题库题 | `/worker/ai/standardize`、`/worker/ai/analysis` |
-| `export-flow` | Markdown 中间文件、DOCX/PDF 导出、公式和题图导出 | Java 创建导出 job、调用 Python render worker、保存导出文件元数据和下载响应 | `/worker/export/render`、`/worker/export-flow` |
+| `export-flow` | DOCX Markdown 中间文件、PDF XeLaTeX 预览模板、公式和题图导出 | Java 创建导出 job、调用 Python render worker、保存导出文件元数据和下载响应 | `/worker/export/render`、`/worker/export-flow` |
 | `file-flow` | 原文件、题图、OCR 产物、导出文件的存储和访问协议 | Java 管 LOCAL/MINIO 文件存储、导入原文件、导入题图、题库题图和导出文件 | Python 只读取临时路径或 worker 产物 |
 | `callback-flow` | 任务完成、失败、可重试、超时等事件回调协议 | Java 已提供 HTTP 回调事件表、HMAC 签名、幂等键、失败记录、到期重试扫描和 dead_letter 状态 | 无 |
 | `sdk/openapi` | OpenAPI、Knife4j、能力目录和 SDK 生成边界 | 已提供静态 `question-engine.v1.yaml`、`/v3/api-docs`、`/doc.html` 和 generated TypeScript/Java SDK | 无 |
@@ -173,7 +173,7 @@ Python 只保留必要补充：
 - AI 标准化 worker。
 - AI 解析 worker。
 - LaTeX/公式处理。
-- Pandoc 导出 worker。
+- DOCX Pandoc 和 PDF XeLaTeX 导出 worker。
 
 本轮 Java 化进度：
 

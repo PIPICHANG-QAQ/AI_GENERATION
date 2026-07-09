@@ -88,6 +88,67 @@ public class ImportTaskOrchestrationService {
     }
 
     /**
+     * 重新扫描导入任务的原始 OCR 文件，保留当前已提取和已编辑题目。
+     *
+     * @param taskId 导入任务 ID
+     * @return 重扫启动后的任务状态
+     */
+    public Map<String, Object> rescan(String taskId) {
+        ImportTaskEntity task = mapper.selectById(taskId);
+        if (task == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Import task not found");
+        }
+        if (isProcessing(task.getStatus()) || isProcessing(task.getPaperOcrStatus()) || isProcessing(task.getAnswerOcrStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "任务正在处理中，请等待当前处理完成后再重新扫描");
+        }
+        Map<String, Object> rescanned = new LinkedHashMap<>();
+        if (notBlank(task.getPaperOcrJobId())) {
+            rescanned.put("paper", pythonWorkerClient.postJson("/worker/ocr/" + task.getPaperOcrJobId() + "/retry", Map.of()));
+        }
+        if (notBlank(task.getAnswerOcrJobId())) {
+            rescanned.put("answer", pythonWorkerClient.postJson("/worker/ocr/" + task.getAnswerOcrJobId() + "/retry", Map.of()));
+        }
+        if (rescanned.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "No OCR job can be rescanned");
+        }
+
+        Map<String, Object> raw = json.readMap(task.getRawJson());
+        raw.put("rescanInProgress", true);
+        raw.put("rescanStartedAt", LocalDateTime.now().toString());
+        raw.put("rescanPreviousStatus", task.getStatus());
+        raw.put("rescannedJobs", rescanned);
+        task.setStatus("处理中");
+        task.setPaperOcrStatus("处理中");
+        if (notBlank(task.getAnswerOcrJobId())) {
+            task.setAnswerOcrStatus("处理中");
+        }
+        if (rescanned.get("paper") != null) {
+            task.setPaperOcrJobJson(json.write(rescanned.get("paper")));
+            raw.put("paperOcrJob", rescanned.get("paper"));
+        }
+        if (rescanned.get("answer") != null) {
+            task.setAnswerOcrJobJson(json.write(rescanned.get("answer")));
+            raw.put("answerOcrJob", rescanned.get("answer"));
+        }
+        raw.put("status", task.getStatus());
+        raw.put("paperOcrStatus", task.getPaperOcrStatus());
+        raw.put("answerOcrStatus", task.getAnswerOcrStatus());
+        task.setFailureReason("");
+        task.setRawJson(json.write(raw));
+        task.setUpdatedAt(LocalDateTime.now());
+        mapper.updateById(task);
+        return Map.of(
+                "id", taskId,
+                "taskId", taskId,
+                "status", task.getStatus(),
+                "paperOcrStatus", task.getPaperOcrStatus(),
+                "answerOcrStatus", task.getAnswerOcrStatus(),
+                "rescanInProgress", true,
+                "rescannedJobs", rescanned
+        );
+    }
+
+    /**
      * 判断 OCR 状态是否允许重试。
      *
      * @param status OCR 状态
@@ -97,6 +158,20 @@ public class ImportTaskOrchestrationService {
         return "failed".equalsIgnoreCase(status)
                 || "error".equalsIgnoreCase(status)
                 || "失败".equals(status);
+    }
+
+    /**
+     * 判断状态是否表示任务仍在处理。
+     *
+     * @param status 原始状态
+     * @return true 表示处理中
+     */
+    private boolean isProcessing(String status) {
+        return "处理中".equals(status)
+                || "pending".equalsIgnoreCase(status)
+                || "queued".equalsIgnoreCase(status)
+                || "running".equalsIgnoreCase(status)
+                || "processing".equalsIgnoreCase(status);
     }
 
     /**

@@ -101,13 +101,14 @@ public class PythonWorkerProxyFilter extends OncePerRequestFilter {
                 && path.matches("^/api/import-tasks/[^/]+$")) {
             return true;
         }
-        if ("POST".equalsIgnoreCase(method) && path.matches("^/api/import-tasks/[^/]+/retry$")) {
+        if ("POST".equalsIgnoreCase(method) && path.matches("^/api/import-tasks/[^/]+/(retry|rescan)$")) {
             return true;
         }
         if ("GET".equalsIgnoreCase(method)
                 && (path.equals("/api/import-tasks")
                 || path.matches("^/api/import-tasks/[^/]+$")
-                || path.matches("^/api/import-tasks/[^/]+/source/(paper|answer)$"))) {
+                || path.matches("^/api/import-tasks/[^/]+/source/(paper|answer)$")
+                || path.matches("^/api/import-tasks/[^/]+/source/paper/pages/\\d+$"))) {
             return true;
         }
         if (path.matches("^/api/import-tasks/[^/]+/questions/[^/]+/bank$") || path.matches("^/api/import-tasks/[^/]+/bank$")) {

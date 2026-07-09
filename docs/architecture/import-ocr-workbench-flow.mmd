@@ -1,3 +1,6 @@
+%% Version: 2026-07-09 / product v14 / PaperLayoutCapability
+%% Status: current-primary
+%% Scope: import OCR workbench UX, task lifecycle, rescan, batch AI analysis, and manual review.
 flowchart TD
   LegendLocal["绿色：本地算力 / 本地存储"]:::local
   LegendExternal["黄色：外部 API 算力"]:::external
@@ -12,41 +15,61 @@ flowchart TD
   ReturnTask["返回处理中导入任务<br/>前端选中任务并进入工作台"]:::local
   TaskManage["历史任务列表<br/>支持重命名、删除、选择进入工作台"]:::local
 
-  PaperOcr["本地 MinerU 解析试卷<br/>mineru -p paper -o output -b pipeline"]:::local
-  AnswerOcr["可选：本地 MinerU 解析答案文件"]:::local
+  PaperOcr["MinerU provider 解析试卷<br/>本地 CLI；服务器可复用常驻 mineru-api"]:::local
+  AnswerOcr["可选：MinerU provider 解析答案文件"]:::local
   Poll["前端轮询 GET /api/import-tasks/{taskId}<br/>展示试卷/答案 OCR 状态"]:::local
-  Collect["收集本地 OCR 产物<br/>Markdown、JSON、图片 assets"]:::local
+  Collect["ocr-collect<br/>保留 Markdown、content_list、页码、块顺序、图片 assets"]:::local
   ImageLibrary["建立本卷题图库<br/>OCR 扫描图片自动进入 imageLibrary"]:::local
-  RuleSplit["本地规则拆题参考<br/>题号、题型粗判、选项、题图归属、小问候选"]:::local
 
-  LlmSplit{"大模型拆题是否启用且可用？"}:::mixed
-  SplitApi["外部 API：大模型结构化拆题<br/>输入 OCR Markdown、图片资源、本地参考<br/>识别大题与 subQuestions"]:::external
-  SplitNormalize["本地归一化模型结果<br/>校验 JSON、保留 Markdown/LaTeX、校正题图路径"]:::mixed
-  RuleFallback["本地规则兜底拆题<br/>模型未配置、超时或返回非法 JSON 时使用"]:::local
+  LocalBoundary["local-boundary-detect<br/>题号、题型粗判、选项、小问、题图归属候选"]:::local
+  BoundaryConfidence["boundaryConfidence<br/>本地边界置信度"]:::mixed
+  BoundaryHigh{"本地边界高置信？"}:::mixed
+  BoundarySkip["跳过 AI 边界确认<br/>splitter.source=local-boundary"]:::local
+  LlmBoundary["低置信才调用 AI 边界确认<br/>按题段 chunk 并发；失败分片回退本地边界"]:::external
+  BoundaryValidate["本地结构校验<br/>选项、小问、题图路径和证据回溯"]:::mixed
+  BoundaryFallback["本地边界兜底<br/>模型未配置、超时、JSON 非法或校验失败"]:::local
+  BoundarySource["确定结构边界源<br/>AI merged 或 local fallback"]:::mixed
 
+  BuildStructure["question-structure-build<br/>按 OCR 原文切片生成题目结构"]:::local
+  SubQuestionSplit["sub-question-split<br/>大题内小问写入 subQuestions/children"]:::local
+  ChoiceBlankProtect["选择题/空位题结构保护<br/>选项边界、____ 占位、题图回收"]:::mixed
+  VisualRepair["visual-repair<br/>题目 crop、横线检测、可选 Pix2Text"]:::mixed
   MathNormalize["本地公式标准化与校验<br/>math_normalizer.py 多轮修复与风险标记"]:::local
   LatexDelimiter["确定性 LaTeX 分隔符修复<br/>展示公式嵌套 $ / 行内公式被运算符切断"]:::mixed
-  SemanticRisk{"是否命中高置信语义 OCR 风险？<br/>例如 5&quot; 疑似 5^n"}:::mixed
-  SemanticApi["外部 API：AI 语义修复<br/>仅处理本地检测出的高置信风险"]:::external
-  SemanticVerify["本地复核 AI 修复结果<br/>低置信或仍有风险则不写回"]:::mixed
+  AutoSemanticMode{"OCR_AUTO_SEMANTIC_REPAIR_MODE"}:::mixed
+  AutoSemanticSkip["默认 skip<br/>只记录候选数量，不阻塞导入"]:::local
+  SemanticApi["inline 模式：外部 API 语义 OCR 修复<br/>仅处理高置信风险，失败不写回"]:::external
 
   MetadataFlow{"题目元数据补全<br/>答案 OCR 上下文是否可用？"}:::mixed
   MetadataApi["外部 API：补全题型、答案、解析、知识点、难度、分值<br/>按 subQuestions 归属答案/解析"]:::external
   MetadataFallback["本地默认元数据<br/>答案/解析/知识点为空，难度 medium"]:::local
 
   BuildImport["生成导入题目<br/>状态：待校验，保留 images、options、subQuestions"]:::local
+  OcrOutputs["OCR outputs<br/>splitter、boundaryConfidence、autoSemanticRepair、llmMetrics"]:::mixed
   SubQuestionNormalize["小问结构归一化<br/>children 与 subQuestions 双字段<br/>父题答案/解析为空"]:::local
   Workbench["前端工作台展示<br/>左侧原文件预览，右侧复合校验"]:::local
-  FigureModule["题图独立模块<br/>题图与题干分离，多图预览和移除"]:::local
-  ImportImages["题图来源<br/>从本卷题图库导入或本地多图上传<br/>AI 解析跳过无效图片"]:::local
+  LayoutToggle["布局解析框开关<br/>叠加 PaperLayoutCapability 父题范围框"]:::local
+  LayoutClick["点击范围框<br/>滚动并高亮右侧父题校验卡"]:::local
+  Toolbar["工作台工具栏<br/>重新 OCR 扫描 / AI 解析全部 / 批量入库"]:::local
+  RescanConfirm["重新 OCR 扫描确认<br/>只扫描原始试卷/答案文件<br/>不覆盖已提取和已编辑题目"]:::local
+  RescanApi["POST /api/import-tasks/{taskId}/rescan<br/>Java 判断处理中状态；重复触发返回 409"]:::mixed
+  BatchAiConfirm["AI 解析全部确认<br/>默认只补缺失解析；可勾选覆盖已有解析"]:::local
+  BatchAiLoop["批量 AI 解析编排<br/>普通题整题，小问逐个；进度 n/m<br/>失败不中断，结束汇总"]:::external
+  FigureRefs["题图引用与题图库<br/>images 保存元数据；题干 Markdown 引用决定预览位置"]:::local
+  ImportImages["选择/上传题图<br/>新增题图自动补引用；手动删除引用后不再渲染该图"]:::local
   KnowledgePick["知识点库联动选择<br/>GET /api/knowledge-points，本地筛选搜索"]:::local
   ManualEdit["复合编辑器<br/>大题题干 + 小问题干/答案/解析/分值/知识点"]:::local
-  AiStandardize["AI 标准化候选<br/>分隔符修复 + OCR 上下文 + 风险闸门<br/>人工应用后保存"]:::mixed
-  AiAnalysis["外部 API：AI 解析<br/>POST /api/import-tasks/{taskId}/questions/{questionId}/analysis<br/>含小问时返回 subQuestions 解析"]:::external
+
+  StdLocal["AI 标准化：本地确定性修复<br/>LaTeX 分隔符、块公式边界、严重风险检测"]:::local
+  StdOcr["AI 标准化：可信 OCR 兜底<br/>rawOcrContext 与当前编辑稿分离"]:::local
+  StdLlm["AI 标准化：缓存命中或可选 LLM 修复<br/>AI_STANDARDIZE_CACHE_TTL_SECONDS"]:::external
+  StdGate["候选安全闸门<br/>renderValidation / applyBlocked / candidateSevereIssues"]:::mixed
+  CandidatePanel["候选面板<br/>区分本地修复、原始 OCR 兜底、AI 修复<br/>不可应用候选禁用应用"]:::local
+  AiAnalysis["外部 API：AI 解析<br/>有效题图进入多模态上下文<br/>含小问时返回 subQuestions 解析"]:::external
   SaveReview["保存校验结果<br/>PUT /api/import-tasks/{taskId}/questions/{questionId}<br/>写回 subQuestions"]:::local
   BankDedup["题目入库查重<br/>重复题目跳过或拒绝"]:::local
   Bank["单题/批量入库<br/>写入 bankQuestions，保留 subQuestions"]:::local
-  BankEdit["题库中心复合编辑<br/>大题题干 + 小问答案/解析 + AI 解析"]:::local
+  BankEdit["题库中心复合编辑<br/>大题题干 + 小问答案/解析 + AI 操作"]:::local
   PaperSubSelect["组卷中心按小问选择<br/>subSelections 只保存在试卷层"]:::local
   PaperExport["组卷中心引用题目<br/>仅渲染所选小问，导出 DOCX/PDF"]:::local
   End(["题库中心可搜索、编辑、组卷引用"]):::local
@@ -59,23 +82,29 @@ flowchart TD
   PaperOcr --> Collect
   AnswerOcr --> Collect
   Poll --> Collect
-  Collect --> ImageLibrary --> RuleSplit --> LlmSplit
-  LlmSplit -- "可用" --> SplitApi --> SplitNormalize
-  LlmSplit -- "不可用/失败" --> RuleFallback
-  SplitNormalize --> MathNormalize
-  RuleFallback --> MathNormalize
-  MathNormalize --> LatexDelimiter --> SemanticRisk
-  SemanticRisk -- "是" --> SemanticApi --> SemanticVerify --> MathNormalize
-  SemanticRisk -- "否" --> MetadataFlow
+  Collect --> ImageLibrary --> LocalBoundary --> BoundaryConfidence --> BoundaryHigh
+  BoundaryHigh -- "是" --> BoundarySkip --> BoundarySource
+  BoundaryHigh -- "否" --> LlmBoundary --> BoundaryValidate
+  BoundaryValidate -- "通过" --> BoundarySource
+  BoundaryValidate -- "失败 / 不可用" --> BoundaryFallback --> BoundarySource
+  BoundarySource --> BuildStructure --> SubQuestionSplit --> ChoiceBlankProtect --> VisualRepair --> MathNormalize
+  MathNormalize --> LatexDelimiter --> AutoSemanticMode
+  AutoSemanticMode -- "skip" --> AutoSemanticSkip --> MetadataFlow
+  AutoSemanticMode -- "inline / inline-concurrent" --> SemanticApi --> MathNormalize
   MetadataFlow -- "API 可用" --> MetadataApi --> BuildImport
   MetadataFlow -- "API 不可用/失败" --> MetadataFallback --> BuildImport
-  BuildImport --> SubQuestionNormalize --> Workbench
-  Workbench --> FigureModule --> ImportImages --> SaveReview
-  Workbench --> KnowledgePick
+  BuildImport --> OcrOutputs --> SubQuestionNormalize --> Workbench
+  Workbench --> LayoutToggle --> LayoutClick --> ManualEdit
+  Workbench --> Toolbar
+  Toolbar --> RescanConfirm --> RescanApi --> Poll
+  Toolbar --> BatchAiConfirm --> BatchAiLoop --> SaveReview
+  Workbench --> FigureRefs --> ImportImages --> SaveReview
+  Workbench --> KnowledgePick --> SaveReview
   Workbench --> ManualEdit
-  ManualEdit --> AiStandardize --> SaveReview
+  ManualEdit --> StdLocal --> StdOcr --> StdLlm --> StdGate --> CandidatePanel
+  CandidatePanel -- "人工应用" --> SaveReview
+  CandidatePanel -- "不可应用 / 取消" --> ManualEdit
   ManualEdit --> AiAnalysis --> SaveReview
-  KnowledgePick --> SaveReview
   SaveReview --> BankDedup --> Bank --> BankEdit --> PaperSubSelect --> PaperExport --> End
 
   classDef local fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;

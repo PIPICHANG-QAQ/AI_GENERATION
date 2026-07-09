@@ -12,6 +12,7 @@ from typing import Any
 
 from app.question_markdown import (
     detect_choice_option_markers,
+    ensure_question_images_in_markdown,
     image_from_path,
     infer_question_type,
     normalize_fill_blank_markdown,
@@ -27,7 +28,16 @@ SUB_LABEL_RE = re.compile(
     r"(^|[\r\n]+|[ \t　]+|[。；;：:]\s*)"
     r"(?P<label>[（(]\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*[）)]|[①②③④⑤⑥⑦⑧⑨⑩])"
 )
-IMAGE_REF_RE = re.compile(r"!\[[^\]]*]\(([^)]+)\)")
+IMAGE_REF_RE = re.compile(r"!\[[^\]]*]\s*\(\s*<?([^>)\s]+)>?(?:\s+['\"][^)]*['\"])?\s*\)")
+NON_QUESTION_TAIL_RE = re.compile(
+    r"(?im)^[ \t]*(?:#{1,6}[ \t]*)?(?:"
+    r"\d{4}\s*年[^\n]{0,80}(?:试卷|考试|真题)"
+    r"|参考答案(?:与|及)?(?:试题)?解析"
+    r"|参考答案|答案解析|试题解析|答案与解析"
+    r"|【\s*(?:解答|解析|答案)\s*】"
+    r"|(?:解答|解析|答案)\s*[:：]"
+    r")"
+)
 
 
 def detect_local_boundaries(markdown: str, assets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -108,6 +118,124 @@ def detect_local_boundaries(markdown: str, assets: list[dict[str, Any]]) -> dict
         "images": detect_image_refs(source, 0, assets),
         "questionCount": len(questions),
     }
+
+
+def evaluate_boundary_confidence(markdown: str, boundaries: dict[str, Any], assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Score whether local question boundaries are safe enough to skip LLM refinement."""
+    source = str(markdown or "")
+    questions = [question for question in boundaries.get("questions", []) if isinstance(question, dict)]
+    reasons: list[str] = []
+    low_ids: list[str] = []
+
+    if not questions:
+        reasons.append("no-question-boundaries")
+
+    numbers = [int(question.get("number")) for question in questions if isinstance(question.get("number"), int)]
+    if len(numbers) >= 2:
+        for previous, current in zip(numbers, numbers[1:]):
+            if current <= previous or current - previous > 1:
+                reasons.append("question-number-gap")
+                break
+
+    for question in questions:
+        qid = str(question.get("id") or "")
+        start = question.get("start")
+        end = question.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start or end > len(source):
+            reasons.append("invalid-question-range")
+            if qid:
+                low_ids.append(qid)
+            continue
+        if question.get("type") == "choice" and len(question.get("options") or []) not in {0, 4}:
+            reasons.append("unstable-choice-options")
+            if qid:
+                low_ids.append(qid)
+
+    asset_paths = {str(asset.get("path") or "") for asset in assets if isinstance(asset, dict)}
+    for image in boundaries.get("images") or []:
+        if not isinstance(image, dict):
+            continue
+        path = str(image.get("path") or "")
+        if path and path not in asset_paths:
+            reasons.append("unknown-image-path")
+            break
+
+    unique_reasons = list(dict.fromkeys(reasons))
+    return {
+        "highConfidence": not unique_reasons,
+        "reasons": unique_reasons,
+        "questionCount": len(questions),
+        "lowConfidenceQuestionIds": list(dict.fromkeys(low_ids)),
+    }
+
+
+def plan_boundary_chunks(
+    markdown: str,
+    boundaries: dict[str, Any],
+    chunk_size: int,
+    max_chars: int | None = None,
+) -> list[dict[str, Any]]:
+    """Plan LLM boundary-refinement chunks while preserving absolute offsets."""
+    source = str(markdown or "")
+    questions = [question for question in boundaries.get("questions", []) if isinstance(question, dict)]
+    if not questions:
+        return []
+
+    chunk_size = max(1, int(chunk_size or 1))
+    char_budget = max(1000, int(max_chars or 0)) if max_chars else None
+    sections = [section for section in boundaries.get("sections", []) if isinstance(section, dict)]
+    chunks: list[dict[str, Any]] = []
+
+    index = 0
+    offset = 0
+    while offset < len(questions):
+        group: list[dict[str, Any]] = []
+        group_start = int(questions[offset].get("start") or 0)
+        group_end = group_start
+        cursor = offset
+        while cursor < len(questions) and len(group) < chunk_size:
+            question = questions[cursor]
+            question_start = int(question.get("start") or group_start)
+            question_end = int(question.get("end") or question_start)
+            next_start = min(group_start, question_start) if group else question_start
+            next_end = max(group_end, question_end)
+            if group and char_budget and next_end - next_start > char_budget:
+                break
+            group.append(question)
+            group_start = next_start
+            group_end = next_end
+            cursor += 1
+        if not group:
+            group = [questions[offset]]
+            cursor = offset + 1
+        start = max(0, min(int(question.get("start") or 0) for question in group))
+        end = min(len(source), max(int(question.get("end") or start) for question in group))
+        section_ids = {str(question.get("sectionId") or "") for question in group}
+        chunk_sections = [section for section in sections if str(section.get("id") or "") in section_ids]
+        chunks.append(
+            {
+                "index": index,
+                "start": start,
+                "end": end,
+                "markdown": source[start:end],
+                "localBoundaries": {
+                    "source": boundaries.get("source", "rule-boundary"),
+                    "sections": chunk_sections,
+                    "questions": group,
+                    "images": [
+                        image
+                        for image in boundaries.get("images", [])
+                        if isinstance(image, dict)
+                        and isinstance(image.get("start"), int)
+                        and start <= int(image.get("start")) < end
+                    ],
+                    "questionCount": len(group),
+                },
+            }
+        )
+        index += 1
+        offset = cursor
+    return chunks
 
 
 def detect_sub_question_boundaries(text: str, base_offset: int, parent_end: int) -> list[dict[str, Any]]:
@@ -234,6 +362,8 @@ def build_structure_from_boundaries(
         flat_questions.append(question)
 
     sections = [section for section in sections if section["questions"]]
+    for question in flat_questions:
+        ensure_question_images_in_markdown(question)
     return {"sections": sections, "questions": flat_questions}
 
 
@@ -343,6 +473,7 @@ def normalize_image_boundaries(value: Any, parent_start: int, parent_end: int) -
 def build_question(source: str, raw_question: dict[str, Any], assets: list[dict[str, Any]], fallback_index: int) -> dict[str, Any] | None:
     start = int(raw_question["start"])
     end = int(raw_question["end"])
+    end = trim_non_question_tail_end(source, start, end)
     raw_text = source[start:end]
     if not raw_text.strip():
         return None
@@ -379,9 +510,16 @@ def build_question(source: str, raw_question: dict[str, Any], assets: list[dict[
         question["images"] = images_for_range(raw_question.get("images") or [], assets, start, first_child_start)
         question_images = raw_question.get("images") or []
         for child_index, child_boundary in enumerate(child_boundaries, start=1):
+            child_start = int(child_boundary.get("start") or start)
+            if child_start >= end:
+                continue
             child = build_sub_question(
                 source,
-                {**child_boundary, "images": [*question_images, *(child_boundary.get("images") or [])]},
+                {
+                    **child_boundary,
+                    "end": min(int(child_boundary.get("end") or end), end),
+                    "images": [*question_images, *(child_boundary.get("images") or [])],
+                },
                 assets,
                 question,
                 child_index,
@@ -411,6 +549,7 @@ def build_sub_question(
 ) -> dict[str, Any] | None:
     start = int(raw_child["start"])
     end = int(raw_child["end"])
+    end = trim_non_question_tail_end(source, start, end)
     raw_text = source[start:end]
     if not raw_text.strip():
         return None
@@ -444,6 +583,16 @@ def build_sub_question(
         "sourceEvidence": {"start": start, "end": end},
     }
     return child
+
+
+def trim_non_question_tail_end(source: str, start: int, end: int) -> int:
+    """Trim answer/title blocks that OCR appended to the end of a question span."""
+    text = source[start:end]
+    for match in NON_QUESTION_TAIL_RE.finditer(text):
+        prefix = text[: match.start()]
+        if prefix.strip():
+            return start + len(prefix.rstrip())
+    return end
 
 
 def validate_structure(structured: dict[str, Any], markdown: str, assets: list[dict[str, Any]]) -> dict[str, Any]:

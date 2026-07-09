@@ -108,6 +108,18 @@ public class ImportTaskMetadataBridgeController {
     }
 
     /**
+     * 预览导入任务试卷的单页渲染图。
+     *
+     * @param taskId 导入任务 ID
+     * @param pageIndex 从 0 开始的页码
+     * @return 试卷页图响应，用于前端叠加布局解析框
+     */
+    @GetMapping("/{taskId}/source/paper/pages/{pageIndex}")
+    public ResponseEntity<?> sourcePaperPage(@PathVariable String taskId, @PathVariable int pageIndex) {
+        return service.sourcePaperPage(taskId, pageIndex);
+    }
+
+    /**
      * 更新导入任务元数据。
      *
      * @param taskId 导入任务 ID

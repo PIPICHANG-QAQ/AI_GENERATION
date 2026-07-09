@@ -48,7 +48,7 @@
 | 替换 MinerU 或改 OCR provider | [OCR 阶段规格](../product/OCR_PHASE_1_SPEC.md)、[Python worker README](../../backend/python-worker/README.md)、[运维指南](../delivery/OPERATIONS_GUIDE.md) | provider 输入输出、配置、runtime 和替换路径 |
 | 修改 AI 标准化、AI 解析、答案解析匹配 | [OCR 阶段规格](../product/OCR_PHASE_1_SPEC.md)、[技术设计](../architecture/TECHNICAL_DESIGN.md)、[后端结构说明](../../backend/README.md) | AI worker、Java job、标准化候选、写回闸门、题图上下文和验收点 |
 | 修改题图、图片库、文件访问 | [接口清单](../delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)、[技术设计](../architecture/TECHNICAL_DESIGN.md)、[安全契约](../delivery/SECURITY_AND_INTEGRATION_CONTRACT.md) | file-flow、访问权限、SDK 方法和平台文件边界 |
-| 修改组卷或导出 | [题库二期规格](../product/QUESTION_BANK_PHASE_2_SPEC.md)、[技术设计](../architecture/TECHNICAL_DESIGN.md)、[运维指南](../delivery/OPERATIONS_GUIDE.md) | 组卷流程、试卷数据、导出 job 和 Pandoc worker 边界 |
+| 修改组卷或导出 | [题库二期规格](../product/QUESTION_BANK_PHASE_2_SPEC.md)、[技术设计](../architecture/TECHNICAL_DESIGN.md)、[运维指南](../delivery/OPERATIONS_GUIDE.md) | 组卷流程、试卷数据、导出 job、DOCX Pandoc 和 PDF XeLaTeX worker 边界 |
 | 修改知识点库 | [题库二期规格](../product/QUESTION_BANK_PHASE_2_SPEC.md)、[后端结构说明](../../backend/README.md) | 知识点 CRUD、题目关联和 Java 数据层边界 |
 | 修改本地小平台页面 | [本地小平台 Example](../product/LOCAL_PLATFORM_AS_EXAMPLE.md)、[题库二期规格](../product/QUESTION_BANK_PHASE_2_SPEC.md)、[renders](../renders/README.md) | 哪些页面行为可参考，哪些不能当正式平台契约 |
 | 做安全或生产接入评审 | [安全契约](../delivery/SECURITY_AND_INTEGRATION_CONTRACT.md)、[接口清单](../delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)、[运维指南](../delivery/OPERATIONS_GUIDE.md) | 鉴权、header、callback 签名、文件访问、限流和审计边界 |

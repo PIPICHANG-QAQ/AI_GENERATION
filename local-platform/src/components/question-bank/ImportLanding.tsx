@@ -141,6 +141,9 @@ export function ImportLanding({ onOpenTask }: { onOpenTask: (id: string) => void
   const [renameValue, setRenameValue] = useState("");
 
   const taskItems: any[] = tasks?.items ?? [];
+  const taskItemIds = taskItems.map((task: any) => String(task.id));
+  const selectedTaskIds = taskItemIds.filter((id) => selectedIds.has(id));
+  const allTasksSelected = taskItemIds.length > 0 && selectedTaskIds.length === taskItemIds.length;
 
   const createMutation = useMutation({
     mutationFn: (data: FormData) => api.createImportTask(data),
@@ -203,6 +206,14 @@ export function ImportLanding({ onOpenTask }: { onOpenTask: (id: string) => void
     });
   };
 
+  const selectAllTasks = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      taskItemIds.forEach((id) => next.add(id));
+      return next;
+    });
+  };
+
   const startRename = (e: React.MouseEvent, task: any) => {
     e.stopPropagation();
     setRenamingId(task.id);
@@ -225,7 +236,7 @@ export function ImportLanding({ onOpenTask }: { onOpenTask: (id: string) => void
   };
 
   const handleBatchDelete = () => {
-    const ids = Array.from(selectedIds);
+    const ids = selectedTaskIds;
     if (ids.length === 0) return;
     if (!window.confirm(`确定删除选中的 ${ids.length} 个任务？此操作不可撤销。`)) return;
     batchDeleteMutation.mutate(ids);
@@ -348,17 +359,26 @@ export function ImportLanding({ onOpenTask }: { onOpenTask: (id: string) => void
               <div className="text-[11px] text-muted-foreground">共 {taskItems.length} 个任务</div>
             </div>
           </div>
-          {selectedIds.size > 0 && (
+          {(taskItemIds.length > 0 && !allTasksSelected) || selectedTaskIds.length > 0 ? (
             <div className="flex items-center gap-2">
-              <Button type="button" size="sm" variant="destructive" onClick={handleBatchDelete} disabled={batchDeleteMutation.isPending}>
-                <Trash2 className="w-3.5 h-3.5 mr-1" />
-                删除所选 ({selectedIds.size})
-              </Button>
-              <Button type="button" size="sm" variant="outline" onClick={() => setSelectedIds(new Set())}>
-                全部取消
-              </Button>
+              {taskItemIds.length > 0 && !allTasksSelected && (
+                <Button type="button" size="sm" variant="outline" onClick={selectAllTasks}>
+                  全选
+                </Button>
+              )}
+              {selectedTaskIds.length > 0 && (
+                <>
+                  <Button type="button" size="sm" variant="destructive" onClick={handleBatchDelete} disabled={batchDeleteMutation.isPending}>
+                    <Trash2 className="w-3.5 h-3.5 mr-1" />
+                    删除所选 ({selectedTaskIds.length})
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setSelectedIds(new Set())}>
+                    全部取消
+                  </Button>
+                </>
+              )}
             </div>
-          )}
+          ) : null}
         </div>
 
         <div className="p-3 space-y-2">

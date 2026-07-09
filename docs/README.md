@@ -9,6 +9,13 @@
 - [接口清单](delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)：平台开发者对接 question-engine 时读，说明核心接口、出入参、回调、SDK 和不推荐接入方式。
 - [交付包说明](delivery/DELIVERY_PACKAGE.md)：交付给平台团队前读，说明包含/排除目录、打包命令和验收规则。
 
+## 文档版本管理
+
+- [CHANGELOG](CHANGELOG.md) 是项目级版本记录，记录影响代码、接口、产品规则、UI、OCR/AI 行为和交付边界的变更。
+- [服务器部署 Changelog](server/CHANGELOG.md) 只记录服务器环境上的部署、配置、性能验证、数据修复和运维动作。
+- 功能规则必须同步到对应专题文档，不能只写 changelog。例如 OCR 拆题规则写入 `product/OCR_PHASE_1_SPEC.md` 和 `architecture/TECHNICAL_DESIGN.md`；接口字段写入 `delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md`；验收口径写入 `delivery/ACCEPTANCE.md`。
+- 服务器敏感信息不得写入文档；只记录主机、端口、目录、容器名、配置键和脱敏结果。
+
 ## 目录结构
 
 ```text
@@ -18,6 +25,7 @@ docs/
   product/        产品范围、OCR 规格、本地小平台 example
   architecture/   技术设计、交付边界、架构图、ADR
   delivery/       接口、安全、部署运维、错误状态、验收、交付包
+  server/         服务器部署现状、变更记录和运维 Runbook
   development/    开发手册、贡献规则、同步检查清单
   example/        local-platform 作为 example 的流程图
   renders/        界面线框图、渲染图和截图
@@ -27,25 +35,35 @@ docs/
 ## Product
 
 - [PRD](product/PRD.md)：本期 question-engine 题库加工能力与本地小平台产品需求。
-- [OCR 阶段规格](product/OCR_PHASE_1_SPEC.md)：OCR-Flow、选择题/空位题结构保护、视觉修复、AI 标准化、AI 解析、公式校验、人工校验和 OCR provider 替换边界。
+- [OCR 阶段规格](product/OCR_PHASE_1_SPEC.md)：OCR-Flow、选择题/空位题结构保护、视觉修复、AI 标准化可靠候选、AI 解析、公式校验、人工校验、LLM 边界确认效率策略和 OCR provider 替换边界。
 - [题库二期规格](product/QUESTION_BANK_PHASE_2_SPEC.md)：题目导入、题库中心、小问复合题、按小问组卷、知识点库、导出和平台集成输出。
 - [本地小平台 Example](product/LOCAL_PLATFORM_AS_EXAMPLE.md)：说明 `local-platform` 如何演示 question-engine 能力，包括 `subQuestions` 和试卷层 `subSelections`，哪些流程可参考，哪些本地实现不应依赖。
 
 ## Architecture
 
-- [技术设计](architecture/TECHNICAL_DESIGN.md)：后端、前端、存储、MinerU、大模型拆题、选择题/空位题结构保护、题目 crop 视觉修复、公式标准化、AI 语义修复和人工编辑集成设计。
+- [架构图索引与版本治理](architecture/README.md)：说明 `docs/architecture` 下每张流程图的状态、用途、重复边界、合并建议和 Mermaid 渲染规则。
+- [技术设计](architecture/TECHNICAL_DESIGN.md)：后端、前端、存储、MinerU、大模型拆题、OCR-Flow LLM 置信度门控与耗时指标、选择题/空位题结构保护、题目 crop 视觉修复、公式标准化、AI 标准化可靠候选、AI 语义修复、试卷 DOCX/PDF 导出和人工编辑集成设计。
 - [Engine 交付边界](architecture/ENGINE_DELIVERY_BOUNDARY.md)：题库能力发动机交付边界、平台职责、Java/Python 分工和本地小平台排除范围。
 - [架构决策记录](architecture/decisions/README.md)：Java 主后端、Python worker、MinerU provider、本地 H2 模式等关键 ADR。
+- [OCR-Flow 主链路图](architecture/ocr-flow.mmd)：导入、OCR、拆题、视觉修复、公式校验、AI 增强和人工校验的端到端流程。
+- [服务器 OCR-Flow 算力边界图](architecture/server-ocr-flow.mmd)：服务器部署视角的 OCR-Flow，标注本地 CPU/GPU 算力、可选本地基础设施和外部大模型 API。
 - `architecture/*.mmd` / `architecture/*.svg`：Mermaid 架构图和流程图。
 
 ## Delivery
 
 - [接口清单](delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)：question-engine 封装接口说明书，包含 `question-package.v1`、选择题/空位题输出约束、小问字段和组卷 `subSelections`。
 - [安全与集成契约](delivery/SECURITY_AND_INTEGRATION_CONTRACT.md)：平台鉴权、上下文 header、callback 签名、文件访问和限流责任边界。
-- [部署与运维指南](delivery/OPERATIONS_GUIDE.md)：生产部署、环境变量、启动顺序、健康检查、回滚、排障树和性能基准。
+- [部署与运维指南](delivery/OPERATIONS_GUIDE.md)：生产部署、环境变量、OCR/LLM 并发与效率开关、启动顺序、健康检查、回滚、排障树和性能基准。
 - [错误码与状态机](delivery/ERROR_AND_STATUS_GUIDE.md)：正式错误码、状态机、可重试规则和平台展示建议。
 - [验收标准与验收套件](delivery/ACCEPTANCE.md)：本期统一验收标准和插件级验收脚本。
 - [交付包说明](delivery/DELIVERY_PACKAGE.md)：交付包边界、清理规则、打包方式和交付前检查。
+- 当前 SDK/OpenAPI 版本为 `1.1.0`；TOGO 移交包可通过 `scripts/package_question_engine_delivery.py --release-name ...` 生成带版本名的压缩包和 manifest。
+
+## Server
+
+- [服务器部署状态](server/README.md)：当前服务器目录、访问地址、端口、GPU 分配、MinerU 常驻 API、模型缓存和性能验证。
+- [服务器部署 Changelog](server/CHANGELOG.md)：只记录服务器发布、配置、性能和运维相关变更。
+- [服务器运维 Runbook](server/RUNBOOK.md)：健康检查、重启、GPU 验证、MinerU API 验证、ONNX provider 验证和预热命令。
 
 ## Development
 
@@ -65,3 +83,4 @@ docs/
 - `../scripts/smoke_local_platform_business.py`：本地小平台基础业务冒烟测试。
 - `../scripts/acceptance_question_engine_plugin.py`：平台插件级验收脚本。
 - `../scripts/package_question_engine_delivery.py`：交付包打包和边界检查脚本。
+- `../scripts/check_project_portability.py`：迁移前检查源码和交付文件，不扫描 `.venv`、`node_modules` 等本机依赖目录。
