@@ -4,6 +4,7 @@ import { api, apiUrl } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { StatusTag } from "@/components/ui/StatusTag";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Progress } from "@/components/ui/progress";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -86,6 +87,16 @@ type PaperLayout = {
   pages?: PaperLayoutPage[];
   regions?: PaperLayoutRegion[];
   warnings?: string[];
+};
+
+type BatchAiProgress = {
+  done: number;
+  total: number;
+  ok: number;
+  fail: number;
+  status: "running" | "saving" | "completed" | "failed";
+  currentLabel: string;
+  message?: string;
 };
 
 const FLOW_STATUS_LABELS: Record<string, string> = {
@@ -279,6 +290,44 @@ function OcrFlowProgress({ task, onRefresh }: { task: any; onRefresh: () => void
   );
 }
 
+function BatchAiProgressPanel({ progress }: { progress: BatchAiProgress }) {
+  const percent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const isFinished = progress.status === "completed" || progress.status === "failed";
+  const title =
+    progress.status === "saving"
+      ? "正在保存 AI 解析结果"
+      : progress.status === "completed"
+        ? "AI 解析处理完成"
+        : progress.status === "failed"
+          ? "AI 解析处理失败"
+          : "AI 解析全部处理中";
+
+  return (
+    <div className="shrink-0 border-b border-primary/20 bg-primary/5 px-4 py-3">
+      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            {!isFinished && <RefreshCcw className="h-4 w-4 animate-spin text-primary" />}
+            {isFinished && <CheckCircle2 className="h-4 w-4 text-success" />}
+            <span>{title}</span>
+          </div>
+          <p className="mt-1 truncate text-xs text-muted-foreground">
+            {progress.currentLabel}
+            {progress.message ? ` · ${progress.message}` : ""}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
+          <span>{progress.done}/{progress.total}</span>
+          <span>成功 {progress.ok}</span>
+          <span>失败 {progress.fail}</span>
+          <span className="font-medium text-foreground">{percent}%</span>
+        </div>
+      </div>
+      <Progress value={percent} className="mt-2 h-2" />
+    </div>
+  );
+}
+
 function layoutPreviewUrl(value: string) {
   if (/^https?:\/\//i.test(value)) return value;
   return apiUrl(value.startsWith("/") ? value : `/${value}`);
@@ -426,11 +475,12 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
   const [sourceVisible, setSourceVisible] = useState(true);
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
   const [overwriteExisting, setOverwriteExisting] = useState(false);
-  const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
+  const [aiProgress, setAiProgress] = useState<BatchAiProgress | null>(null);
   const [rescanDialogOpen, setRescanDialogOpen] = useState(false);
   const [showLayoutBoxes, setShowLayoutBoxes] = useState(true);
   const [highlightQuestionId, setHighlightQuestionId] = useState<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const aiProgressResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const aiRunning = aiProgress !== null;
 
   const { data: task, isLoading, isError, error, isRefetching } = useQuery({
@@ -447,6 +497,9 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
     return () => {
       if (highlightTimerRef.current) {
         clearTimeout(highlightTimerRef.current);
+      }
+      if (aiProgressResetTimerRef.current) {
+        clearTimeout(aiProgressResetTimerRef.current);
       }
     };
   }, []);
@@ -492,23 +545,30 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
   };
 
   const runAiAnalyzeAll = async (overwrite: boolean) => {
+    if (aiRunning) return;
+    if (aiProgressResetTimerRef.current) {
+      clearTimeout(aiProgressResetTimerRef.current);
+      aiProgressResetTimerRef.current = null;
+    }
+
     const questions = Array.isArray(task?.questions) ? task.questions.filter((q: any) => q.status !== "已入库") : [];
-    type BatchUnit = { question: any; sub?: any; subIndex?: number };
+    type BatchUnit = { question: any; sub?: any; subIndex?: number; label: string };
     const units: BatchUnit[] = [];
-    for (const question of questions) {
+    questions.forEach((question: any, questionIndex: number) => {
+      const questionNumber = String(question.number || question.questionNumber || questionIndex + 1);
       const subs = getSubQuestions(question);
       if (subs.length > 0) {
         subs.forEach((sub, subIndex) => {
           if (getQuestionMarkdown(sub).trim() && (overwrite || !String(sub.analysis || "").trim())) {
-            units.push({ question, sub, subIndex });
+            units.push({ question, sub, subIndex, label: `第 ${questionNumber} 题小问 ${subIndex + 1}` });
           }
         });
         return;
       }
       if (getQuestionMarkdown(question).trim() && (overwrite || !String(question.analysis || "").trim())) {
-        units.push({ question });
+        units.push({ question, label: `第 ${questionNumber} 题` });
       }
-    }
+    });
 
     if (units.length === 0) {
       toast({
@@ -520,14 +580,39 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
       return;
     }
 
-    setAiProgress({ done: 0, total: units.length });
     let ok = 0;
     let fail = 0;
     let done = 0;
     const dirtySubQuestions = new Map<string, any[]>();
     const dirtySubSuccesses = new Map<string, number>();
+    const publishProgress = (
+      currentLabel: string,
+      status: BatchAiProgress["status"] = "running",
+      message?: string,
+    ) => {
+      setAiProgress({
+        done,
+        total: units.length,
+        ok,
+        fail,
+        status,
+        currentLabel,
+        message,
+      });
+    };
+
+    publishProgress(
+      `准备处理 ${units.length} 处解析`,
+      "running",
+      overwrite ? "覆盖已有解析" : "只补齐缺失解析",
+    );
+    toast({
+      title: "已开始 AI 解析全部",
+      description: `将处理 ${units.length} 处解析，期间可以继续浏览题目`,
+    });
 
     for (const unit of units) {
+      publishProgress(`正在生成${unit.label}解析`);
       try {
         if (unit.sub) {
           const parentSubs = dirtySubQuestions.get(unit.question.id)
@@ -547,11 +632,12 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
             parentSubs[unit.subIndex ?? -1] = { ...parentSubs[unit.subIndex ?? -1], analysis: patch.analysis };
             dirtySubQuestions.set(unit.question.id, parentSubs);
             dirtySubSuccesses.set(unit.question.id, (dirtySubSuccesses.get(unit.question.id) || 0) + 1);
+            ok++;
           } else {
             fail++;
           }
         } else {
-          const res: any = await api.generateAnalysisAi({
+          const res: any = await api.generateImportQuestionAnalysis(taskId, unit.question.id, {
             manualMarkdown: getQuestionMarkdown(unit.question),
             answer: unit.question.answer || "",
             type: unit.question.type || "unknown",
@@ -562,30 +648,46 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
           const fallbackMessage = aiAnalysisFallbackMessage(res);
           const analysis = String(fallbackMessage ? "" : res?.analysis || "").trim();
           if (analysis) {
-            await api.updateImportQuestion(taskId, unit.question.id, { analysis });
             ok++;
           } else {
             fail++;
           }
         }
-      } catch {
+      } catch (error) {
         fail++;
+        const message = error instanceof Error ? error.message : String(error);
+        publishProgress(`${unit.label}解析失败`, "running", message);
       }
       done++;
-      setAiProgress({ done, total: units.length });
+      publishProgress(`已处理${unit.label}`);
     }
 
     for (const [questionId, subQuestions] of dirtySubQuestions) {
       const generatedCount = dirtySubSuccesses.get(questionId) || 0;
       try {
+        publishProgress("正在保存复合大题小问解析", "saving");
         await api.updateImportQuestion(taskId, questionId, { subQuestions });
-        ok += generatedCount;
       } catch {
+        ok = Math.max(0, ok - generatedCount);
         fail += generatedCount;
+        publishProgress("复合大题小问解析保存失败", "saving");
       }
     }
 
-    setAiProgress(null);
+    const finalStatus: BatchAiProgress["status"] = ok > 0 ? "completed" : "failed";
+    setAiProgress({
+      done: units.length,
+      total: units.length,
+      ok,
+      fail,
+      status: finalStatus,
+      currentLabel: fail === 0 ? "全部解析已生成" : ok > 0 ? "部分解析已生成" : "全部解析生成失败",
+      message: fail > 0 ? "失败项可稍后重新执行" : undefined,
+    });
+    aiProgressResetTimerRef.current = setTimeout(() => {
+      setAiProgress(null);
+      aiProgressResetTimerRef.current = null;
+    }, 3000);
     queryClient.invalidateQueries({ queryKey: ["importTask", taskId] });
     if (fail === 0) {
       toast({ title: "AI 解析生成完成", description: `已生成 ${ok} 处解析` });
@@ -681,13 +783,14 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
             disabled={isProcessing || aiRunning || rescanMutation.isPending}
             className="gap-2 text-primary border-primary/30 hover:bg-primary/10 hover:text-primary"
           >
-            <Wand2 className="w-4 h-4" /> {aiProgress ? `AI 解析中 ${aiProgress.done}/${aiProgress.total}` : "AI 解析全部"}
+            {aiProgress ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+            {aiProgress ? `AI 解析中 ${aiProgress.done}/${aiProgress.total}` : "AI 解析全部"}
           </Button>
           <Button variant="outline" size="sm" onClick={toggleSourceVisible} className="gap-2">
             {sourceVisible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             {sourceVisible ? "隐藏原文件" : "显示原文件"}
           </Button>
-          <Button size="sm" onClick={handleBankAll} disabled={bankAllMutation.isPending || isProcessing || rescanMutation.isPending} className="gap-2">
+          <Button size="sm" onClick={handleBankAll} disabled={bankAllMutation.isPending || isProcessing || rescanMutation.isPending || aiRunning} className="gap-2">
             <Database className="w-4 h-4" /> 批量入库
           </Button>
         </div>
@@ -711,9 +814,13 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => {
+              disabled={aiRunning}
+              onClick={(event) => {
+                event.preventDefault();
                 setAiDialogOpen(false);
-                void runAiAnalyzeAll(overwriteExisting);
+                window.setTimeout(() => {
+                  void runAiAnalyzeAll(overwriteExisting);
+                }, 0);
               }}
             >
               开始生成
@@ -752,6 +859,8 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
           </Button>
         </div>
       )}
+
+      {aiProgress && <BatchAiProgressPanel progress={aiProgress} />}
 
       {/* Mobile view switch */}
       {sourceVisible && (

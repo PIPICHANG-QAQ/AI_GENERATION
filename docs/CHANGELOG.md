@@ -2,6 +2,7 @@
 
 ## 2026-07-09
 
+- 导入工作台“AI 解析全部”交互增强：确认后立即显示顶部进度条，展示当前处理题号/小问、成功失败计数和百分比；处理完成后短暂停留结果，再恢复按钮。普通题批量解析改为调用与单题按钮一致的导入题专用 AI 解析接口，避免用户点击后长时间无明显反馈。
 - 布局解析框封装为 `PaperLayoutCapability`：保留 `attach_paper_layout`、`build_paper_layout`、`render_source_page`、`question_image_refs_by_layout` 兼容入口，内部收敛为能力对象和 private helper；`paperLayout` 增加 capability 元数据，对外仍只暴露 `pages[]`、`regions[]`、`warnings[]`。
 - 布局解析框正式题目绑定版落地：优先读取 MinerU `_middle.json` 的 `page_size` 和 bbox，过滤标题、章节说明、页码等多余区域，只输出父题级 region，并绑定平台 `questionId`；点击框后右侧校验题卡滚动并高亮。
 - 新增 `docs/architecture/CODE_STRUCTURE_PORTABILITY_REVIEW.md`，评审当前项目可迁移性、模块化、OCR provider 替换边界和后续治理项；同步更新产品规格、OCR 规格、技术设计、接口说明和验收标准。
