@@ -237,6 +237,7 @@ export function MarkdownRenderer({
   const shouldUseChoiceParts = choiceParts.options.length > 0 && (questionType === "choice" || raw.includes("\\task"));
   const renderContent = shouldUseChoiceParts ? choiceParts.stemMarkdown : choiceParts.stemMarkdown || raw;
   const segments = splitTasks(renderContent);
+  const hasRenderedTaskOptions = segments.some((seg) => seg.type === "tasks" && seg.options.length > 0);
   const unreferenced = showUnreferenced
     ? getUnreferencedImageRefs(imageList, [renderContent, ...choiceParts.options.map((option) => option.content), ...siblingContent])
         .map((ref) => imageList[ref.index - 1])
@@ -262,7 +263,7 @@ export function MarkdownRenderer({
           />
         )
       )}
-      {shouldUseChoiceParts && <OptionGrid options={choiceParts.options} images={imageList} />}
+      {shouldUseChoiceParts && !hasRenderedTaskOptions && <OptionGrid options={choiceParts.options} images={imageList} />}
       {unreferenced.length > 0 && (
         <div className="flex flex-wrap gap-3 mt-3 not-prose">
           {unreferenced.map((img, i) => (

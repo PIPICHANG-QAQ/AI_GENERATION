@@ -10,6 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Edit2, Eye, EyeOff, Trash2, Plus } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { QuestionEditor } from "./QuestionEditor";
+import { QuestionPreview } from "./QuestionPreview";
 import { QuestionFilters, Filters, emptyFilters, hasActiveFilters } from "./QuestionFilters";
 import { PaginationBar } from "@/components/common/PaginationBar";
 
@@ -227,68 +228,7 @@ export function QuestionList({ search, setSearch }: { search: string, setSearch:
                   </div>
                 </div>
               </div>
-              <div className="mb-4">
-                <MarkdownRenderer
-                  content={getQuestionMarkdown(q)}
-                  images={getQuestionImages(q)}
-                  questionType={q.type}
-                  options={q.options}
-                />
-              </div>
-              {subQuestions.length > 0 && (
-                <div className="mb-4 space-y-3 rounded-md border border-primary/15 bg-primary/5 p-3">
-                  {subQuestions.map((sub: any, subIndex: number) => (
-                    <div key={sub.id || subIndex} className="rounded-md border border-border bg-card p-3">
-                      <div className="flex flex-wrap items-center gap-2 mb-2">
-                        <span className="text-xs font-semibold text-foreground">{sub.label || `(${subIndex + 1})`}</span>
-                        <StatusTag status={sub.type || q.type || "unknown"} type="qtype" />
-                        <StatusTag status={sub.difficulty || q.difficulty || "medium"} type="difficulty" />
-                        <span className="text-xs text-muted-foreground">{Number(sub.score) || 0} 分</span>
-                      </div>
-                      <div className="text-sm text-foreground/80">
-                        <MarkdownRenderer
-                          content={getQuestionMarkdown(sub)}
-                          images={getQuestionImages(sub)}
-                          questionType={sub.type || q.type}
-                          options={sub.options}
-                        />
-                      </div>
-                      {showAnswers && (sub.answer || sub.analysis) && (
-                        <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
-                          <div className="bg-muted/50 p-3 rounded-md text-foreground/80 min-w-0">
-                            <span className="font-medium text-foreground block mb-1">答案：</span>
-                            <div className="line-clamp-2">
-                              {sub.answer ? <MarkdownRenderer content={sub.answer} /> : "暂无"}
-                            </div>
-                          </div>
-                          <div className="bg-muted/50 p-3 rounded-md text-foreground/80 min-w-0">
-                            <span className="font-medium text-foreground block mb-1">解析：</span>
-                            <div className="line-clamp-2">
-                              {sub.analysis ? <MarkdownRenderer content={sub.analysis} /> : "暂无"}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {showAnswers && (
-                <div className={`flex flex-col sm:flex-row gap-4 text-sm ${subQuestions.length > 0 ? "hidden" : ""}`}>
-                  <div className="flex-1 bg-muted/50 p-3 rounded-md text-foreground/80 min-w-0">
-                    <span className="font-medium text-foreground block mb-1">答案：</span>
-                    <div className="line-clamp-2">
-                      {q.answer ? <MarkdownRenderer content={q.answer} /> : "暂无"}
-                    </div>
-                  </div>
-                  <div className="flex-1 bg-muted/50 p-3 rounded-md text-foreground/80 min-w-0">
-                    <span className="font-medium text-foreground block mb-1">解析：</span>
-                    <div className="line-clamp-2">
-                      {q.analysis ? <MarkdownRenderer content={q.analysis} /> : "暂无"}
-                    </div>
-                  </div>
-                </div>
-              )}
+              <QuestionPreview question={q} showAnswers={showAnswers} />
                   </>
                 );
               })()}

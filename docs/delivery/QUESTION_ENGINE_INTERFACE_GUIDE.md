@@ -542,6 +542,8 @@ POST /api/ai/analysis
 - `imageDataUrl` 只用于 Java 到 Python worker 的内部解析请求；`GET /api/capabilities/ai-flow/jobs` 返回的 job request 会把内联图片内容脱敏为占位文本，避免把 base64 图片写入任务查询结果。
 - 导入工作台“AI 解析全部”不新增后端批量接口，前端顺序调用单题 AI 解析和保存接口：默认只补齐未入库且缺少解析的题目，可选择覆盖已有解析；普通题按整题生成，复合大题按小问生成，提示词包含父题材料和当前小问题干，答案使用当前小问答案；失败项只计入汇总，不中断整批。
 - AI 批量解析写回后不得自动改变题目校验状态，仍需人工从“待校验”确认后再入库。生产高并发场景如果需要大量批处理，应迁移为 Java `ai-flow` 队列任务，并增加租户级、用户级和 endpoint 级限流。
+- 导入工作台“全局标准化”不新增后端批量接口，前端顺序调用现有标准化接口和导入题保存接口：父题题干使用 `/api/import-tasks/{jobId}/questions/{questionId}/standardize/ai` 以获得同题 OCR 上下文，答案、解析和小问题干使用 `/api/markdown/standardize/ai`；成功项通过 `PUT /api/import-tasks/{jobId}/questions/{questionId}` 自动保存。
+- 全局标准化写回前必须检查 `standardizer.applyBlocked`、`standardizer.candidateSevereIssues` 和 `standardizer.renderValidation`。候选不可安全应用时只计入失败，不得覆盖当前人工校验稿；题目校验状态保持不变。
 - 如果要提高 LaTeX 修复精度，调用方应尽量传 `rawOcrText`，不要只传渲染后的文本。
 
 ## 11. 题图和 file-flow 接口

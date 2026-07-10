@@ -16,10 +16,10 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
-import { RefreshCcw, CheckCircle2, FileText, Database, ExternalLink, Eye, EyeOff, Circle, Clock3, AlertCircle, MinusCircle, Wand2, ScanSearch } from "lucide-react";
+import { RefreshCcw, CheckCircle2, FileText, Database, ExternalLink, Eye, EyeOff, Circle, Clock3, AlertCircle, MinusCircle, Wand2, ScanSearch, Sparkles } from "lucide-react";
 import { QuestionCard } from "./QuestionCard";
 import { getQuestionImages, getQuestionMarkdown, getSourceFileInfo, getSubQuestions } from "@/lib/question";
-import { aiAnalysisFallbackMessage, buildSubQuestionAnalysisPayload, subAnalysisPatch } from "@/lib/sub-question-ai";
+import { aiAnalysisFallbackMessage, buildSubQuestionAnalysisPayload, subAnalysisPatch, subStandardizePatch } from "@/lib/sub-question-ai";
 
 type OcrFlowStepStatus = "pending" | "running" | "success" | "failed" | "skipped" | string;
 
@@ -90,6 +90,7 @@ type PaperLayout = {
 };
 
 type BatchAiProgress = {
+  kind: "analysis" | "standardize";
   done: number;
   total: number;
   ok: number;
@@ -293,14 +294,15 @@ function OcrFlowProgress({ task, onRefresh }: { task: any; onRefresh: () => void
 function BatchAiProgressPanel({ progress }: { progress: BatchAiProgress }) {
   const percent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
   const isFinished = progress.status === "completed" || progress.status === "failed";
+  const isStandardize = progress.kind === "standardize";
   const title =
     progress.status === "saving"
-      ? "正在保存 AI 解析结果"
+      ? isStandardize ? "正在保存标准化结果" : "正在保存 AI 解析结果"
       : progress.status === "completed"
-        ? "AI 解析处理完成"
+        ? isStandardize ? "全局标准化处理完成" : "AI 解析处理完成"
         : progress.status === "failed"
-          ? "AI 解析处理失败"
-          : "AI 解析全部处理中";
+          ? isStandardize ? "全局标准化处理失败" : "AI 解析处理失败"
+          : isStandardize ? "全局标准化处理中" : "AI 解析全部处理中";
 
   return (
     <div className="shrink-0 border-b border-primary/20 bg-primary/5 px-4 py-3">
@@ -474,14 +476,19 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
   const [mobileView, setMobileView] = useState<"source" | "questions">("source");
   const [sourceVisible, setSourceVisible] = useState(true);
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
+  const [stdDialogOpen, setStdDialogOpen] = useState(false);
   const [overwriteExisting, setOverwriteExisting] = useState(false);
   const [aiProgress, setAiProgress] = useState<BatchAiProgress | null>(null);
+  const [stdProgress, setStdProgress] = useState<BatchAiProgress | null>(null);
   const [rescanDialogOpen, setRescanDialogOpen] = useState(false);
   const [showLayoutBoxes, setShowLayoutBoxes] = useState(true);
   const [highlightQuestionId, setHighlightQuestionId] = useState<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const aiProgressResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stdProgressResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const aiRunning = aiProgress !== null;
+  const stdRunning = stdProgress !== null;
+  const batchRunning = aiRunning || stdRunning;
 
   const { data: task, isLoading, isError, error, isRefetching } = useQuery({
     queryKey: ["importTask", taskId],
@@ -500,6 +507,9 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
       }
       if (aiProgressResetTimerRef.current) {
         clearTimeout(aiProgressResetTimerRef.current);
+      }
+      if (stdProgressResetTimerRef.current) {
+        clearTimeout(stdProgressResetTimerRef.current);
       }
     };
   }, []);
@@ -591,6 +601,7 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
       message?: string,
     ) => {
       setAiProgress({
+        kind: "analysis",
         done,
         total: units.length,
         ok,
@@ -676,6 +687,7 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
 
     const finalStatus: BatchAiProgress["status"] = ok > 0 ? "completed" : "failed";
     setAiProgress({
+      kind: "analysis",
       done: units.length,
       total: units.length,
       ok,
@@ -695,6 +707,190 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
       toast({ title: "AI 解析部分完成", description: `成功 ${ok} 处，失败 ${fail} 处，可稍后重试` });
     } else {
       toast({ title: "AI 解析生成失败", description: `${fail} 处均未成功，请稍后重试`, variant: "destructive" });
+    }
+  };
+
+  const standardizedMarkdownFromPayload = (currentMarkdown: string, payload: any): string => {
+    const response = payload && typeof payload === "object" ? payload : { markdown: payload };
+    const standardizer = response?.standardizer || {};
+    const candidateSevereIssues = Array.isArray(standardizer?.candidateSevereIssues)
+      ? standardizer.candidateSevereIssues.map((item: unknown) => String(item)).filter(Boolean)
+      : [];
+    const renderIssues = Array.isArray(standardizer?.renderValidation?.issues)
+      ? standardizer.renderValidation.issues.map((item: unknown) => String(item)).filter(Boolean)
+      : [];
+    const blockReasons = [...candidateSevereIssues, ...renderIssues];
+    if (standardizer?.applyBlocked || standardizer?.renderValidation?.valid === false || blockReasons.length > 0) {
+      throw new Error(blockReasons[0] || "AI 标准化候选未通过安全校验");
+    }
+    return String(response?.markdown ?? response?.standardizedMarkdown ?? currentMarkdown);
+  };
+
+  const runStandardizeAll = async () => {
+    if (batchRunning || rescanMutation.isPending || bankAllMutation.isPending) return;
+    if (stdProgressResetTimerRef.current) {
+      clearTimeout(stdProgressResetTimerRef.current);
+      stdProgressResetTimerRef.current = null;
+    }
+
+    const questions = Array.isArray(task?.questions) ? task.questions : [];
+    type StandardizeUnit = {
+      question: any;
+      sub?: any;
+      subIndex?: number;
+      field: "markdown" | "answer" | "analysis";
+      value: string;
+      label: string;
+    };
+    const units: StandardizeUnit[] = [];
+    questions.forEach((question: any, questionIndex: number) => {
+      const questionNumber = String(question.number || question.questionNumber || questionIndex + 1);
+      const markdown = getQuestionMarkdown(question).trim();
+      if (markdown) units.push({ question, field: "markdown", value: markdown, label: `第 ${questionNumber} 题题干` });
+      const answer = String(question.answer || "").trim();
+      if (answer) units.push({ question, field: "answer", value: answer, label: `第 ${questionNumber} 题答案` });
+      const analysis = String(question.analysis || "").trim();
+      if (analysis) units.push({ question, field: "analysis", value: analysis, label: `第 ${questionNumber} 题解析` });
+      getSubQuestions(question).forEach((sub: any, subIndex: number) => {
+        const subLabel = `第 ${questionNumber} 题小问 ${subIndex + 1}`;
+        const subMarkdown = getQuestionMarkdown(sub).trim();
+        if (subMarkdown) units.push({ question, sub, subIndex, field: "markdown", value: subMarkdown, label: `${subLabel}题干` });
+        const subAnswer = String(sub.answer || "").trim();
+        if (subAnswer) units.push({ question, sub, subIndex, field: "answer", value: subAnswer, label: `${subLabel}答案` });
+        const subAnalysis = String(sub.analysis || "").trim();
+        if (subAnalysis) units.push({ question, sub, subIndex, field: "analysis", value: subAnalysis, label: `${subLabel}解析` });
+      });
+    });
+
+    if (units.length === 0) {
+      toast({ title: "没有需要标准化的内容", description: "当前任务题目的题干、答案、解析均为空" });
+      return;
+    }
+
+    let ok = 0;
+    let fail = 0;
+    let done = 0;
+    const updates = new Map<string, any>();
+    const updateSuccessCounts = new Map<string, number>();
+
+    const questionUpdate = (question: any) => {
+      const id = String(question.id || "");
+      if (!updates.has(id)) updates.set(id, {});
+      return updates.get(id);
+    };
+
+    const subQuestionUpdate = (question: any) => {
+      const update = questionUpdate(question);
+      if (!Array.isArray(update.subQuestions)) {
+        update.subQuestions = getSubQuestions(question).map((sub: any) => ({ ...sub }));
+      }
+      return update.subQuestions;
+    };
+
+    const publishProgress = (
+      currentLabel: string,
+      status: BatchAiProgress["status"] = "running",
+      message?: string,
+    ) => {
+      setStdProgress({
+        kind: "standardize",
+        done,
+        total: units.length,
+        ok,
+        fail,
+        status,
+        currentLabel,
+        message,
+      });
+    };
+
+    publishProgress(`准备标准化 ${units.length} 处内容`);
+    toast({
+      title: "已开始全局标准化",
+      description: `将处理 ${units.length} 处题干、答案或解析，完成后自动保存`,
+    });
+
+    for (const unit of units) {
+      publishProgress(`正在标准化${unit.label}`);
+      try {
+        const res = unit.field === "markdown" && !unit.sub
+          ? await api.standardizeImportQuestionAi(taskId, unit.question.id, unit.value)
+          : await api.standardizeAi(unit.value);
+        const nextValue = standardizedMarkdownFromPayload(unit.value, res);
+        if (unit.sub) {
+          const subs = subQuestionUpdate(unit.question);
+          const target = subs[unit.subIndex ?? -1];
+          if (!target) throw new Error("小问不存在，无法保存标准化结果");
+          if (unit.field === "markdown") {
+            const patch = subStandardizePatch(unit.value, res);
+            const nextMarkdown = String(patch.markdown || nextValue);
+            target.manualMarkdown = nextMarkdown;
+            target.stemMarkdown = nextMarkdown;
+            target.stem = nextMarkdown;
+            if (Array.isArray(patch.options) && patch.options.length > 0) target.options = patch.options;
+          } else {
+            target[unit.field] = nextValue;
+          }
+        } else {
+          const update = questionUpdate(unit.question);
+          if (unit.field === "markdown") {
+            update.manualMarkdown = nextValue;
+          } else {
+            update[unit.field] = nextValue;
+          }
+        }
+        ok++;
+        const questionId = String(unit.question.id || "");
+        updateSuccessCounts.set(questionId, (updateSuccessCounts.get(questionId) || 0) + 1);
+      } catch (error) {
+        fail++;
+        const message = error instanceof Error ? error.message : String(error);
+        publishProgress(`${unit.label}标准化失败`, "running", message);
+      }
+      done++;
+      publishProgress(`已处理${unit.label}`);
+    }
+
+    let saveFailedFields = 0;
+    for (const [questionId, update] of updates) {
+      const fieldCount = updateSuccessCounts.get(questionId) || 0;
+      if (fieldCount <= 0) continue;
+      try {
+        publishProgress("正在保存标准化结果", "saving");
+        await api.updateImportQuestion(taskId, questionId, update);
+      } catch {
+        saveFailedFields += fieldCount;
+        publishProgress("标准化结果保存失败", "saving");
+      }
+    }
+
+    if (saveFailedFields > 0) {
+      ok = Math.max(0, ok - saveFailedFields);
+      fail += saveFailedFields;
+    }
+
+    const finalStatus: BatchAiProgress["status"] = ok > 0 ? "completed" : "failed";
+    setStdProgress({
+      kind: "standardize",
+      done: units.length,
+      total: units.length,
+      ok,
+      fail,
+      status: finalStatus,
+      currentLabel: fail === 0 ? "全部内容已标准化" : ok > 0 ? "部分内容已标准化" : "全部标准化失败",
+      message: fail > 0 ? "失败项可稍后重新执行" : undefined,
+    });
+    stdProgressResetTimerRef.current = setTimeout(() => {
+      setStdProgress(null);
+      stdProgressResetTimerRef.current = null;
+    }, 3000);
+    queryClient.invalidateQueries({ queryKey: ["importTask", taskId] });
+    if (fail === 0) {
+      toast({ title: "全局标准化完成", description: `已标准化并保存 ${ok} 处内容` });
+    } else if (ok > 0) {
+      toast({ title: "标准化部分完成", description: `成功 ${ok} 处，失败 ${fail} 处，可稍后重试` });
+    } else {
+      toast({ title: "全局标准化失败", description: `${fail} 处均未成功，请稍后重试`, variant: "destructive" });
     }
   };
 
@@ -771,7 +967,7 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
             variant="outline"
             size="sm"
             onClick={() => setRescanDialogOpen(true)}
-            disabled={isProcessing || rescanMutation.isPending || aiRunning}
+            disabled={isProcessing || rescanMutation.isPending || batchRunning || bankAllMutation.isPending}
             className="gap-2"
           >
             <ScanSearch className="w-4 h-4" /> {rescanMutation.isPending ? "启动扫描中" : "重新 OCR 扫描"}
@@ -779,9 +975,19 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setAiDialogOpen(true)}
-            disabled={isProcessing || aiRunning || rescanMutation.isPending}
+            onClick={() => setStdDialogOpen(true)}
+            disabled={isProcessing || batchRunning || rescanMutation.isPending || bankAllMutation.isPending}
             className="gap-2 text-primary border-primary/30 hover:bg-primary/10 hover:text-primary"
+          >
+            {stdProgress ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            {stdProgress ? `标准化中 ${stdProgress.done}/${stdProgress.total}` : "全局标准化"}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setAiDialogOpen(true)}
+            disabled={isProcessing || batchRunning || rescanMutation.isPending || bankAllMutation.isPending}
+            className="gap-2 text-warm border-warm/30 hover:bg-warm/10 hover:text-warm"
           >
             {aiProgress ? <RefreshCcw className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
             {aiProgress ? `AI 解析中 ${aiProgress.done}/${aiProgress.total}` : "AI 解析全部"}
@@ -790,13 +996,13 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
             {sourceVisible ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             {sourceVisible ? "隐藏原文件" : "显示原文件"}
           </Button>
-          <Button size="sm" onClick={handleBankAll} disabled={bankAllMutation.isPending || isProcessing || rescanMutation.isPending || aiRunning} className="gap-2">
+          <Button size="sm" onClick={handleBankAll} disabled={bankAllMutation.isPending || isProcessing || rescanMutation.isPending || batchRunning} className="gap-2">
             <Database className="w-4 h-4" /> 批量入库
           </Button>
         </div>
       </div>
 
-      <AlertDialog open={aiDialogOpen} onOpenChange={(open) => !aiRunning && setAiDialogOpen(open)}>
+      <AlertDialog open={aiDialogOpen} onOpenChange={(open) => !batchRunning && setAiDialogOpen(open)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>一键 AI 解析全部题目？</AlertDialogTitle>
@@ -814,7 +1020,7 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
-              disabled={aiRunning}
+              disabled={batchRunning}
               onClick={(event) => {
                 event.preventDefault();
                 setAiDialogOpen(false);
@@ -829,7 +1035,33 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={rescanDialogOpen} onOpenChange={(open) => !rescanMutation.isPending && setRescanDialogOpen(open)}>
+      <AlertDialog open={stdDialogOpen} onOpenChange={(open) => !batchRunning && setStdDialogOpen(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>一键全局标准化全部题目？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将对当前任务全部题目的题干、答案、解析逐一调用 AI 标准化，复合题会处理每个小问。完成后会自动保存到校验卡片，题目状态保持不变；已入库题目如需同步覆盖题库，请再次点击重新入库。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={batchRunning}
+              onClick={(event) => {
+                event.preventDefault();
+                setStdDialogOpen(false);
+                window.setTimeout(() => {
+                  void runStandardizeAll();
+                }, 0);
+              }}
+            >
+              开始标准化
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={rescanDialogOpen} onOpenChange={(open) => !rescanMutation.isPending && !batchRunning && setRescanDialogOpen(open)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>重新 OCR 扫描原始文档？</AlertDialogTitle>
@@ -860,7 +1092,7 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
         </div>
       )}
 
-      {aiProgress && <BatchAiProgressPanel progress={aiProgress} />}
+      {(stdProgress || aiProgress) && <BatchAiProgressPanel progress={(stdProgress || aiProgress)!} />}
 
       {/* Mobile view switch */}
       {sourceVisible && (

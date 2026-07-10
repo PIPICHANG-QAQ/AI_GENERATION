@@ -1,6 +1,6 @@
-%% Version: 2026-07-10 / product v15 / StructureContract + PaperLayoutIsolation
+%% Version: 2026-07-10 / product v16 / GlobalStandardize
 %% Status: current-primary
-%% Scope: import OCR workbench UX, task lifecycle, structure-contract extraction, first-return auto standardization, layout overlay isolation, rescan, batch AI analysis, and manual review.
+%% Scope: import OCR workbench UX, task lifecycle, structure-contract extraction, first-return auto standardization, layout overlay isolation, rescan, global standardization, batch AI analysis, and manual review.
 flowchart TD
   LegendLocal["绿色：本地算力 / 本地存储"]:::local
   LegendExternal["黄色：外部 API 算力"]:::external
@@ -58,9 +58,11 @@ flowchart TD
   LayoutBind["布局框绑定<br/>sourceEvidence + middle bbox<br/>提取嵌套图片路径，跳过短选项标签"]:::local
   LayoutFallback["布局低置信兜底<br/>只命中小标签/极小框/缺题图时走几何兜底或 warning"]:::mixed
   LayoutClick["点击范围框<br/>滚动并高亮右侧父题校验卡"]:::local
-  Toolbar["工作台工具栏<br/>重新 OCR 扫描 / AI 解析全部 / 批量入库"]:::local
+  Toolbar["工作台工具栏<br/>重新 OCR 扫描 / 全局标准化 / AI 解析全部 / 批量入库"]:::local
   RescanConfirm["重新 OCR 扫描确认<br/>只扫描原始试卷/答案文件<br/>不覆盖已提取和已编辑题目"]:::local
   RescanApi["POST /api/import-tasks/{taskId}/rescan<br/>Java 判断处理中状态；重复触发返回 409"]:::mixed
+  BatchStdConfirm["全局标准化确认<br/>处理题干、答案、解析和小问字段<br/>状态不自动改变"]:::local
+  BatchStdLoop["批量标准化编排<br/>复用现有 AI 标准化 + 保存接口<br/>进度 n/m，失败不中断"]:::mixed
   BatchAiConfirm["AI 解析全部确认<br/>默认只补缺失解析；可勾选覆盖已有解析"]:::local
   BatchAiLoop["批量 AI 解析编排<br/>普通题整题，小问逐个；进度 n/m<br/>失败不中断，结束汇总"]:::external
   FigureRefs["题图引用与题图库<br/>images 保存元数据；题干 Markdown 引用决定预览位置"]:::local
@@ -72,7 +74,7 @@ flowchart TD
   StdOcr["AI 标准化：可信 OCR 兜底<br/>rawOcrContext 与当前编辑稿分离"]:::local
   StdLlm["AI 标准化：缓存命中或可选 LLM 修复<br/>AI_STANDARDIZE_CACHE_TTL_SECONDS"]:::external
   StdGate["候选安全闸门<br/>renderValidation / applyBlocked / candidateSevereIssues"]:::mixed
-  CandidatePanel["候选面板<br/>区分本地修复、原始 OCR 兜底、AI 修复<br/>不可应用候选禁用应用"]:::local
+  CandidatePanel["标准化结果处理<br/>安全候选自动应用并保存<br/>阻断候选进入候选面板"]:::local
   AiAnalysis["外部 API：AI 解析<br/>有效题图进入多模态上下文<br/>含小问时返回 subQuestions 解析"]:::external
   SaveReview["保存校验结果<br/>PUT /api/import-tasks/{taskId}/questions/{questionId}<br/>写回 subQuestions"]:::local
   BankDedup["题目入库查重<br/>重复题目跳过或拒绝"]:::local
@@ -108,12 +110,13 @@ flowchart TD
   Workbench --> LayoutToggle --> LayoutBind --> LayoutFallback --> LayoutClick --> ManualEdit
   Workbench --> Toolbar
   Toolbar --> RescanConfirm --> RescanApi --> Poll
+  Toolbar --> BatchStdConfirm --> BatchStdLoop --> SaveReview
   Toolbar --> BatchAiConfirm --> BatchAiLoop --> SaveReview
   Workbench --> FigureRefs --> ImportImages --> SaveReview
   Workbench --> KnowledgePick --> SaveReview
   Workbench --> ManualEdit
   ManualEdit --> StdLocal --> StdOcr --> StdLlm --> StdGate --> CandidatePanel
-  CandidatePanel -- "人工应用" --> SaveReview
+  CandidatePanel -- "安全候选自动保存 / 人工复核后保存" --> SaveReview
   CandidatePanel -- "不可应用 / 取消" --> ManualEdit
   ManualEdit --> AiAnalysis --> SaveReview
   SaveReview --> BankDedup --> Bank --> BankEdit --> PaperSubSelect --> PaperExport --> End

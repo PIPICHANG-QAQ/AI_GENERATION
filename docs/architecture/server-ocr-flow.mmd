@@ -1,6 +1,6 @@
-%% Version: 2026-07-10 / server deployment v15
+%% Version: 2026-07-10 / server deployment v16
 %% Status: current-support
-%% Scope: server deployment OCR/AI compute boundary, GPU assignment, MinerU API, first-return auto standardization, layout overlay isolation, and public demo runtime.
+%% Scope: server deployment OCR/AI compute boundary, GPU assignment, MinerU API, first-return auto standardization, layout overlay isolation, global standardization, and public demo runtime.
 flowchart TD
   LegendLocal["绿色：服务器本地算力 / 本地服务<br/>Java、Python、规则拆题、公式校验、文件读写"]:::local
   LegendGpu["紫色：服务器本地 GPU 算力<br/>MinerU: 物理 GPU0，容器内 CUDA 0<br/>aux-qwen3-32b-fp8 / vLLM: 物理 GPU1"]:::gpu
@@ -54,6 +54,7 @@ flowchart TD
   LayoutFallback["layout fallback/warnings<br/>只命中小标签、极小框或缺题图时降级<br/>不影响题目识别稳定性"]:::hybrid
   Workbench["OCR 工作台<br/>轮询任务、人工校验、题图维护、入库"]:::local
   Rescan["重新 OCR 扫描<br/>Java /rescan 重投原始 OCR job<br/>已有题目和编辑内容不覆盖"]:::hybrid
+  BatchStandardize["全局标准化<br/>前端批处理题干/答案/解析<br/>复用现有标准化和保存接口，进度 n/m"]:::hybrid
   BatchAnalysis["AI 解析全部<br/>前端批处理单题/小问解析<br/>默认补缺失，进度 n/m"]:::external
 
   Client --> ServerCompose --> Java
@@ -86,6 +87,7 @@ flowchart TD
   Collect --> PaperLayout --> LayoutBind --> LayoutFallback --> Workbench
   JavaSync --> Workbench
   Workbench --> Rescan --> OcrProvider
+  Workbench --> BatchStandardize --> LocalStandardize
   Workbench --> BatchAnalysis --> ExternalAnalysis
 
   classDef local fill:#dcfce7,stroke:#16a34a,color:#14532d,stroke-width:1px;

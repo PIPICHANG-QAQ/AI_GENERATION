@@ -1,6 +1,6 @@
-%% Version: 2026-07-10 / product v15 / OpenAPI 1.1.0
+%% Version: 2026-07-10 / product v16 / GlobalStandardize
 %% Status: current-primary
-%% Scope: authoritative end-to-end OCR-Flow algorithm, structure contract, LLM routing, first-return auto standardization, review, layout overlay isolation, rescan, and AI assistance flow.
+%% Scope: authoritative end-to-end OCR-Flow algorithm, structure contract, LLM routing, first-return auto standardization, review, layout overlay isolation, rescan, global standardization, and AI assistance flow.
 flowchart TD
   LegendLocal["绿色：本地算力 / 本地存储"]:::local
   LegendExternal["黄色：外部 API 算力<br/>本地开发全节点 external-only"]:::external
@@ -86,6 +86,8 @@ flowchart TD
   RescanReject["拒绝重复触发<br/>返回 409，前端继续轮询"]:::local
   RescanRetry["重新投递已有试卷/答案 OCR job<br/>状态切为处理中；已有 questions 不覆盖"]:::mixed
   ManualEdit["复合编辑器<br/>大题题干 + 小问题干/答案/解析/分值/知识点"]:::local
+  BatchStdAll["全局标准化<br/>前端批处理全部题干/答案/解析<br/>已入库卡片需重新入库才覆盖题库"]:::mixed
+  BatchStdUnits["批量标准化单元<br/>父题和小问逐字段处理<br/>进度 标准化中 n/m，失败不中断"]:::mixed
   BatchAiAll["AI 解析全部<br/>前端批处理：默认补缺失解析，可选择覆盖"]:::local
   BatchAiUnits["批量解析单元<br/>普通题整题；复合大题按小问<br/>进度 AI 解析中 n/m，失败不中断"]:::external
   AddImages["题图维护<br/>从本卷题图库导入或本地多图上传"]:::local
@@ -101,7 +103,7 @@ flowchart TD
   StdApi["AI 标准化 LLM 路由<br/>本地开发：外部 deepseek-v4-pro<br/>服务器：本地 aux-qwen3 优先，失败外部兜底"]:::mixed
   StdChoiceGuard["选择题结构保护<br/>AI 候选丢选项时恢复原 OCR options<br/>图片选项原位保留 ![](图N)"]:::mixed
   StdGate["候选安全闸门<br/>renderValidation / applyBlocked / candidateSevereIssues"]:::mixed
-  StdPanel["候选面板<br/>区分本地修复、原始 OCR 兜底、AI 修复<br/>不可应用候选禁用按钮"]:::local
+  StdPanel["标准化结果处理<br/>安全候选自动应用并保存<br/>阻断候选进入候选面板"]:::local
 
   AiAnalysis["外部 API：AI 解析<br/>根据题干、答案、题型、知识点和有效题图生成解析草稿<br/>含小问时返回 subQuestions 解析"]:::external
   SubAiAnalysis["小问级 AI 解析<br/>大题材料 + 当前小问 + 题图<br/>只回填当前小问答案/解析"]:::external
@@ -185,8 +187,9 @@ flowchart TD
   StdOcrSafe -- "是" --> StdGate
   StdOcrSafe -- "否" --> StdCache --> StdApi --> StdChoiceGuard --> StdGate
   StdGate --> StdPanel
-  StdPanel -- "人工应用" --> SaveReview
+  StdPanel -- "安全候选自动保存 / 人工复核后保存" --> SaveReview
   StdPanel -- "不可应用 / 取消" --> ManualEdit
+  ManualEdit --> BatchStdAll --> BatchStdUnits --> SaveReview
   ManualEdit --> BatchAiAll --> BatchAiUnits --> SaveReview
   ManualEdit --> AiAnalysis --> SaveReview
   ManualEdit --> SubAiAnalysis --> SaveReview

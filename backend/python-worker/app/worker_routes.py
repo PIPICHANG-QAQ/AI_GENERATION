@@ -346,19 +346,24 @@ def bank_single_import_question(task_id: str, question_id: str) -> dict[str, Any
     question = find_import_question(task, question_id)
     if not question:
         raise HTTPException(status_code=404, detail="Import question not found")
-    if question.get("status") != "已校验":
+    if question.get("status") not in {"已校验", "已入库"}:
         raise HTTPException(status_code=409, detail="题目必须先标记为已校验")
-    bank_question = bank_question_from_import(task, question)
-    duplicate_reason = bank_question_duplicate_reason(store, bank_question)
+    existing_index = find_bank_question_index_for_import(store, task, question)
+    existing = store["bankQuestions"][existing_index] if existing_index >= 0 else None
+    bank_question = bank_question_from_import(task, question, existing)
+    duplicate_reason = bank_question_duplicate_reason(store, bank_question, bank_question.get("id"))
     if duplicate_reason:
         raise HTTPException(status_code=409, detail=duplicate_reason)
-    store["bankQuestions"].append(bank_question)
+    if existing_index >= 0:
+        store["bankQuestions"][existing_index] = bank_question
+    else:
+        store["bankQuestions"].append(bank_question)
     question["status"] = "已入库"
     question["bankQuestionId"] = bank_question["id"]
     question["updatedAt"] = now_iso()
     update_import_task_status(task)
     write_store(store)
-    return {"question": question, "bankQuestion": bank_question, "task": task}
+    return {"question": question, "bankQuestion": bank_question, "task": task, "overwritten": existing_index >= 0}
 
 
 @app.post("/api/import-tasks/{task_id}/bank")
@@ -372,12 +377,17 @@ def bank_import_questions(task_id: str, questionIds: list[str] | None = None) ->
     for question in task.get("questions", []):
         if question.get("id") not in selected_ids or question.get("status") != "已校验":
             continue
-        bank_question = bank_question_from_import(task, question)
-        duplicate_reason = bank_question_duplicate_reason(store, bank_question)
+        existing_index = find_bank_question_index_for_import(store, task, question)
+        existing = store["bankQuestions"][existing_index] if existing_index >= 0 else None
+        bank_question = bank_question_from_import(task, question, existing)
+        duplicate_reason = bank_question_duplicate_reason(store, bank_question, bank_question.get("id"))
         if duplicate_reason:
             duplicates.append({"questionId": question.get("id"), "number": question.get("number"), "reason": duplicate_reason})
             continue
-        store["bankQuestions"].append(bank_question)
+        if existing_index >= 0:
+            store["bankQuestions"][existing_index] = bank_question
+        else:
+            store["bankQuestions"].append(bank_question)
         question["status"] = "已入库"
         question["bankQuestionId"] = bank_question["id"]
         question["updatedAt"] = now_iso()

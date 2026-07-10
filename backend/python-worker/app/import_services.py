@@ -1513,14 +1513,44 @@ def match_sub_question_enrichment(source: dict[str, Any], enriched_items: list[A
     return fallback if isinstance(fallback, dict) else {}
 
 
-def bank_question_duplicate_reason(store: dict[str, Any], question: dict[str, Any]) -> str | None:
+def find_bank_question_index_for_import(store: dict[str, Any], task: dict[str, Any], question: dict[str, Any]) -> int:
+    """查找导入题已关联的题库题下标。"""
+    bank_question_id = str(question.get("bankQuestionId") or "").strip()
+    bank_questions = store.get("bankQuestions", [])
+    if bank_question_id:
+        for index, existing in enumerate(bank_questions):
+            if isinstance(existing, dict) and str(existing.get("id") or "").strip() == bank_question_id:
+                return index
+
+    source_task_id = str(task.get("id") or "").strip()
+    source_question_id = str(question.get("id") or "").strip()
+    if source_task_id and source_question_id:
+        for index, existing in enumerate(bank_questions):
+            if not isinstance(existing, dict):
+                continue
+            if (
+                str(existing.get("sourceImportTaskId") or "").strip() == source_task_id
+                and str(existing.get("sourceImportQuestionId") or "").strip() == source_question_id
+            ):
+                return index
+    return -1
+
+
+def bank_question_duplicate_reason(
+    store: dict[str, Any],
+    question: dict[str, Any],
+    exclude_id: str | None = None,
+) -> str | None:
     """判断入库题目是否与已有题库题重复。"""
     source_task_id = str(question.get("sourceImportTaskId") or "")
     source_question_id = str(question.get("sourceImportQuestionId") or question.get("id") or "")
     candidate_markdown = normalize_duplicate_text(question.get("manualMarkdown") or question.get("stemMarkdown"))
     candidate_answer = normalize_duplicate_text(question.get("answer"))
+    excluded = str(exclude_id or "").strip()
     for existing in store.get("bankQuestions", []):
         if not isinstance(existing, dict):
+            continue
+        if excluded and str(existing.get("id") or "").strip() == excluded:
             continue
         if source_task_id and source_question_id:
             if existing.get("sourceImportTaskId") == source_task_id and existing.get("sourceImportQuestionId") == source_question_id:
@@ -1636,14 +1666,20 @@ def update_import_question_from_payload(question: dict[str, Any], payload: Impor
     question["updatedAt"] = now_iso()
 
 
-def bank_question_from_import(task: dict[str, Any], question: dict[str, Any]) -> dict[str, Any]:
+def bank_question_from_import(
+    task: dict[str, Any],
+    question: dict[str, Any],
+    existing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """将导入题转换为题库题 payload。"""
     images = normalize_question_images(question.get("images", []))
     stem_markdown = strip_question_images_from_markdown(question.get("stemMarkdown") or "", images)
     markdown = strip_question_images_from_markdown(question.get("manualMarkdown") or stem_markdown, images)
     sub_questions = normalize_sub_questions(question.get("subQuestions") or question.get("children"))
+    now = now_iso()
+    existing_id = str((existing or {}).get("id") or question.get("bankQuestionId") or "").strip()
     return {
-        "id": make_id("bank_question"),
+        "id": existing_id or make_id("bank_question"),
         "sourceImportTaskId": task.get("id"),
         "sourceImportQuestionId": question.get("id"),
         "source": task.get("title", ""),
@@ -1667,8 +1703,8 @@ def bank_question_from_import(task: dict[str, Any], question: dict[str, Any]) ->
         "options": question.get("options", []),
         "children": sub_questions,
         "subQuestions": sub_questions,
-        "createdAt": now_iso(),
-        "updatedAt": now_iso(),
+        "createdAt": (existing or {}).get("createdAt") or now,
+        "updatedAt": now,
     }
 
 

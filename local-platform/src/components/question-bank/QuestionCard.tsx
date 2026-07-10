@@ -52,7 +52,8 @@ import {
 } from "@/lib/sub-question-ai";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
-import { Wand2, Code, Save, ChevronDown, Database, CheckCircle2, ImageIcon, Plus, Trash2 } from "lucide-react";
+import { Wand2, Code, Save, Eye, Pencil, Database, CheckCircle2, ImageIcon, Plus, Trash2 } from "lucide-react";
+import { QuestionPreview } from "./QuestionPreview";
 
 const selectClass =
   "w-full h-9 rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 disabled:cursor-not-allowed";
@@ -67,7 +68,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   const initialImages = ensureQuestionImageLabels(getQuestionImages(question));
   const initialMarkdown = getQuestionMarkdown(question);
 
-  const [collapsed, setCollapsed] = useState(isBanked);
+  const [mode, setMode] = useState<"preview" | "edit">("preview");
   const [dirty, setDirty] = useState(false);
   const [formData, setFormData] = useState({
     markdown: isBanked
@@ -102,8 +103,9 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   const [activeSubStandardizeIndex, setActiveSubStandardizeIndex] = useState<number | null>(null);
   const [activeSubAnalysisIndex, setActiveSubAnalysisIndex] = useState<number | null>(null);
   const [confirmDeleteIndex, setConfirmDeleteIndex] = useState<number | null>(null);
-  const readOnly = isBanked;
+  const readOnly = false;
   const hasSubQuestions = subForms.length > 0;
+  const canBank = isVerified || isBanked;
 
   const { data: imageLibraryData } = useQuery({
     queryKey: ["importTaskImageLibrary", taskId],
@@ -181,29 +183,8 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     onError: (err: any) => toast({ title: "保存失败", description: err.message, variant: "destructive" }),
   });
 
-  const bankMutation = useMutation({
-    mutationFn: () => api.bankImportQuestion(taskId, qid),
-    onSuccess: () => {
-      toast({ title: "单题入库成功" });
-      queryClient.invalidateQueries({ queryKey: ["importTask", taskId] });
-      queryClient.invalidateQueries({ queryKey: ["questions"] });
-    },
-    onError: (err: any) => toast({ title: "入库失败", description: err.message, variant: "destructive" }),
-  });
-
-  const localStdMutation = useMutation({
-    mutationFn: (md: string) => api.standardizeImportQuestionAi(taskId, qid, md),
-    onSuccess: (res: any, md) => {
-      const result = standardizeCandidateFromPayload(md, res);
-      setStandardizeCandidate(result.candidate);
-      toast({ title: result.candidate ? "AI 标准化候选已生成" : "AI 标准化完成", description: result.message });
-    },
-    onError: (err: any) => toast({ title: "标准化失败", description: err.message, variant: "destructive" }),
-  });
-
-  const applyStandardizeCandidate = () => {
-    if (!standardizeCandidate) return;
-    const res = standardizeCandidate.payload || {};
+  const standardizedQuestionDraft = (candidate: StandardizeCandidate) => {
+    const res = candidate.payload || {};
     const updatedQuestion = res?.question || {};
     const suggestedAnswer = String(res?.answer ?? res?.suggestedAnswer ?? updatedQuestion.answer ?? "").trim();
     const suggestedAnalysis = String(res?.analysis ?? updatedQuestion.analysis ?? "").trim();
@@ -216,17 +197,68 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
       ),
     );
     const nextHasSubQuestions = nextSubForms.length > 0;
+    const nextFormData = {
+      ...formData,
+      markdown: candidate.markdown,
+      answer: nextHasSubQuestions ? "" : suggestedAnswer || formData.answer,
+      analysis: nextHasSubQuestions ? "" : suggestedAnalysis || formData.analysis,
+      options: updatedOptions.length > 0 ? updatedOptions : formData.options,
+    };
+    return { nextFormData, nextSubForms };
+  };
+
+  const saveStandardizedDraft = (
+    nextFormData: typeof formData,
+    nextSubForms: typeof subForms,
+    successTitle: string,
+  ) => {
+    setFormData(nextFormData);
     setSubForms(nextSubForms);
-    setFormData((f) => ({
-      ...f,
-      markdown: standardizeCandidate.markdown,
-      answer: nextHasSubQuestions ? "" : suggestedAnswer || f.answer,
-      analysis: nextHasSubQuestions ? "" : suggestedAnalysis || f.analysis,
-      options: updatedOptions.length > 0 ? updatedOptions : f.options,
-    }));
     setStandardizeCandidate(null);
+    setSubStandardizeCandidate(null);
     setDirty(true);
-    toast({ title: "已应用 AI 标准化候选", description: "请复核后保存" });
+    updateMutation.mutate(prepareData(nextFormData, nextSubForms), {
+      onSuccess: () => {
+        setDirty(false);
+        toast({ title: successTitle });
+      },
+    });
+  };
+
+  const bankMutation = useMutation({
+    mutationFn: () => api.bankImportQuestion(taskId, qid),
+    onSuccess: () => {
+      toast({ title: isBanked ? "题目已覆盖入库" : "单题入库成功" });
+      queryClient.invalidateQueries({ queryKey: ["importTask", taskId] });
+      queryClient.invalidateQueries({ queryKey: ["questions"] });
+    },
+    onError: (err: any) => toast({ title: "入库失败", description: err.message, variant: "destructive" }),
+  });
+
+  const localStdMutation = useMutation({
+    mutationFn: (md: string) => api.standardizeImportQuestionAi(taskId, qid, md),
+    onSuccess: (res: any, md) => {
+      const result = standardizeCandidateFromPayload(md, res);
+      if (result.candidate?.applyBlocked) {
+        setStandardizeCandidate(result.candidate);
+        toast({ title: "AI 标准化候选需人工复核", description: result.message });
+        return;
+      }
+      if (result.candidate) {
+        const { nextFormData, nextSubForms } = standardizedQuestionDraft(result.candidate);
+        saveStandardizedDraft(nextFormData, nextSubForms, "AI 标准化已应用并保存");
+        return;
+      }
+      setStandardizeCandidate(null);
+      toast({ title: "AI 标准化完成", description: result.message });
+    },
+    onError: (err: any) => toast({ title: "标准化失败", description: err.message, variant: "destructive" }),
+  });
+
+  const applyStandardizeCandidate = () => {
+    if (!standardizeCandidate) return;
+    const { nextFormData, nextSubForms } = standardizedQuestionDraft(standardizeCandidate);
+    saveStandardizedDraft(nextFormData, nextSubForms, "AI 标准化候选已应用并保存");
   };
 
   const aiAnalysisMutation = useMutation({
@@ -269,13 +301,20 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     onMutate: ({ subIndex }) => setActiveSubStandardizeIndex(subIndex),
     onSuccess: (res: any, { subIndex, markdown }) => {
       const result = standardizeCandidateFromPayload(markdown, res);
-      if (result.candidate) {
+      if (result.candidate?.applyBlocked) {
         setSubStandardizeCandidate({ subIndex, candidate: result.candidate });
+        toast({ title: "小问 AI 标准化候选需人工复核", description: result.message });
       } else {
-        patchSub(subIndex, subStandardizePatch(markdown, res));
+        const patch = result.candidate
+          ? subStandardizePatch(result.candidate.markdown, result.candidate.payload || {})
+          : subStandardizePatch(markdown, res);
+        if (!Object.keys(patch).length) {
+          toast({ title: "小问 AI 标准化完成", description: result.message });
+          return;
+        }
+        const nextSubForms = subForms.map((sub, index) => (index === subIndex ? { ...sub, ...patch } : sub));
+        saveStandardizedDraft(formData, nextSubForms, "小问 AI 标准化已应用并保存");
       }
-      setDirty(true);
-      toast({ title: result.candidate ? "小问 AI 标准化候选已生成" : "小问 AI 标准化完成", description: result.message });
     },
     onError: (err: any) => toast({ title: "小问标准化失败", description: err.message, variant: "destructive" }),
     onSettled: () => setActiveSubStandardizeIndex(null),
@@ -315,15 +354,19 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   const applySubStandardizeCandidate = () => {
     if (!subStandardizeCandidate) return;
     const { subIndex, candidate } = subStandardizeCandidate;
-    patchSub(subIndex, subStandardizePatch(candidate.markdown, candidate.payload || {}));
-    setSubStandardizeCandidate(null);
-    toast({ title: "已应用小问 AI 标准化候选", description: "请复核后保存" });
+    const patch = subStandardizePatch(candidate.markdown, candidate.payload || {});
+    const nextSubForms = subForms.map((sub, index) => (index === subIndex ? { ...sub, ...patch } : sub));
+    saveStandardizedDraft(formData, nextSubForms, "小问 AI 标准化候选已应用并保存");
   };
 
-  const prepareData = () => {
-    const { markdown, ...rest } = formData;
-    const questionParts = getQuestionMarkdownParts(markdown, formData.type, formData.options, images);
-    const subQuestions = subForms.map((sub) => {
+  const prepareData = (
+    draftFormData: typeof formData = formData,
+    draftSubForms: typeof subForms = subForms,
+  ) => {
+    const { markdown, ...rest } = draftFormData;
+    const questionParts = getQuestionMarkdownParts(markdown, draftFormData.type, draftFormData.options, images);
+    const draftHasSubQuestions = draftSubForms.length > 0;
+    const subQuestions = draftSubForms.map((sub) => {
       const subParts = getQuestionMarkdownParts(sub.markdown, sub.type, sub.options, sub.images);
       return {
         id: sub.id,
@@ -351,11 +394,11 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
       ...rest,
       stemMarkdown: questionParts.stemMarkdown || markdown,
       manualMarkdown: markdown,
-      score: Number(formData.score) || 0,
-      answer: hasSubQuestions ? "" : formData.answer,
-      analysis: hasSubQuestions ? "" : formData.analysis,
+      score: Number(draftFormData.score) || 0,
+      answer: draftHasSubQuestions ? "" : draftFormData.answer,
+      analysis: draftHasSubQuestions ? "" : draftFormData.analysis,
       knowledgePointIds: question.knowledgePointIds || [],
-      knowledgePoints: formData.knowledgePoints.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
+      knowledgePoints: draftFormData.knowledgePoints.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
       options: serializeQuestionOptions(questionParts.options, images),
       images,
       subQuestions,
@@ -444,36 +487,58 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
         </div>
         <div className="flex items-center gap-2">
           {!readOnly && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handleVerified}
-              disabled={updateMutation.isPending}
-              className="h-8 gap-1.5 text-xs text-info border-info/40 hover:bg-info/10 hover:text-info"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" /> 已校验
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleSave}
+                disabled={updateMutation.isPending}
+                className="h-8 gap-1.5 text-xs"
+              >
+                <Save className="w-3.5 h-3.5" /> 保存
+              </Button>
+              {!isBanked && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleVerified}
+                  disabled={updateMutation.isPending}
+                  className="h-8 gap-1.5 text-xs text-info border-info/40 hover:bg-info/10 hover:text-info"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" /> 已校验
+                </Button>
+              )}
+            </>
           )}
           <Button
             size="sm"
             onClick={handleBank}
-            disabled={!isVerified || isBanked || bankMutation.isPending || updateMutation.isPending}
-            className={`h-8 gap-1.5 text-xs ${isVerified && !isBanked ? "bg-success text-success-foreground hover:bg-success/90" : ""}`}
+            disabled={!canBank || bankMutation.isPending || updateMutation.isPending}
+            className={`h-8 gap-1.5 text-xs ${canBank ? "bg-success text-success-foreground hover:bg-success/90" : ""}`}
           >
-            <Database className="w-3.5 h-3.5" /> {bankMutation.isPending ? "入库中" : isBanked ? "已入库" : "入库"}
+            <Database className="w-3.5 h-3.5" /> {bankMutation.isPending ? "入库中" : isBanked ? "重新入库" : "入库"}
           </Button>
           <button
-            onClick={() => setCollapsed(c => !c)}
+            onClick={() => setMode((current) => (current === "edit" ? "preview" : "edit"))}
             className="w-8 h-8 inline-flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-            title={collapsed ? "展开" : "收起"}
+            title={mode === "edit" ? "切换到预览模式" : "切换到编辑模式"}
+            aria-label={mode === "edit" ? "切换到预览模式" : "切换到编辑模式"}
           >
-            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${collapsed ? "-rotate-90" : ""}`} />
+            {mode === "edit" ? <Eye className="w-3.5 h-3.5" /> : <Pencil className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>
 
-      {!collapsed && (
-        <div className="p-4 space-y-4">
+      <div className="p-4">
+        {mode === "preview" && (
+          <div className="space-y-3">
+            {!readOnly && (
+              <p className="text-xs text-muted-foreground">预览基于已保存的内容，未保存的修改请先保存再查看。</p>
+            )}
+            <QuestionPreview question={question} showAnswers showMeta />
+          </div>
+        )}
+        <div className={mode === "preview" ? "hidden" : "space-y-4"}>
           {/* Markdown toolbar */}
           <div className="flex flex-wrap gap-y-2 items-center justify-between">
             <span className="text-sm font-medium text-foreground">Markdown + LaTeX</span>
@@ -482,7 +547,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
                 variant="outline"
                 size="sm"
                 onClick={() => localStdMutation.mutate(formData.markdown)}
-                disabled={readOnly || localStdMutation.isPending || !formData.markdown}
+                disabled={readOnly || localStdMutation.isPending || updateMutation.isPending || !formData.markdown}
                 className="h-8 gap-1.5 text-xs"
               >
                 <Code className="w-3.5 h-3.5" /> AI 标准化
@@ -675,7 +740,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
                           variant="outline"
                           size="sm"
                           onClick={() => subStdMutation.mutate({ subIndex, markdown: sub.markdown })}
-                          disabled={subStdMutation.isPending || !sub.markdown.trim()}
+                          disabled={subStdMutation.isPending || updateMutation.isPending || !sub.markdown.trim()}
                           className="h-8 gap-1.5 text-xs"
                           title="仅标准化当前小问"
                         >
@@ -892,7 +957,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
             </div>
           )}
         </div>
-      )}
+      </div>
       <AlertDialog
         open={confirmDeleteIndex !== null}
         onOpenChange={(open) => {

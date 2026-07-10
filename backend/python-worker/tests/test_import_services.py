@@ -6,9 +6,12 @@ from unittest.mock import patch
 from app import worker_base
 from app.import_services import (
     auto_standardize_import_questions,
+    bank_question_duplicate_reason,
+    bank_question_from_import,
     build_import_questions,
     clear_standardize_cache,
     detect_severe_latex_issues,
+    find_bank_question_index_for_import,
     normalize_display_math_blocks,
     normalize_sub_questions,
     render_validate_markdown_candidate,
@@ -301,6 +304,39 @@ class ImportServicesTest(unittest.TestCase):
 
         self.assertEqual(1, len(questions))
         self.assertEqual("q1", questions[0]["id"])
+
+    def test_rebank_import_question_reuses_existing_bank_question(self):
+        task = {"id": "task_1", "title": "测试卷", "stage": "初中", "subject": "数学", "grade": "九年级"}
+        question = {
+            "id": "question_1",
+            "number": 1,
+            "status": "已入库",
+            "bankQuestionId": "bank_question_1",
+            "manualMarkdown": "修改后的题干",
+            "stemMarkdown": "原题干",
+            "answer": "B",
+            "analysis": "解析",
+            "type": "choice",
+            "difficulty": "medium",
+        }
+        existing = {
+            "id": "bank_question_1",
+            "sourceImportTaskId": "task_1",
+            "sourceImportQuestionId": "question_1",
+            "manualMarkdown": "旧题干",
+            "answer": "A",
+            "createdAt": "2026-01-01T00:00:00",
+        }
+        store = {"bankQuestions": [existing]}
+
+        index = find_bank_question_index_for_import(store, task, question)
+        bank_question = bank_question_from_import(task, question, store["bankQuestions"][index])
+
+        self.assertEqual(0, index)
+        self.assertEqual("bank_question_1", bank_question["id"])
+        self.assertEqual("2026-01-01T00:00:00", bank_question["createdAt"])
+        self.assertEqual("修改后的题干", bank_question["manualMarkdown"])
+        self.assertIsNone(bank_question_duplicate_reason(store, bank_question, bank_question["id"]))
 
     def test_top_level_ocr_questions_keeps_repeated_ocr_ids_from_answer_sections(self):
         first = {"id": "q_1", "number": 1, "stemMarkdown": "正文第 1 题"}
