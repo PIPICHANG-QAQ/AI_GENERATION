@@ -1,6 +1,6 @@
-%% Version: 2026-07-09 / product v14 / OpenAPI 1.1.0
+%% Version: 2026-07-10 / product v15 / OpenAPI 1.1.0
 %% Status: current-primary
-%% Scope: authoritative end-to-end OCR-Flow algorithm, LLM routing, review, layout overlay, rescan, and AI assistance flow.
+%% Scope: authoritative end-to-end OCR-Flow algorithm, structure contract, LLM routing, first-return auto standardization, review, layout overlay isolation, rescan, and AI assistance flow.
 flowchart TD
   LegendLocal["绿色：本地算力 / 本地存储"]:::local
   LegendExternal["黄色：外部 API 算力<br/>本地开发全节点 external-only"]:::external
@@ -21,7 +21,9 @@ flowchart TD
   Collect["ocr-collect<br/>保留 Markdown、content_list、页码、块顺序、图片 assets"]:::local
   ImageLibrary["建立本导入任务题图库<br/>OCR 图片进入 imageLibrary"]:::local
 
+  StructureContract["paper-structure-contract<br/>先抽取总题数、大题声明、每段题号范围<br/>后续拆题必须满足结构契约"]:::local
   LocalBoundary["local-boundary-detect<br/>本地候选边界：大题、题号、小问、选项、题图"]:::local
+  AnchorScore["anchor-candidate-score<br/>数字锚点先评分，不直接建题<br/>段内、题号范围、正文区、题干语义、连续性"]:::mixed
   BoundaryConfidence["boundaryConfidence<br/>题号连续、选项稳定、小问和题图路径可回溯"]:::mixed
   BoundaryHigh{"本地边界高置信？"}:::mixed
   BoundarySkip["跳过 llm-boundary-refine<br/>splitter.source=local-boundary<br/>splitter.llmCalls=[]"]:::local
@@ -42,7 +44,7 @@ flowchart TD
   SubSplit["sub-question-split<br/>大题内小问写入 subQuestions/children"]:::local
   ChoiceBlankProtect["choice-blank-structure-protect<br/>选项边界、____ 占位、题图回收"]:::mixed
   VisualRepair["visual-repair<br/>题目 crop、横线检测、可选 Pix2Text"]:::mixed
-  StructureValidate{"structure-validate<br/>选项、小问、题图和证据回溯是否通过？"}:::mixed
+  StructureValidate{"structure-validate<br/>结构契约、题号范围、evidence 起点、选项、小问、题图和证据回溯是否通过？"}:::mixed
   RuleFallback["旧版规则拆题兜底<br/>结构校验失败时使用"]:::local
 
   MathNormalize["本地公式标准化与校验<br/>修复常见 LaTeX 边界与风险标记"]:::local
@@ -57,7 +59,16 @@ flowchart TD
   MetadataApi["外部 API：题目元数据补全<br/>题型、答案、解析、知识点、难度、分值<br/>按 subQuestions 归属答案/解析"]:::external
   MetadataFallback["本地默认元数据<br/>保留空答案/解析，难度 medium"]:::local
   BuildQuestions["生成待校验导入题目<br/>状态：待校验，保留 images、options、subQuestions"]:::local
-  PaperLayoutBuild["PaperLayoutCapability<br/>_middle.json page_size + bbox 优先<br/>父题级范围；绑定 questionId"]:::local
+  AutoStdMode{"OCR_AUTO_STANDARDIZE_MODE<br/>off / risky / all"}:::mixed
+  AutoStdRisk["auto-standardize-risk-selector<br/>严重 LaTeX、渲染风险、重复 Markdown、图片/选项异常"]:::mixed
+  AutoStdConcurrent["首次返回前并发标准化<br/>OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY<br/>不创建 Java AI job"]:::mixed
+  AutoStdGate["自动标准化硬校验<br/>渲染、严重风险、选项数、题图标签、小问结构"]:::mixed
+  AutoStdApply["安全候选写回导入题<br/>answer/analysis/subQuestions 按结构回填"]:::local
+  AutoStdSkip["跳过或阻断<br/>保留原题，写入 autoStandardize 元数据"]:::local
+  PaperLayoutBuild["PaperLayoutCapability<br/>只读定位能力，可关闭<br/>不参与题目结构生成或题图写回"]:::local
+  PaperLayoutBind["layout-region-bind<br/>sourceEvidence + middle bbox 回贴<br/>提取嵌套 image_path，跳过 A/B/C/D 短标签"]:::local
+  PaperLayoutReliable{"layout region 是否可靠？<br/>题干/题图覆盖、非小标签、非极小框"}:::mixed
+  PaperLayoutFallback["布局几何兜底 / 降置信 / warning<br/>按题号锚点顺序切分；不可靠则不影响拆题"]:::mixed
   PaperPageApi["试卷分页页图 API<br/>GET /api/import-tasks/{taskId}/source/paper/pages/{pageIndex}<br/>多页 PDF 从 0 开始；答案文件暂不支持"]:::local
   PaperLayoutWarnings["layout warnings<br/>缺 bbox、原文件缺失、页图渲染失败或类型不支持"]:::mixed
   SubQuestionNormalize["小问结构归一化<br/>children 与 subQuestions 双字段<br/>父题答案/解析为空"]:::local
@@ -106,7 +117,7 @@ flowchart TD
   Jobs --> FlowConfig --> GpuPolicy --> Provider
   Provider --> OcrPaper --> Collect
   Provider --> OcrAnswer --> Collect
-  Collect --> ImageLibrary --> LocalBoundary --> BoundaryConfidence --> BoundaryHigh
+  Collect --> ImageLibrary --> StructureContract --> LocalBoundary --> AnchorScore --> BoundaryConfidence --> BoundaryHigh
   BoundaryHigh -- "是" --> BoundarySkip --> BoundarySource
   BoundaryHigh -- "否" --> LlmAvailable
   LlmAvailable -- "不可用" --> BoundaryLocalFallback --> BoundarySource
@@ -128,10 +139,20 @@ flowchart TD
   SemanticRisk -- "否" --> MetadataDecision
   MetadataDecision -- "可用" --> MetadataApi --> BuildQuestions
   MetadataDecision -- "不可用 / 失败" --> MetadataFallback --> BuildQuestions
-  BuildQuestions --> SubQuestionNormalize --> OcrOutputs
+  BuildQuestions --> AutoStdMode
+  AutoStdMode -- "off" --> AutoStdSkip --> SubQuestionNormalize
+  AutoStdMode -- "risky" --> AutoStdRisk --> AutoStdConcurrent
+  AutoStdMode -- "all" --> AutoStdConcurrent
+  AutoStdConcurrent --> AutoStdGate
+  AutoStdGate -- "通过" --> AutoStdApply --> SubQuestionNormalize
+  AutoStdGate -- "失败" --> AutoStdSkip
+  SubQuestionNormalize --> OcrOutputs
   BuildQuestions --> PaperLayoutBuild
   Collect --> PaperLayoutBuild
-  PaperLayoutBuild --> PaperPageApi
+  PaperLayoutBuild --> PaperLayoutBind --> PaperLayoutReliable
+  PaperLayoutReliable -- "是" --> PaperPageApi
+  PaperLayoutReliable -- "否" --> PaperLayoutFallback --> PaperPageApi
+  PaperLayoutFallback --> PaperLayoutWarnings
   PaperLayoutBuild --> PaperLayoutWarnings
   PaperLayoutBuild --> OcrOutputs
   BoundarySkip --> LlmMetrics

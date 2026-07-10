@@ -1,6 +1,6 @@
-%% Version: 2026-07-09 / product v14 / PaperLayoutCapability
+%% Version: 2026-07-10 / product v15 / StructureContract + PaperLayoutIsolation
 %% Status: current-primary
-%% Scope: import OCR workbench UX, task lifecycle, rescan, batch AI analysis, and manual review.
+%% Scope: import OCR workbench UX, task lifecycle, structure-contract extraction, first-return auto standardization, layout overlay isolation, rescan, batch AI analysis, and manual review.
 flowchart TD
   LegendLocal["绿色：本地算力 / 本地存储"]:::local
   LegendExternal["黄色：外部 API 算力"]:::external
@@ -21,7 +21,9 @@ flowchart TD
   Collect["ocr-collect<br/>保留 Markdown、content_list、页码、块顺序、图片 assets"]:::local
   ImageLibrary["建立本卷题图库<br/>OCR 扫描图片自动进入 imageLibrary"]:::local
 
+  StructureContract["paper-structure-contract<br/>先抽取总题数、大题声明和题号范围<br/>过滤卷头编号和说明区"]:::local
   LocalBoundary["local-boundary-detect<br/>题号、题型粗判、选项、小问、题图归属候选"]:::local
+  AnchorCandidate["anchor candidate scoring<br/>数字锚点先评分，不直接建题<br/>段内、范围、正文区、连续性"]:::mixed
   BoundaryConfidence["boundaryConfidence<br/>本地边界置信度"]:::mixed
   BoundaryHigh{"本地边界高置信？"}:::mixed
   BoundarySkip["跳过 AI 边界确认<br/>splitter.source=local-boundary"]:::local
@@ -45,10 +47,16 @@ flowchart TD
   MetadataFallback["本地默认元数据<br/>答案/解析/知识点为空，难度 medium"]:::local
 
   BuildImport["生成导入题目<br/>状态：待校验，保留 images、options、subQuestions"]:::local
+  AutoStdMode{"OCR_AUTO_STANDARDIZE_MODE<br/>off / risky / all"}:::mixed
+  AutoStdRun["首次返回前自动标准化<br/>只处理低置信或全部题目；支持并发<br/>不创建 Java AI job"]:::mixed
+  AutoStdGate["硬校验后才写回<br/>渲染、严重风险、选项、题图、小问结构"]:::mixed
+  AutoStdMeta["写入 autoStandardize 元数据<br/>失败或阻断时保留原题"]:::local
   OcrOutputs["OCR outputs<br/>splitter、boundaryConfidence、autoSemanticRepair、llmMetrics"]:::mixed
   SubQuestionNormalize["小问结构归一化<br/>children 与 subQuestions 双字段<br/>父题答案/解析为空"]:::local
   Workbench["前端工作台展示<br/>左侧原文件预览，右侧复合校验"]:::local
-  LayoutToggle["布局解析框开关<br/>叠加 PaperLayoutCapability 父题范围框"]:::local
+  LayoutToggle["布局解析框开关<br/>叠加 PaperLayoutCapability 父题范围框<br/>只读定位，不影响题目识别"]:::local
+  LayoutBind["布局框绑定<br/>sourceEvidence + middle bbox<br/>提取嵌套图片路径，跳过短选项标签"]:::local
+  LayoutFallback["布局低置信兜底<br/>只命中小标签/极小框/缺题图时走几何兜底或 warning"]:::mixed
   LayoutClick["点击范围框<br/>滚动并高亮右侧父题校验卡"]:::local
   Toolbar["工作台工具栏<br/>重新 OCR 扫描 / AI 解析全部 / 批量入库"]:::local
   RescanConfirm["重新 OCR 扫描确认<br/>只扫描原始试卷/答案文件<br/>不覆盖已提取和已编辑题目"]:::local
@@ -82,7 +90,7 @@ flowchart TD
   PaperOcr --> Collect
   AnswerOcr --> Collect
   Poll --> Collect
-  Collect --> ImageLibrary --> LocalBoundary --> BoundaryConfidence --> BoundaryHigh
+  Collect --> ImageLibrary --> StructureContract --> LocalBoundary --> AnchorCandidate --> BoundaryConfidence --> BoundaryHigh
   BoundaryHigh -- "是" --> BoundarySkip --> BoundarySource
   BoundaryHigh -- "否" --> LlmBoundary --> BoundaryValidate
   BoundaryValidate -- "通过" --> BoundarySource
@@ -93,8 +101,11 @@ flowchart TD
   AutoSemanticMode -- "inline / inline-concurrent" --> SemanticApi --> MathNormalize
   MetadataFlow -- "API 可用" --> MetadataApi --> BuildImport
   MetadataFlow -- "API 不可用/失败" --> MetadataFallback --> BuildImport
-  BuildImport --> OcrOutputs --> SubQuestionNormalize --> Workbench
-  Workbench --> LayoutToggle --> LayoutClick --> ManualEdit
+  BuildImport --> AutoStdMode
+  AutoStdMode -- "off" --> AutoStdMeta
+  AutoStdMode -- "risky / all" --> AutoStdRun --> AutoStdGate --> AutoStdMeta
+  AutoStdMeta --> OcrOutputs --> SubQuestionNormalize --> Workbench
+  Workbench --> LayoutToggle --> LayoutBind --> LayoutFallback --> LayoutClick --> ManualEdit
   Workbench --> Toolbar
   Toolbar --> RescanConfirm --> RescanApi --> Poll
   Toolbar --> BatchAiConfirm --> BatchAiLoop --> SaveReview

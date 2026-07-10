@@ -1,11 +1,10 @@
-import json
+import inspect
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from app.ocr_processing import apply_auto_semantic_repairs, build_llm_metrics, realign_question_images_from_layout
+from app import ocr_processing, question_boundary
+from app.ocr_processing import apply_auto_semantic_repairs, build_llm_metrics
 
 
 class OcrProcessingTest(unittest.TestCase):
@@ -71,54 +70,19 @@ class OcrProcessingTest(unittest.TestCase):
         self.assertEqual(2, metrics["callCount"])
         self.assertEqual(125, metrics["totalDurationMs"])
 
-    def test_realign_question_images_uses_mineru_geometry_order(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp)
-            (output_dir / "paper_content_list.json").write_text(
-                json.dumps(
-                    [
-                        {"type": "text", "text": "7. 第七题题干", "bbox": [100, 700, 500, 740], "page_idx": 0},
-                        {"type": "image", "img_path": "images/q8.png", "bbox": [110, 760, 300, 830], "page_idx": 0},
-                        {"type": "text", "text": "8. 第八题题干", "bbox": [100, 750, 520, 860], "page_idx": 0},
-                    ],
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-            assets = [
-                {
-                    "name": "q8.png",
-                    "path": "paper/auto/images/q8.png",
-                    "url": "/files/q8.png",
-                }
-            ]
-            structured = {
-                "questions": [
-                    {
-                        "id": "q7",
-                        "number": 7,
-                        "stemMarkdown": "第七题题干\n\n![](图1)",
-                        "manualMarkdown": "第七题题干\n\n![](图1)",
-                        "images": [{"name": "q8.png", "path": "paper/auto/images/q8.png", "url": "/files/q8.png", "label": "图1"}],
-                    },
-                    {
-                        "id": "q8",
-                        "number": 8,
-                        "stemMarkdown": "第八题题干",
-                        "manualMarkdown": "第八题题干",
-                        "images": [],
-                    },
-                ]
-            }
+    def test_collect_outputs_keeps_layout_read_only_for_question_extraction(self):
+        collect_outputs_source = inspect.getsource(ocr_processing.collect_outputs)
+        detect_boundaries_source = inspect.getsource(question_boundary.detect_local_boundaries)
 
-            result = realign_question_images_from_layout(structured, output_dir, assets)
-
-        self.assertTrue(result["applied"])
-        self.assertEqual(2, result["changed"])
-        self.assertEqual([], structured["questions"][0]["images"])
-        self.assertNotIn("![](图1)", structured["questions"][0]["stemMarkdown"])
-        self.assertEqual("paper/auto/images/q8.png", structured["questions"][1]["images"][0]["path"])
-        self.assertIn("![](图1)", structured["questions"][1]["stemMarkdown"])
+        self.assertFalse(hasattr(ocr_processing, "question_image_refs_by_layout"))
+        self.assertFalse(hasattr(ocr_processing, "question_image_ref_groups_by_layout"))
+        self.assertFalse(hasattr(ocr_processing, "realign_question_images_from_layout"))
+        self.assertFalse(hasattr(question_boundary, "detect_local_boundaries_with_layout"))
+        self.assertNotIn("load_question_layout_items", collect_outputs_source)
+        self.assertNotIn("realign_question_images_from_layout", collect_outputs_source)
+        self.assertNotIn("layout_items", detect_boundaries_source)
+        self.assertNotIn("layoutItem", detect_boundaries_source)
+        self.assertIn("layout-read-only", collect_outputs_source)
 
 
 if __name__ == "__main__":

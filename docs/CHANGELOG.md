@@ -1,5 +1,17 @@
 # 变更记录
 
+## 2026-07-10
+
+- OCR 拆题升级为“结构契约优先”：先从卷面抽取总题数、大题声明和题号范围，再对所有数字题号做候选评分；卷头说明区的编号、非大题段内编号、超出当前大题范围的编号不会直接建题，避免把“本试卷共 N 题”等说明误识别为题目。
+- 题号候选与真实题目分离：本地边界检测记录 `anchorCandidates` 和 `structureContract`，按段内位置、题号范围、正文区、题干语义和前后连续性打分；低分候选进入复核或回退，不污染最终题目列表。
+- 首次 OCR 返回前支持自动 AI 标准化：新增 `OCR_AUTO_STANDARDIZE_MODE=off|risky|all` 和 `OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY`。默认 `risky` 只处理严重 LaTeX、渲染失败、重复 Markdown、图片/选项异常等低置信题；该流程不创建 Java AI job，写入 `autoStandardize` 元数据。
+- 自动标准化增加硬校验：候选必须通过渲染、严重风险、选项数量、题图标签、小问结构和未知图片引用校验，才会写回导入题；失败、阻断或 fallback 时保留原题，避免模型修复破坏已经正确识别的题目。
+- 布局解析与题目识别彻底解耦：`PaperLayoutCapability` 只生成只读父题定位框，可由 `OCR_PAPER_LAYOUT_ENABLED` 关闭；布局框不参与题目拆分、题图归属写回或人工编辑稿生成，布局不稳定时不影响题目识别稳定性。
+- 布局框绑定修复：读取 MinerU `_middle.json` 中嵌套 `blocks[].lines[].spans[].image_path`，跳过 `A/B/C/D` 这类极短选项标签作为 Markdown offset 锚点；当只命中小标签、极小框、缺少题图或 image-only 匹配缺题干时，降级到几何兜底或 warning。
+- 布局框重新启用并发布到服务器：当前测试环境 `http://120.211.112.121:5173/` 已重新构建容器，健康检查通过；`OCR_PAPER_LAYOUT_ENABLED=true`、`OCR_AUTO_STANDARDIZE_MODE=risky`、`OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY=2`。
+- 回归测试补充：覆盖结构契约过滤卷头、跨页/粘连题号、自动标准化并发与关闭模式、图片选项去重、嵌套 middle 图片 bbox、短选项标签不串到下一题布局框。
+- 文档和流程图同步升级到 v15：`ocr-flow`、导入 OCR 工作台和服务器 OCR 流程图补齐结构契约、自动标准化、布局解耦和低置信兜底链路。
+
 ## 2026-07-09
 
 - 导入工作台“AI 解析全部”交互增强：确认后立即显示顶部进度条，展示当前处理题号/小问、成功失败计数和百分比；处理完成后短暂停留结果，再恢复按钮。普通题批量解析改为调用与单题按钮一致的导入题专用 AI 解析接口，避免用户点击后长时间无明显反馈。

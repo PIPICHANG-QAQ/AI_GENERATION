@@ -7,6 +7,7 @@ import copy
 import hashlib
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 
 from app.worker_base import *
@@ -987,9 +988,25 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
         metadata = enriched.get(source_id, {})
         difficulty = normalize_difficulty(metadata.get("difficulty"))
         images = normalize_question_images(source_question.get("images", []))
-        stem_markdown = strip_question_images_from_markdown(source_question.get("stemMarkdown") or "", images)
+        source_options = normalize_question_options_image_refs(source_question.get("options", []), images)
+        question_type = normalize_question_type(metadata.get("type") or source_question.get("type"))
+        images = filter_question_images_for_context(
+            images,
+            source_question.get("stemMarkdown") or "",
+            source_options,
+            question_type=question_type,
+            answer=metadata.get("answer", ""),
+            analysis=metadata.get("analysis", ""),
+        )
+        source_options = normalize_question_options_image_refs(source_question.get("options", []), images)
+        sibling_texts = option_texts(source_options)
+        stem_markdown = strip_question_images_from_markdown(
+            source_question.get("stemMarkdown") or "",
+            images,
+            sibling_texts=sibling_texts,
+        )
         manual_markdown = (
-            strip_question_images_from_markdown(source_question.get("manualMarkdown"), images)
+            strip_question_images_from_markdown(source_question.get("manualMarkdown"), images, sibling_texts=sibling_texts)
             if source_question.get("manualMarkdown")
             else None
         )
@@ -1003,7 +1020,7 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
                 "sourceQuestionId": source_id,
                 "number": index,
                 "status": "待校验",
-                "type": normalize_question_type(metadata.get("type") or source_question.get("type")),
+                "type": question_type,
                 "stemMarkdown": stem_markdown,
                 "manualMarkdown": manual_markdown,
                 "answer": "" if sub_questions else metadata.get("answer", ""),
@@ -1013,7 +1030,7 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
                 "difficulty": difficulty,
                 "score": float(metadata.get("score", 0) or 0),
                 "images": images,
-                "options": source_question.get("options", []),
+                "options": source_options,
                 "children": sub_questions,
                 "subQuestions": sub_questions,
                 "mathValidation": source_question.get("mathValidation"),
@@ -1039,6 +1056,7 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
                 "bankQuestionId": None,
             }
         )
+    task["autoStandardize"] = auto_standardize_import_questions(import_questions, task, outputs)
     return import_questions
 
 
@@ -1075,6 +1093,289 @@ def import_sync_ai_enrich_enabled() -> bool:
 
     value = os.getenv("ENABLE_IMPORT_SYNC_AI_ENRICH", "false").strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def ocr_auto_standardize_mode() -> str:
+    """返回 OCR 首次导入题目的自动标准化模式。"""
+    mode = os.getenv("OCR_AUTO_STANDARDIZE_MODE", "risky").strip().lower()
+    return mode if mode in {"off", "risky", "all"} else "risky"
+
+
+def bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    """读取有上下界的整数环境变量。"""
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def ocr_auto_standardize_max_workers() -> int:
+    """返回 OCR 自动标准化并发数。"""
+    return bounded_int_env("OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY", 2, 1, 8)
+
+
+def ocr_auto_standardize_risk_reasons(question: dict[str, Any]) -> list[str]:
+    """判断题目是否需要在首次返回前自动标准化。"""
+    reasons: list[str] = []
+    markdown = question_to_edit_markdown(question)
+    severe_issues = detect_severe_latex_issues(markdown)
+    if severe_issues:
+        reasons.append("severe-latex")
+    render_validation = render_validate_markdown_candidate(markdown)
+    if not render_validation.get("valid"):
+        reasons.append("render-risk")
+    if collapse_adjacent_duplicate_markdown(markdown)[0] != markdown.strip():
+        reasons.append("duplicate-markdown")
+
+    question_type = normalize_question_type(question.get("type"))
+    options = normalize_question_options_image_refs(question.get("options"), question.get("images"))
+    if question_type == "choice" and 0 < len(options) < 2:
+        reasons.append("choice-option-count-low")
+    if question_type == "choice" and options:
+        labels_in_options: set[str] = set()
+        for option in options:
+            labels_in_options.update(markdown_referenced_image_labels(option.get("content") or "", question.get("images")))
+        labels_in_stem = markdown_referenced_image_labels(
+            str(question.get("stemMarkdown") or question.get("manualMarkdown") or ""),
+            question.get("images"),
+        )
+        if labels_in_options and labels_in_options & labels_in_stem:
+            reasons.append("duplicate-image-ref")
+        if any(re.search(r"\b[A-H]\s*[.．、:：]\s*\S", str(option.get("content") or "")) for option in options):
+            reasons.append("choice-option-glued")
+
+    math_validation = question.get("mathValidation") if isinstance(question.get("mathValidation"), dict) else {}
+    if int(math_validation.get("warningCount") or 0) > 0:
+        reasons.append("math-validation-warning")
+
+    return list(dict.fromkeys(reasons))
+
+
+def auto_standardize_import_questions(
+    questions: list[dict[str, Any]],
+    task: dict[str, Any],
+    outputs: dict[str, Any],
+) -> dict[str, Any]:
+    """首次 OCR 导入前，对低置信题并发执行 AI 标准化。"""
+    mode = ocr_auto_standardize_mode()
+    summary = {
+        "enabled": mode != "off",
+        "mode": mode,
+        "configured": bool(llm_status().get("configured")),
+        "candidateCount": 0,
+        "appliedCount": 0,
+        "skippedCount": 0,
+        "failedCount": 0,
+        "maxConcurrency": ocr_auto_standardize_max_workers(),
+    }
+    if mode == "off" or not questions:
+        return summary
+
+    candidates: list[tuple[dict[str, Any], list[str]]] = []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        reasons = ocr_auto_standardize_risk_reasons(question)
+        if mode == "all" or reasons:
+            candidates.append((question, reasons or ["mode-all"]))
+        else:
+            question["autoStandardize"] = {
+                "enabled": True,
+                "mode": mode,
+                "eligible": False,
+                "applied": False,
+                "reasons": [],
+                "status": "skipped",
+            }
+    summary["candidateCount"] = len(candidates)
+    if not candidates:
+        return summary
+
+    raw_markdown = str(outputs.get("markdown") or "")
+    max_workers = min(ocr_auto_standardize_max_workers(), len(candidates))
+
+    def run_one(question: dict[str, Any], reasons: list[str]) -> tuple[dict[str, Any], dict[str, Any]]:
+        started = time.time()
+        try:
+            before_markdown = question_to_edit_markdown(question)
+            response = standardize_markdown_ai_response(
+                before_markdown,
+                raw_ocr_context=extract_raw_ocr_context(raw_markdown, question),
+                structured_hints=standardize_question_hints(question),
+            )
+            result = apply_auto_standardize_result(question, response, before_markdown, mode, reasons)
+        except Exception as exc:
+            result = {
+                "enabled": True,
+                "mode": mode,
+                "eligible": True,
+                "applied": False,
+                "status": "failed",
+                "reasons": reasons,
+                "error": str(exc),
+            }
+        result["durationMs"] = int((time.time() - started) * 1000)
+        return question, result
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(run_one, question, reasons) for question, reasons in candidates]
+        for future in as_completed(futures):
+            question, result = future.result()
+            question["autoStandardize"] = result
+            status = str(result.get("status") or "")
+            if result.get("applied"):
+                summary["appliedCount"] += 1
+            elif status == "failed":
+                summary["failedCount"] += 1
+            else:
+                summary["skippedCount"] += 1
+    return summary
+
+
+def apply_auto_standardize_result(
+    question: dict[str, Any],
+    response: dict[str, Any],
+    before_markdown: str,
+    mode: str,
+    reasons: list[str],
+) -> dict[str, Any]:
+    """硬校验通过后，把自动标准化结果写回题目。"""
+    standardizer = response.get("standardizer") if isinstance(response.get("standardizer"), dict) else {}
+    metadata = {
+        "enabled": True,
+        "mode": mode,
+        "eligible": True,
+        "applied": False,
+        "status": "skipped",
+        "reasons": reasons,
+        "source": standardizer.get("source"),
+        "provider": standardizer.get("provider"),
+        "model": standardizer.get("model"),
+        "confidence": standardizer.get("confidence"),
+        "warnings": standardizer.get("warnings", []),
+    }
+    if standardizer.get("error") or standardizer.get("fallbackUsed") or standardizer.get("applyBlocked"):
+        metadata["status"] = "blocked"
+        metadata["blockReason"] = standardizer.get("error") or "standardizer-blocked"
+        return metadata
+
+    candidate_markdown = str(response.get("markdown") or "").strip()
+    if not candidate_markdown:
+        metadata["status"] = "blocked"
+        metadata["blockReason"] = "empty-candidate"
+        return metadata
+
+    validation = validate_auto_standardize_candidate(question, before_markdown, candidate_markdown, response)
+    metadata["validation"] = validation
+    if not validation.get("valid"):
+        metadata["status"] = "blocked"
+        metadata["blockReason"] = "hard-validation-failed"
+        return metadata
+
+    before_question = copy.deepcopy(question)
+    question["manualMarkdown"] = candidate_markdown
+    apply_edit_markdown_to_question(question, candidate_markdown)
+    if response.get("options"):
+        question["options"] = normalize_question_options_image_refs(response.get("options"), question.get("images"))
+    if response.get("subQuestions"):
+        sub_questions = normalize_sub_questions(response.get("subQuestions"))
+        question["subQuestions"] = sub_questions
+        question["children"] = sub_questions
+    if not (question.get("subQuestions") or question.get("children")):
+        if response.get("answer"):
+            question["answer"] = str(response.get("answer") or "")
+        if response.get("analysis"):
+            question["analysis"] = str(response.get("analysis") or "")
+    ensure_question_images_in_markdown(question)
+    question["mathValidation"] = normalize_math_markdown(question_to_edit_markdown(question))
+    question["updatedAt"] = now_iso()
+
+    metadata["applied"] = question != before_question
+    metadata["status"] = "applied" if metadata["applied"] else "unchanged"
+    metadata["changed"] = candidate_markdown != before_markdown
+    metadata["fixes"] = standardizer.get("fixes", [])
+    return metadata
+
+
+def validate_auto_standardize_candidate(
+    question: dict[str, Any],
+    before_markdown: str,
+    candidate_markdown: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    """自动应用 AI 标准化前的硬校验。"""
+    errors: list[str] = []
+    before_severe = detect_severe_latex_issues(before_markdown)
+    after_severe = detect_severe_latex_issues(candidate_markdown)
+    if len(after_severe) > len(before_severe):
+        errors.append("candidate-severe-latex-increased")
+    render_validation = render_validate_markdown_candidate(candidate_markdown)
+    if not render_validation.get("valid"):
+        errors.append("candidate-render-invalid")
+
+    question_type = normalize_question_type(question.get("type"))
+    before_options = normalize_question_options_image_refs(question.get("options"), question.get("images"))
+    candidate_stem, candidate_options = split_choice_options(candidate_markdown, "choice" if question_type == "choice" else question_type)
+    response_options = normalize_question_options_image_refs(response.get("options", []), question.get("images"))
+    effective_options = response_options or candidate_options
+    if question_type == "choice" and len(before_options) >= 2 and len(effective_options) < len(before_options):
+        errors.append("candidate-dropped-choice-options")
+
+    required_labels = required_question_image_labels(question, before_markdown)
+    candidate_context = "\n".join(
+        [
+            candidate_stem,
+            *[str(option.get("content") or "") for option in effective_options],
+            str(response.get("answer") or ""),
+            str(response.get("analysis") or ""),
+        ]
+    )
+    candidate_labels = markdown_referenced_image_labels(candidate_context, question.get("images"))
+    missing_labels = sorted(required_labels - candidate_labels)
+    if missing_labels:
+        errors.append(f"candidate-dropped-images:{','.join(missing_labels)}")
+
+    unknown_labels = unknown_question_image_labels(candidate_markdown, question.get("images"))
+    if unknown_labels:
+        errors.append(f"candidate-unknown-images:{','.join(sorted(unknown_labels))}")
+
+    if question.get("subQuestions") and response.get("subQuestions") == [] and re.search(r"[（(]\s*1\s*[）)]", before_markdown):
+        errors.append("candidate-dropped-subquestions")
+
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "beforeSevereIssueCount": len(before_severe),
+        "afterSevereIssueCount": len(after_severe),
+        "beforeOptionCount": len(before_options),
+        "afterOptionCount": len(effective_options),
+        "requiredImageLabels": sorted(required_labels),
+        "candidateImageLabels": sorted(candidate_labels),
+    }
+
+
+def required_question_image_labels(question: dict[str, Any], markdown: str) -> set[str]:
+    """返回自动标准化候选必须保留的题图标签。"""
+    labels = markdown_referenced_image_labels(markdown, question.get("images"))
+    for option in normalize_question_options_image_refs(question.get("options"), question.get("images")):
+        labels.update(markdown_referenced_image_labels(option.get("content") or "", question.get("images")))
+    return labels
+
+
+def unknown_question_image_labels(markdown: str, images: Any) -> set[str]:
+    """返回候选 Markdown 中未属于当前题图列表的 图N 引用。"""
+    allowed = {
+        question_image_label(image, index)
+        for index, image in enumerate(normalize_question_images(images))
+        if isinstance(image, dict)
+    }
+    unknown: set[str] = set()
+    for match in MARKDOWN_IMAGE_RE.finditer(str(markdown or "")):
+        label = normalize_question_image_label(match.group(1).strip().strip("<>"))
+        if label and label not in allowed:
+            unknown.add(label)
+    return unknown
 
 
 def update_import_task_status(task: dict[str, Any]) -> None:

@@ -27,8 +27,11 @@ LAYOUT_PADDING_RATIO = float(os.getenv("OCR_LAYOUT_PADDING_RATIO", "0.006"))
 QUESTION_ANCHOR_RE = re.compile(
     r"^\s*(?:第\s*)?(?P<number>\d{1,3})\s*(?:[.．、]|[）)]|[（(]\s*\d+(?:\.\d+)?\s*分)"
 )
+OPTION_LABEL_TOKEN_RE = re.compile(r"^[A-Ha-h]\s*[.．、]?$")
 PAGE_NOISE_RE = re.compile(r"^\s*(?:第\s*)?\d+\s*(?:页|/\s*\d+\s*$|$)")
 SECTION_TITLE_KEYWORDS = ("选择题", "填空题", "解答题", "判断题", "计算题", "综合题", "试卷", "试题", "考试", "答案卡")
+PREFACE_LAYOUT_KEYWORDS = ("本试卷", "试题卷", "答题纸", "考生注意", "考试时间", "规定位置", "计算器", "注意事项")
+DISABLED_VALUES = {"0", "false", "no", "off", "disabled"}
 
 
 @dataclass(frozen=True)
@@ -88,10 +91,24 @@ def question_image_refs_by_layout(output_dir: Path, limit: int) -> list[list[str
     return PAPER_LAYOUT_CAPABILITY.question_image_refs(output_dir, limit)
 
 
+def question_image_ref_groups_by_layout(output_dir: Path, limit: int) -> list[dict[str, Any]]:
+    """按几何 bbox 返回题图引用分组，保留布局锚点题号。"""
+    return _question_image_ref_groups_by_layout(output_dir, limit)
+
+
+def paper_layout_enabled() -> bool:
+    """返回布局解析框是否启用。"""
+    return str(os.getenv("OCR_PAPER_LAYOUT_ENABLED", "true")).strip().lower() not in DISABLED_VALUES
+
+
 def _attach_paper_layout(task: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
     """给导入任务附加 paperLayout。"""
     if not isinstance(task, dict):
         return {}
+    if not paper_layout_enabled():
+        layout = empty_layout(["布局解析框已关闭"])
+        task["paperLayout"] = layout
+        return layout
     paper_job = job if isinstance(job, dict) else None
     if paper_job is None:
         layout = empty_layout(["试卷 OCR job 不存在，无法显示布局解析框"])
@@ -119,6 +136,8 @@ def empty_layout(warnings: list[str] | None = None) -> dict[str, Any]:
 
 def _build_paper_layout(task: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     """从 OCR 产物构建父题级布局框。"""
+    if not paper_layout_enabled():
+        return empty_layout(["布局解析框已关闭"])
     job_id = str(job.get("jobId") or task.get("paperOcrJobId") or "").strip()
     upload_path = safe_source_path(job)
     if not job_id or upload_path is None:
@@ -129,30 +148,62 @@ def _build_paper_layout(task: dict[str, Any], job: dict[str, Any]) -> dict[str, 
     page_dimensions = {int(page["pageIndex"]): (float(page["width"]), float(page["height"])) for page in pages_layout["pages"]}
     warnings = list(pages_layout.get("warnings") or [])
     import_questions = [question for question in task.get("questions") or [] if isinstance(question, dict)]
+    outputs = job.get("outputs") if isinstance(job.get("outputs"), dict) else {}
+    source_questions = top_level_questions(outputs)
+    source_lookup = source_question_lookup(source_questions)
     layout_items = load_question_layout_items(output_dir)
-    groups = sequential_question_item_groups(layout_items, len(import_questions))
+    indexed_layout_items = index_layout_items(layout_items, str(outputs.get("markdown") or "")) if outputs.get("markdown") else layout_items
+    fallback_groups = sequential_question_item_groups(layout_items, len(layout_items))
+    aligned_fallback_groups = align_layout_groups_to_source_questions(source_questions, fallback_groups)
     regions: list[dict[str, Any]] = []
-    for index, (question, group) in enumerate(zip(import_questions, groups), start=1):
+    matched_count = 0
+    for index, question in enumerate(import_questions, start=1):
         question_id = str(question.get("id") or "").strip()
         if not question_id:
             continue
+        source_id = str(question.get("sourceQuestionId") or "").strip()
+        source_question = source_lookup.get(source_id) if source_id else None
+        display_index = parse_int(
+            source_question.get("number") if isinstance(source_question, dict) else None,
+            parse_int(question.get("number") or question.get("questionNumber"), index),
+        )
+        group_items = (
+            items_for_question(indexed_layout_items, source_question.get("sourceEvidence"))
+            if isinstance(source_question, dict)
+            else []
+        )
+        if group_items:
+            group_items = [item for item in group_items if should_include_in_question_region(item)]
+        confidence = 0.96 if group_items else 0.88
+        fallback_group = aligned_fallback_groups.get(source_id) if source_id else None
+        if not fallback_group and not source_question and index - 1 < len(fallback_groups):
+            fallback_group = fallback_groups[index - 1]
+        if group_items and not question_region_items_are_reliable(group_items, question, source_question):
+            group_items = []
+            confidence = 0.88
+        if not group_items and isinstance(fallback_group, dict):
+            group_items = fallback_group.get("items") or []
+            confidence = float(fallback_group.get("confidence") or confidence)
+        if not group_items:
+            continue
+        matched_count += 1
         regions.extend(
             regions_for_items(
-                group.get("items") or [],
+                group_items,
                 page_dimensions,
                 question_id=question_id,
-                index=index,
-                confidence=float(group.get("confidence") or 0.94),
+                index=display_index,
+                confidence=confidence,
             )
         )
     if not layout_items:
         warnings.append("OCR 未提供可用 bbox，未显示布局解析框")
-    elif not groups:
+    elif not fallback_groups and not regions:
         warnings.append("OCR bbox 未匹配到题目锚点，未显示布局解析框")
     elif not regions:
         warnings.append("OCR 题目 bbox 超出页面范围，未显示布局解析框")
-    elif len(groups) < len(import_questions):
-        warnings.append(f"布局解析框仅匹配到 {len(groups)}/{len(import_questions)} 道题，请人工复核未定位题目")
+    elif matched_count < len(import_questions):
+        warnings.append(f"布局解析框仅匹配到 {matched_count}/{len(import_questions)} 道题，请人工复核未定位题目")
 
     return {
         **pages_layout,
@@ -381,25 +432,31 @@ def middle_block_text(block: dict[str, Any]) -> str:
 
 def middle_block_image_ref(block: dict[str, Any]) -> str:
     """提取 middle.json block 的图片引用。"""
-    for key in ("img_path", "image_path", "path"):
-        value = block.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    lines = block.get("lines")
-    if not isinstance(lines, list):
-        return ""
-    for line in lines:
-        if not isinstance(line, dict):
-            continue
-        spans = line.get("spans")
-        if not isinstance(spans, list):
-            continue
-        for span in spans:
-            if not isinstance(span, dict):
-                continue
-            image_path = span.get("img_path") or span.get("image_path")
-            if isinstance(image_path, str) and image_path.strip():
-                return image_path.strip()
+    nested = first_image_ref(block)
+    if nested:
+        return nested
+    return ""
+
+
+def first_image_ref(value: Any) -> str:
+    """从 middle.json 的嵌套 image block/span 中提取图片路径。"""
+    if isinstance(value, dict):
+        for key in ("img_path", "image_path", "path"):
+            ref = value.get(key)
+            if isinstance(ref, str) and ref.strip():
+                return ref.strip()
+        content = value.get("content")
+        if value.get("type") == "image" and isinstance(content, str) and content.strip():
+            return content.strip()
+        for key in ("blocks", "lines", "spans"):
+            ref = first_image_ref(value.get(key))
+            if ref:
+                return ref
+    if isinstance(value, list):
+        for item in value:
+            ref = first_image_ref(item)
+            if ref:
+                return ref
     return ""
 
 
@@ -538,6 +595,72 @@ def source_question_lookup(source_questions: list[dict[str, Any]]) -> dict[str, 
     return lookup
 
 
+def align_layout_groups_to_source_questions(
+    source_questions: list[dict[str, Any]],
+    groups: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Align raw layout anchor groups to accepted OCR questions by question-number sequence."""
+    source_numbers = [parse_int(question.get("number"), -1) for question in source_questions if isinstance(question, dict)]
+    if not source_numbers or not groups:
+        return {}
+
+    best_start = -1
+    best_length = 0
+    best_non_preface = -1
+    for start in range(len(groups)):
+        length = 0
+        while (
+            length < len(source_numbers)
+            and start + length < len(groups)
+            and parse_int(groups[start + length].get("anchorNumber"), -1) == source_numbers[length]
+        ):
+            length += 1
+        if length <= 0:
+            continue
+        non_preface = 0 if layout_group_looks_like_preface(groups[start]) else 1
+        if length > best_length or (length == best_length and non_preface > best_non_preface):
+            best_start = start
+            best_length = length
+            best_non_preface = non_preface
+
+    if best_start < 0:
+        return {}
+
+    lookup: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    group_cursor = best_start
+    for index, question in enumerate(source_questions, start=0):
+        if not isinstance(question, dict):
+            continue
+        source_number = parse_int(question.get("number"), -1)
+        matched_group_index = -1
+        while group_cursor < len(groups):
+            group_number = parse_int(groups[group_cursor].get("anchorNumber"), -1)
+            if group_number == source_number:
+                matched_group_index = group_cursor
+                group_cursor += 1
+                break
+            if group_number > source_number:
+                break
+            group_cursor += 1
+        if matched_group_index < 0:
+            continue
+        base_id = str(question.get("id") or f"q_{index + 1}").strip() or f"q_{index + 1}"
+        occurrence = counts.get(base_id, 0) + 1
+        counts[base_id] = occurrence
+        source_id = base_id if occurrence == 1 else f"{base_id}__occurrence_{occurrence}"
+        lookup[source_id] = groups[matched_group_index]
+    return lookup
+
+
+def layout_group_looks_like_preface(group: dict[str, Any]) -> bool:
+    for item in group.get("items") or []:
+        text = str(item.get("text") or "")
+        if any(keyword in text for keyword in PREFACE_LAYOUT_KEYWORDS):
+            return True
+    return False
+
+
 def index_layout_items(items: list[dict[str, Any]], markdown: str) -> list[dict[str, Any]]:
     """为 content_list item 建立 Markdown offset。"""
     cursor = 0
@@ -548,7 +671,7 @@ def index_layout_items(items: list[dict[str, Any]], markdown: str) -> list[dict[
         image_ref = str(item.get("imageRef") or "")
         start = -1
         token_len = 0
-        if text:
+        if text and should_index_layout_text(text):
             start = markdown.find(text, cursor)
             token_len = len(text)
             if start < 0 and len(text) > 24:
@@ -563,6 +686,64 @@ def index_layout_items(items: list[dict[str, Any]], markdown: str) -> list[dict[
             cursor = max(cursor, indexed_item["end"])
         indexed.append(indexed_item)
     return indexed
+
+
+def should_index_layout_text(text: str) -> bool:
+    """判断 layout 文本是否适合作为 Markdown offset 锚点。"""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if OPTION_LABEL_TOKEN_RE.match(stripped):
+        return False
+    return True
+
+
+def question_region_items_are_reliable(
+    items: list[dict[str, Any]],
+    import_question: dict[str, Any],
+    source_question: dict[str, Any] | None,
+) -> bool:
+    """过滤只命中选项小标签等明显不完整的布局匹配。"""
+    if not items:
+        return False
+    image_ref_count = sum(1 for item in items if str(item.get("imageRef") or "").strip())
+    expected_images = expected_question_image_count(import_question, source_question)
+    if expected_images and image_ref_count == 0:
+        return False
+    expected_text_length = expected_question_text_length(import_question, source_question)
+    if len(items) == 1:
+        item = items[0]
+        if str(item.get("imageRef") or "").strip():
+            return expected_text_length <= 12
+        if question_anchor_number(item) is not None:
+            return True
+        compact = re.sub(r"\s+", "", str(item.get("text") or ""))
+        if len(compact) <= 6:
+            return False
+    return True
+
+
+def expected_question_image_count(import_question: dict[str, Any], source_question: dict[str, Any] | None) -> int:
+    """优先使用导入题目的最终图片数判断布局覆盖率。"""
+    import_images = import_question.get("images") if isinstance(import_question, dict) else None
+    if isinstance(import_images, list):
+        return len(import_images)
+    source_images = source_question.get("images") if isinstance(source_question, dict) else None
+    if isinstance(source_images, list):
+        return len(source_images)
+    return 0
+
+
+def expected_question_text_length(import_question: dict[str, Any], source_question: dict[str, Any] | None) -> int:
+    """返回题干文本长度，用于判断 image-only 布局是否过窄。"""
+    for question in (import_question, source_question):
+        if not isinstance(question, dict):
+            continue
+        for key in ("stemMarkdown", "manualMarkdown", "stem", "title"):
+            value = question.get(key)
+            if isinstance(value, str) and value.strip():
+                return len(re.sub(r"\s+", "", value))
+    return 0
 
 
 def items_for_question(items: list[dict[str, Any]], evidence: Any) -> list[dict[str, Any]]:
@@ -638,6 +819,8 @@ def sequential_question_item_groups(items: list[dict[str, Any]], limit: int) -> 
         ]
         if not span_items:
             continue
+        if layout_group_looks_like_preface({"items": span_items}):
+            continue
         groups.append(
             {
                 "items": span_items,
@@ -675,9 +858,14 @@ def sequential_question_anchor_groups(items: list[dict[str, Any]], limit: int) -
 
 def _question_image_refs_by_layout(output_dir: Path, limit: int) -> list[list[str]]:
     """按 MinerU 几何 bbox 返回每道题应关联的图片引用。"""
+    return [group["imageRefs"] for group in _question_image_ref_groups_by_layout(output_dir, limit)]
+
+
+def _question_image_ref_groups_by_layout(output_dir: Path, limit: int) -> list[dict[str, Any]]:
+    """按 MinerU 几何 bbox 返回每道题应关联的图片引用和题号锚点。"""
     items = load_layout_items(output_dir)
     groups = sequential_question_item_groups(items, limit)
-    result: list[list[str]] = []
+    result: list[dict[str, Any]] = []
     for group in groups:
         refs: list[str] = []
         seen: set[str] = set()
@@ -687,7 +875,12 @@ def _question_image_refs_by_layout(output_dir: Path, limit: int) -> list[list[st
                 continue
             seen.add(image_ref)
             refs.append(image_ref)
-        result.append(refs)
+        result.append(
+            {
+                "anchorNumber": group.get("anchorNumber"),
+                "imageRefs": refs,
+            }
+        )
     return result
 
 

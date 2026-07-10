@@ -1,6 +1,6 @@
-%% Version: 2026-07-08 / server deployment v13
+%% Version: 2026-07-10 / server deployment v15
 %% Status: current-support
-%% Scope: server deployment OCR/AI compute boundary, GPU assignment, MinerU API, and public demo runtime.
+%% Scope: server deployment OCR/AI compute boundary, GPU assignment, MinerU API, first-return auto standardization, layout overlay isolation, and public demo runtime.
 flowchart TD
   LegendLocal["绿色：服务器本地算力 / 本地服务<br/>Java、Python、规则拆题、公式校验、文件读写"]:::local
   LegendGpu["紫色：服务器本地 GPU 算力<br/>MinerU: 物理 GPU0，容器内 CUDA 0<br/>aux-qwen3-32b-fp8 / vLLM: 物理 GPU1"]:::gpu
@@ -23,7 +23,9 @@ flowchart TD
   OcrProvider["ocr-provider OCR 引擎<br/>OCR_FLOW_PROVIDER=mineru"]:::gpu
   MinerU["常驻 MinerU API + CLI 调用<br/>mineru-api :8002，CLI 追加 --api-url<br/>GPU0 复用模型，避免每任务重新初始化"]:::gpu
   Collect["collect-outputs 收集产物<br/>Markdown、content_list、页码、图片 assets"]:::local
+  StructureContract["paper-structure-contract<br/>总题数、大题声明、每段题号范围<br/>先过滤卷头和说明区编号"]:::local
   LocalBoundary["local-boundary-detect 本地边界候选<br/>大题、题号、小问、选项、题图候选"]:::local
+  AnchorScore["anchor candidate scoring<br/>数字锚点先评分<br/>合法范围、正文区、连续性和题干语义"]:::hybrid
   Confidence{"boundaryConfidence<br/>本地边界是否高置信？"}:::hybrid
   SkipBoundaryLlm["跳过 llm-boundary-refine<br/>splitter.source=local-boundary"]:::local
 
@@ -37,6 +39,8 @@ flowchart TD
   VisualRepair["visual-repair 视觉修复<br/>题目 crop、横线检测<br/>可选 Pix2Text 二次 OCR"]:::hybrid
   StructureValidate["structure-validate 结构校验<br/>选项、小问、题图、空位、证据回溯"]:::local
   MathNormalize["math-normalize 公式校验<br/>本地 LaTeX 归一化和风险标记"]:::local
+  AutoStandardize["first-return auto-standardize<br/>OCR_AUTO_STANDARDIZE_MODE=risky<br/>并发低置信题标准化，不创建 Java AI job"]:::hybrid
+  AutoStandardizeGate["自动标准化硬校验<br/>渲染、选项、题图、小问和严重风险<br/>失败保留原题"]:::local
 
   AiEnrichDecision{"ai-enrich / 人工触发 AI<br/>需要语义修复、标准化、答案解析或元数据？"}:::hybrid
   LocalStandardize["本地优先 AI 标准化<br/>规则修复 + 本地 LLM 候选<br/>候选需通过安全闸门"]:::hybrid
@@ -45,6 +49,9 @@ flowchart TD
 
   Outputs["OCR outputs<br/>questions、splitter、boundaryConfidence、mathValidation、autoSemanticRepair、llmMetrics"]:::local
   JavaSync["Java 同步快照<br/>导入题、题图、OCR 状态、失败原因"]:::local
+  PaperLayout["PaperLayoutCapability<br/>OCR_PAPER_LAYOUT_ENABLED 控制<br/>只读父题定位，不参与拆题"]:::local
+  LayoutBind["layout-region-bind<br/>middle bbox + sourceEvidence<br/>嵌套图片路径、短选项标签防串题"]:::local
+  LayoutFallback["layout fallback/warnings<br/>只命中小标签、极小框或缺题图时降级<br/>不影响题目识别稳定性"]:::hybrid
   Workbench["OCR 工作台<br/>轮询任务、人工校验、题图维护、入库"]:::local
   Rescan["重新 OCR 扫描<br/>Java /rescan 重投原始 OCR job<br/>已有题目和编辑内容不覆盖"]:::hybrid
   BatchAnalysis["AI 解析全部<br/>前端批处理单题/小问解析<br/>默认补缺失，进度 n/m"]:::external
@@ -58,7 +65,7 @@ flowchart TD
   Worker --> ServerData
 
   Java --> Upload --> Preprocess --> OcrProvider --> MinerU --> Collect
-  Collect --> LocalBoundary --> Confidence
+  Collect --> StructureContract --> LocalBoundary --> AnchorScore --> Confidence
   Confidence -- 高置信 --> SkipBoundaryLlm --> BuildStructure
   Confidence -- 低置信 --> BoundaryRoute
   BoundaryRoute -- "默认 external-first" --> ExternalLLM --> BoundaryFallback
@@ -68,7 +75,7 @@ flowchart TD
   SubQuestion -- "本地规则可完成" --> VisualRepair
   SubQuestion -- "低置信小问确认：服务器 hybrid 本地优先" --> LocalLLM
   SubQuestion -- "本地失败兜底" --> ExternalLLM
-  VisualRepair --> StructureValidate --> MathNormalize --> AiEnrichDecision
+  VisualRepair --> StructureValidate --> MathNormalize --> AutoStandardize --> AutoStandardizeGate --> AiEnrichDecision
 
   AiEnrichDecision -- "不需要 / 未配置" --> Outputs
   AiEnrichDecision -- "标准化候选" --> LocalStandardize --> AiGate --> Outputs
@@ -76,6 +83,7 @@ flowchart TD
   AiGate -- "候选不可安全应用" --> Outputs
   Outputs --> WorkerStore
   Outputs --> JavaSync --> JavaTables
+  Collect --> PaperLayout --> LayoutBind --> LayoutFallback --> Workbench
   JavaSync --> Workbench
   Workbench --> Rescan --> OcrProvider
   Workbench --> BatchAnalysis --> ExternalAnalysis

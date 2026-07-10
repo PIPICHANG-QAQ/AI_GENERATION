@@ -297,6 +297,7 @@ def detect_choice_option_markers(markdown: str) -> list[dict[str, Any]]:
 
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*]\s*\(\s*<?([^>)\s]+)>?(?:\s+['\"][^)]*['\"])?\s*\)")
 TRAILING_IMAGE_BLOCK_RE = re.compile(r"(?:\s*!\[[^\]]*]\s*\([^)]+\)\s*)+$")
+QUESTION_IMAGE_CUE_RE = re.compile(r"如图|下图|图中|图示|示意图|图形|标志|图[①②③④⑤⑥⑦⑧⑨⑩一二三四五六七八九十1-9]")
 
 
 def split_trailing_image_block(content: str) -> tuple[str, str]:
@@ -334,6 +335,103 @@ def markdown_contains_question_image(markdown: str, image: dict[str, Any]) -> bo
         if normalized in haystack or (filename and filename in haystack):
             return True
     return False
+
+
+def markdown_referenced_image_labels(markdown: str, images: Any) -> set[str]:
+    """返回 Markdown 中已引用的题图标签。"""
+    labels: set[str] = set()
+    if not isinstance(images, list):
+        return labels
+    normalized_images = normalize_question_images(images)
+    for index, image in enumerate(normalized_images):
+        if isinstance(image, dict) and markdown_contains_question_image(markdown, image):
+            label = question_image_label(image, index)
+            if label:
+                labels.add(label)
+    return labels
+
+
+def question_text_suggests_image(markdown: str) -> bool:
+    """判断题干文字是否明显需要未定位题图。"""
+    text = MARKDOWN_IMAGE_RE.sub("", str(markdown or ""))
+    return bool(QUESTION_IMAGE_CUE_RE.search(text))
+
+
+def filter_question_images_for_context(
+    images: Any,
+    stem_markdown: str,
+    options: Any = None,
+    *,
+    question_type: str = "",
+    answer: str = "",
+    analysis: str = "",
+) -> list[dict[str, Any]]:
+    """过滤明显未被当前题引用的题图，避免相邻题题图污染。"""
+    normalized_images = normalize_question_images(images)
+    if not normalized_images:
+        return []
+    option_markdowns = option_texts(options)
+    normalized_type = str(question_type or "").strip()
+    stem_has_image_cue = question_text_suggests_image(stem_markdown)
+    trusted_context_texts = [
+        *option_markdowns,
+        str(answer or ""),
+        str(analysis or ""),
+    ]
+    if normalized_type != "choice" or stem_has_image_cue or not option_markdowns:
+        trusted_context_texts.insert(0, str(stem_markdown or ""))
+    referenced: list[dict[str, Any]] = []
+    unreferenced: list[dict[str, Any]] = []
+    for image in normalized_images:
+        if any(markdown_contains_question_image(text, image) for text in trusted_context_texts):
+            referenced.append(image)
+        else:
+            unreferenced.append(image)
+
+    if not unreferenced:
+        return normalized_images
+    if normalized_type != "choice":
+        return normalized_images
+    if referenced:
+        return referenced
+    if stem_has_image_cue:
+        return normalized_images
+    return []
+
+
+def remove_question_images_from_markdown(markdown: str, images: Any) -> str:
+    """从 Markdown 中删除指定题图引用。"""
+    text = str(markdown or "")
+    normalized_images = normalize_question_images(images)
+    if not text or not normalized_images:
+        return text.strip()
+    refs: set[str] = set()
+    for index, image in enumerate(normalized_images):
+        label = question_image_label(image, index)
+        if label:
+            refs.add(normalize_image_ref(label))
+            label_number = image_label_number(label)
+            if label_number:
+                refs.add(normalize_image_ref(f"题图{label_number}"))
+                refs.add(normalize_image_ref(f"#{label_number}"))
+        for key in ("path", "url", "name"):
+            value = str(image.get(key) or "").strip()
+            if not value:
+                continue
+            normalized = normalize_asset_path(value)
+            refs.add(normalize_image_ref(value))
+            refs.add(normalize_image_ref(normalized))
+            refs.add(normalize_image_ref(Path(normalized).name))
+
+    def replace_ref(match: re.Match[str]) -> str:
+        src = match.group(1).strip().strip("<>")
+        normalized = normalize_image_ref(src)
+        filename = normalize_image_ref(Path(normalize_asset_path(src)).name)
+        if normalized in refs or filename in refs:
+            return ""
+        return match.group(0)
+
+    return re.sub(r"\n{3,}", "\n\n", MARKDOWN_IMAGE_RE.sub(replace_ref, text)).strip()
 
 
 def question_image_markdown(image: dict[str, Any], index: int) -> str:
@@ -404,6 +502,10 @@ def strip_question_images_from_markdown(
         return text.strip()
 
     used_labels: set[str] = set()
+    sibling_markdowns = [str(item or "") for item in sibling_texts] if isinstance(sibling_texts, list) else []
+    sibling_labels: set[str] = set()
+    for sibling_markdown in sibling_markdowns:
+        sibling_labels.update(markdown_referenced_image_labels(sibling_markdown, normalized_images))
 
     def replace_ref(match: re.Match[str]) -> str:
         src = match.group(1).strip().strip("<>")
@@ -411,15 +513,16 @@ def strip_question_images_from_markdown(
         filename = Path(normalize_asset_path(src)).name.lower()
         for label, refs in refs_by_label.items():
             if normalized in refs or filename in refs:
+                if label in sibling_labels:
+                    return ""
                 used_labels.add(label)
                 return f"![]({label})"
         return match.group(0)
 
-    normalized_text = MARKDOWN_IMAGE_RE.sub(replace_ref, text)
+    normalized_text = re.sub(r"\n{3,}", "\n\n", MARKDOWN_IMAGE_RE.sub(replace_ref, text)).strip()
     if not append_missing:
         return normalized_text.strip()
 
-    sibling_markdowns = [str(item or "") for item in sibling_texts] if isinstance(sibling_texts, list) else []
     missing_lines = []
     for index, image in enumerate(normalized_images):
         label = question_image_label(image, index)
@@ -542,6 +645,37 @@ def ensure_question_images_in_markdown(question: dict[str, Any]) -> bool:
         if next_options != question.get("options"):
             question["options"] = next_options
             changed = True
+    next_images = filter_question_images_for_context(
+        images,
+        str(question.get("stemMarkdown") or question.get("manualMarkdown") or ""),
+        question.get("options"),
+        question_type=str(question.get("type") or ""),
+        answer=str(question.get("answer") or ""),
+        analysis=str(question.get("analysis") or ""),
+    )
+    if next_images != images:
+        next_keys = {str(image.get("url") or image.get("path") or image.get("name") or "") for image in next_images}
+        dropped_images = [
+            image
+            for image in images
+            if str(image.get("url") or image.get("path") or image.get("name") or "") not in next_keys
+        ]
+        if dropped_images:
+            for field in ("stemMarkdown", "manualMarkdown"):
+                value = question.get(field)
+                if isinstance(value, str):
+                    next_value = remove_question_images_from_markdown(value, dropped_images)
+                    if next_value != value:
+                        question[field] = next_value
+                        changed = True
+        images = next_images
+        question["images"] = images
+        changed = True
+        if question.get("options"):
+            next_options = normalize_question_options_image_refs(question.get("options"), images)
+            if next_options != question.get("options"):
+                question["options"] = next_options
+                changed = True
     if images:
         sibling_texts = option_texts(question.get("options")) + [
             str(question.get("answer") or ""),

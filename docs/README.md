@@ -35,17 +35,17 @@ docs/
 ## Product
 
 - [PRD](product/PRD.md)：本期 question-engine 题库加工能力与本地小平台产品需求。
-- [OCR 阶段规格](product/OCR_PHASE_1_SPEC.md)：OCR-Flow、选择题/空位题结构保护、视觉修复、AI 标准化可靠候选、AI 解析、公式校验、人工校验、LLM 边界确认效率策略和 OCR provider 替换边界。
+- [OCR 阶段规格](product/OCR_PHASE_1_SPEC.md)：OCR-Flow、结构契约拆题、选择题/空位题结构保护、视觉修复、首次返回前自动标准化、AI 标准化可靠候选、AI 解析、公式校验、人工校验、布局解析框解耦、LLM 边界确认效率策略和 OCR provider 替换边界。
 - [题库二期规格](product/QUESTION_BANK_PHASE_2_SPEC.md)：题目导入、题库中心、小问复合题、按小问组卷、知识点库、导出和平台集成输出。
 - [本地小平台 Example](product/LOCAL_PLATFORM_AS_EXAMPLE.md)：说明 `local-platform` 如何演示 question-engine 能力，包括 `subQuestions` 和试卷层 `subSelections`，哪些流程可参考，哪些本地实现不应依赖。
 
 ## Architecture
 
 - [架构图索引与版本治理](architecture/README.md)：说明 `docs/architecture` 下每张流程图的状态、用途、重复边界、合并建议和 Mermaid 渲染规则。
-- [技术设计](architecture/TECHNICAL_DESIGN.md)：后端、前端、存储、MinerU、大模型拆题、OCR-Flow LLM 置信度门控与耗时指标、选择题/空位题结构保护、题目 crop 视觉修复、公式标准化、AI 标准化可靠候选、AI 语义修复、试卷 DOCX/PDF 导出和人工编辑集成设计。
+- [技术设计](architecture/TECHNICAL_DESIGN.md)：后端、前端、存储、MinerU、大模型拆题、OCR-Flow 结构契约、LLM 置信度门控与耗时指标、选择题/空位题结构保护、题目 crop 视觉修复、公式标准化、首次返回前自动标准化、AI 标准化可靠候选、布局解析框只读定位、AI 语义修复、试卷 DOCX/PDF 导出和人工编辑集成设计。
 - [Engine 交付边界](architecture/ENGINE_DELIVERY_BOUNDARY.md)：题库能力发动机交付边界、平台职责、Java/Python 分工和本地小平台排除范围。
 - [架构决策记录](architecture/decisions/README.md)：Java 主后端、Python worker、MinerU provider、本地 H2 模式等关键 ADR。
-- [OCR-Flow 主链路图](architecture/ocr-flow.mmd)：导入、OCR、拆题、视觉修复、公式校验、AI 增强和人工校验的端到端流程。
+- [OCR-Flow 主链路图](architecture/ocr-flow.mmd)：导入、OCR、结构契约拆题、视觉修复、公式校验、首次返回前自动标准化、布局解析框解耦、AI 增强和人工校验的端到端流程。
 - [服务器 OCR-Flow 算力边界图](architecture/server-ocr-flow.mmd)：服务器部署视角的 OCR-Flow，标注本地 CPU/GPU 算力、可选本地基础设施和外部大模型 API。
 - `architecture/*.mmd` / `architecture/*.svg`：Mermaid 架构图和流程图。
 

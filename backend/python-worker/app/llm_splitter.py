@@ -690,6 +690,7 @@ def merge_boundary_chunk_results(local_boundaries: dict[str, Any], chunk_results
         "source": "llm-boundary-chunked",
         "sections": list(sections_by_id.values()),
         "questions": deduped_questions,
+        "structureContract": local_boundaries.get("structureContract") if isinstance(local_boundaries.get("structureContract"), dict) else {},
         "warnings": list(dict.fromkeys(warnings)),
     }
 
@@ -1611,6 +1612,7 @@ def build_boundary_payload(
     asset_refs = [{"name": asset.get("name"), "path": asset.get("path")} for asset in assets]
     compact_local = {
         "sections": local_boundaries.get("sections", []),
+        "structureContract": local_boundaries.get("structureContract", {}),
         "questions": [
             {
                 "id": q.get("id"),
@@ -1667,6 +1669,8 @@ def build_boundary_payload(
             "如果题型是 fill_blank，或题干包含“填空”“横线”“空缺”“补全”“填写”等空位题提示，这些符号也可能只是空位编号、证明步骤编号或提示语；只有后面有完整独立问句时才确认为 subQuestions。",
             "选择题选项必须是稳定连续的 A/B/C/D 边界；不要把公式变量 A、B 当作选项。",
             "父题共用材料应位于 question.start 到第一个 subQuestion.start 之间。",
+            "如果 structureContract 声明了总题数、分段题数或题号范围，questions 必须严格符合该契约；大题标题前的考生须知、答题说明和试卷说明编号不能作为题目。",
+            "question.start 必须指向原文中的真实题号，例如 12.、12．或 12、，不能从公式或题干中间开始。",
             "如果 localBoundaries 已合理，直接沿用。",
             "不要返回 stemMarkdown、answer、analysis、knowledgePoints 或任何正文内容。",
         ],

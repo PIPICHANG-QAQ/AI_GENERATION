@@ -47,7 +47,7 @@ curl -fsS http://127.0.0.1/api/java/health
 curl --noproxy '*' -fsS http://120.211.112.121:5173/api/java/health
 ```
 
-## 验证导入工作台 v13
+## 验证导入工作台 v15
 
 选择一个已存在导入任务 ID 后执行：
 
@@ -66,6 +66,31 @@ curl -fsS "http://127.0.0.1:5173/api/import-tasks/${TASK_ID}" \
 - 处理中重复调用 `/rescan` 返回 `409`。
 - 页面工具栏中“重新 OCR 扫描”“AI 解析全部”“批量入库”禁用，并随详情轮询自动恢复。
 - 当前题目列表和人工编辑内容不因重扫被清空或覆盖。
+- 任务详情中的 `paperLayout.capability.mode` 为 `question-region-binding`；若 `OCR_PAPER_LAYOUT_ENABLED=false`，`paperLayout.regions=[]` 且 warning 为“布局解析框已关闭”。
+- 首次 OCR 生成题目后，任务或题目可见 `autoStandardize` 元数据；低置信题若被阻断，应保留原题并记录 `blockReason`，不应清空题干或选项。
+
+检查当前 OCR v15 开关：
+
+```bash
+sudo docker exec ai_generation_docker-question-engine-1 sh -lc '
+env | grep -E "^(OCR_PAPER_LAYOUT_ENABLED|OCR_AUTO_STANDARDIZE_MODE|OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY)=" | sort
+'
+```
+
+期望客户体验环境为：
+
+```text
+OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY=2
+OCR_AUTO_STANDARDIZE_MODE=risky
+OCR_PAPER_LAYOUT_ENABLED=true
+```
+
+布局框排障优先级：
+
+1. 如果题目识别正确但左侧框错误，先确认这是布局绑定问题，不要回滚拆题链路。
+2. 临时保障用户测试时，可在 `.env` 设置 `OCR_PAPER_LAYOUT_ENABLED=false` 后重建容器，只关闭定位框。
+3. 排查 `_middle.json` 是否包含嵌套 `image_path`，以及是否只命中 `A/B/C/D` 短选项标签或极小 bbox。
+4. 修复后必须重新验证图片选择题和含公式字母 `A/B/C/D` 的下一题，防止布局框串题。
 
 ## 检查端口
 

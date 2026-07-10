@@ -13,6 +13,7 @@ OCR-Flow 是 `question-engine` 的核心底层能力：它负责把试卷/答案
 - 通过 provider 边界预留替换其它 OCR 引擎的空间。
 - 把 OCR 产物整理为 Markdown、JSON、图片资源、题目列表和大题结构。
 - 识别题干、选项、小问 / 子题、题图和题型。
+- 先抽取试卷结构契约，再拆题：总题数、大题段声明、每段题号范围必须约束后续题号候选。
 - 保护选择题和空位题结构：选项、空位占位、小问和题图都必须按 OCR 证据归属，不能靠模型补写。
 - 对低置信空位题执行题目级视觉修复：使用 OCR bbox 裁出 question crop，检测长横线，并可选调用 Pix2Text 做二次 OCR。
 - 对 Markdown + LaTeX 做本地标准化和风险检测。
@@ -102,6 +103,7 @@ OCR 成功后必须形成以下结构：
 - `boundaryConfidence`：本地边界置信度和是否跳过 AI 边界确认的原因。
 - `mathValidation`：整卷公式校验汇总。
 - `autoSemanticRepair`：自动 AI 语义修复的启用、跳过和应用情况。
+- `autoStandardize`：首次返回前自动标准化的模式、候选数、应用数、阻断数和并发上限。
 - `llmMetrics`：LLM 调用次数、总耗时和单次调用耗时明细；不得包含 prompt、密钥、完整 OCR 文本或图片 base64。
 
 每道题至少包含：
@@ -122,6 +124,7 @@ OCR 成功后必须形成以下结构：
 - `score`
 - `mathValidation`
 - `autoSemanticRepair`
+- `autoStandardize`
 - `aiMetadata`
 
 题图必须同时保留 `images` 结构化字段和题干 Markdown 图片引用。`images` 提供图片元数据、访问地址和 AI 解析可用性，Markdown 引用决定题图在题干预览、题库查看、组卷预览和导出中的位置；用户手动删除某个图片引用后，预览不得继续渲染该图，也不得自动补回引用。
@@ -132,7 +135,25 @@ OCR 成功后必须形成以下结构：
 
 ## 拆题与答案解析匹配
 
-拆题以 OCR 原文和本地边界证据为主。OCR 主链路只保证 `markdown/json/assets/sections/questions/mathValidation` 等可人工校验产物；本地边界高置信时直接跳过 AI 边界确认，低置信时才按题段分片调用大模型确认边界。输入包括：
+拆题以 OCR 原文和本地边界证据为主。OCR 主链路只保证 `markdown/json/assets/sections/questions/mathValidation` 等可人工校验产物；本地边界高置信时直接跳过 AI 边界确认，低置信时才按题段分片调用大模型确认边界。
+
+拆题前必须先形成结构契约：
+
+- 从卷面说明和大题标题抽取总题数，例如“本试卷共 21 题”。
+- 从大题标题抽取分段声明，例如“一、填空题，共 12 题”“二、选择题，共 4 题”。
+- 推断每段题号范围，例如 `1-12`、`13-16`、`17-21`。
+- 大题前的编号、说明区编号、超出当前段范围的编号只能作为低分候选，不能直接生成题目。
+- 结构契约不完整时仍允许拆题，但必须在 `structureValidation.warnings` 中提示。
+
+数字题号必须先作为 `anchorCandidates` 评分，不得看到 `数字.` 就直接建题。评分维度包括：
+
+- 是否在大题段内。
+- 题号是否落在当前大题合法范围内。
+- 是否出现在正文区域而不是卷头、页眉、答题说明或页脚。
+- 后文是否像题干，而不是“本试卷、答题纸、考试时间、考生注意”等说明文本。
+- 是否和前后题号连续。
+
+输入包括：
 
 - 试卷 OCR Markdown。
 - 图片资源列表。
@@ -143,6 +164,15 @@ OCR 成功后必须形成以下结构：
 大模型只负责低置信边界的确认或修正，不生成题干文本、答案或解析。当题干中存在 `(1)`、`（2）`、`①` 等小问边界时，父题保留共用材料/大题题干，小问进入 `subQuestions`，并同步到兼容字段 `children`。本地规则拆题是主链路的证据来源和兜底；模型失败、未配置、返回非法 JSON 或某个分片失败时，系统回退对应本地边界，不让 OCR 任务失败。
 
 大模型输出必须经过本地归一化和校验。模型失败、未配置或返回非法 JSON 时，系统回退本地规则拆题。扁平 `questions` 可用于检索和兼容，但导入工作台生成题目卡片时应优先读取 `sections[].questions` 的父题，避免把小问误生成为独立大题。
+
+结构校验必须检查：
+
+- 题目总数是否满足卷面声明或大题声明的合计；局部页面样本可降级为 warning。
+- 大题题号范围是否连续、无重复。
+- 第一题不能出现在第一大题标题之前。
+- 每道题的 `sourceEvidence` 起始文本必须匹配自身题号。
+- 题干不能从公式中间、图片路径中间或无意义碎片开始。
+- 题图路径必须能回溯到 OCR assets。
 
 导入工作台从 OCR 输出生成待校验题时，不按 OCR 题号或 OCR `id` 做去重。平台展示编号按实际导入顺序递增；OCR `id` 只进入 `sourceQuestionId`。如果 OCR 在正文和答案解析区重复输出 `q_1..q_n`，后续重复项必须保留，并给 `sourceQuestionId` 增加 `__occurrence_2` 等后缀，避免覆盖前一轮题目。
 
@@ -198,8 +228,13 @@ OCR 成功后必须形成以下结构：
 
 - 布局解析框不属于视觉修复写回链路，而是独立的 `PaperLayoutCapability`。
 - `PaperLayoutCapability` 只生成只读定位数据：`paperLayout.pages[]`、`paperLayout.regions[]`、`paperLayout.warnings[]`，不会修改 OCR 题目、题图或人工编辑稿。
+- 布局解析框必须和题目识别解耦。题目结构由 OCR Markdown、结构契约和 source evidence 生成；布局框只在题目已经生成后绑定平台 `questionId`。布局解析失败、低置信或关闭时，不得影响题目数量、题干、选项或题图归属。
+- `OCR_PAPER_LAYOUT_ENABLED=false` 时，任务详情返回空 `paperLayout` 和“布局解析框已关闭” warning，导入题目仍正常生成。
 - 坐标源优先使用 MinerU `_middle.json` 的 `pdf_info[].para_blocks`、`discarded_blocks` 和 `page_size`，因为该坐标系与当前试卷页图预览同源；只有缺失 `_middle.json` 时才回退 `content_list`。
 - 能力只输出父题级范围并绑定平台 `questionId`，过滤标题、章节说明、页码等非题目 block；前端点击后仅用于滚动定位右侧校验题卡。
+- middle 图片路径可能嵌套在 `blocks[].lines[].spans[].image_path`，布局能力必须递归提取，避免图片题只框住文字标签。
+- Markdown offset 回贴不得使用 `A/B/C/D` 这类极短选项标签作为可靠锚点，避免下一题公式中的字母把布局框串到错误题目。
+- 当布局匹配只命中小标签、极小框、缺少预期题图或只有图片但缺少题干时，必须降级为不可靠，优先走几何题号锚点兜底；仍不可靠时只返回 warning 或不显示该题框。
 
 ## 公式标准化与 AI 修复
 
@@ -238,6 +273,32 @@ AI 标准化约束：
 - 修复后仍存在严重风险时不得覆盖原题干。
 - 本地公式标准化如果会重新引入严重 LaTeX 风险，必须跳过该轮本地标准化并保留已修好的 AI 候选原文。
 - OCR 主链路默认 `OCR_AUTO_SEMANTIC_REPAIR_MODE=skip`，只记录语义修复候选数量并交给人工校验；如需压测可配置为 `inline` 或 `inline-concurrent`，但低置信、仍有同类风险或缺少证据的修复不得自动写回。
+
+### 首次返回前自动标准化
+
+首次 OCR 导入题目支持在返回给用户前执行一次轻量自动标准化。该流程用于减少明显可修复的低置信问题，但不得替代人工校验，也不得创建 Java AI job。
+
+配置项：
+
+- `OCR_AUTO_STANDARDIZE_MODE=off|risky|all`，默认 `risky`。
+- `OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY`，默认 `2`，取值范围 `1..8`。
+
+`risky` 模式只处理命中以下风险的题目：
+
+- 严重 LaTeX 风险或渲染失败。
+- 重复 Markdown、重复题图引用或图片选项同时出现在题干和选项中。
+- 选择题选项数量异常、选项粘连或题图标签异常。
+- `mathValidation.warningCount > 0`。
+
+自动标准化写回前必须经过硬校验：
+
+- 候选不能增加严重 LaTeX 风险。
+- 候选必须通过渲染校验。
+- 选择题不能丢失原有选项。
+- 候选不能丢失原有题图标签，也不能引用未知题图。
+- 含小问题目不能被候选降级为普通题。
+
+校验失败、模型 fallback、`applyBlocked=true`、空候选或异常时，系统必须保留原题，只在题目和任务摘要中写入 `autoStandardize.status`、`reasons`、`blockReason` 或 `error`。
 
 ## 人工校验工作台
 

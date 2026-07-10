@@ -22,7 +22,6 @@ from app.question_boundary import (
     plan_boundary_chunks,
     validate_structure,
 )
-from app.question_layout import question_image_refs_by_layout
 from app.visual_repair import apply_visual_repairs
 
 def parse_structured_questions_from_v2(content_v2: Any, assets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -135,87 +134,6 @@ def parse_structured_questions_from_v2(content_v2: Any, assets: list[dict[str, A
 def parse_structured_questions(markdown: str, output_dir: Path, assets: list[dict[str, Any]]) -> dict[str, Any]:
     """从 OCR Markdown 和资源目录解析结构化题目。"""
     return parse_structured_questions_legacy(markdown, output_dir, assets)
-
-
-def realign_question_images_from_layout(structured: dict[str, Any], output_dir: Path, assets: list[dict[str, Any]]) -> dict[str, Any]:
-    """用 MinerU bbox 几何顺序重新分配父题题图。"""
-    questions = [question for question in structured.get("questions") or [] if isinstance(question, dict)]
-    if not questions:
-        return {"applied": False, "reason": "no-questions", "changed": 0}
-    image_refs_groups = question_image_refs_by_layout(output_dir, len(questions))
-    if not image_refs_groups:
-        return {"applied": False, "reason": "no-layout-image-groups", "changed": 0}
-
-    changed_count = 0
-    for index, question in enumerate(questions):
-        if index >= len(image_refs_groups):
-            continue
-        image_refs = image_refs_groups[index]
-        next_images = unique_images_from_refs(image_refs, assets)
-        current_images = normalize_question_images(question.get("images") or [])
-        if image_key_list(next_images) == image_key_list(current_images):
-            continue
-        strip_images = normalize_question_images([*current_images, *next_images])
-        for field in ("stemMarkdown", "manualMarkdown"):
-            value = question.get(field)
-            if isinstance(value, str) and strip_images:
-                question[field] = remove_question_image_refs_from_markdown(value, strip_images)
-        question["images"] = next_images
-        ensure_question_images_in_markdown(question)
-        changed_count += 1
-    return {"applied": True, "changed": changed_count}
-
-
-def unique_images_from_refs(image_refs: list[str], assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """将 MinerU 图片路径转成题图对象并去重。"""
-    images: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for image_ref in image_refs:
-        image = image_from_path(image_ref, assets)
-        key = str(image.get("path") or image.get("url") or image.get("name") or "")
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        images.append(image)
-    return normalize_question_images(images)
-
-
-def image_key_list(images: list[dict[str, Any]]) -> list[str]:
-    """返回稳定题图 key 列表。"""
-    return [str(image.get("path") or image.get("url") or image.get("name") or "") for image in normalize_question_images(images)]
-
-
-def remove_question_image_refs_from_markdown(markdown: str, images: list[dict[str, Any]]) -> str:
-    """删除指定题图的 Markdown 引用。"""
-    text = str(markdown or "")
-    normalized_images = normalize_question_images(images)
-    refs: set[str] = set()
-    for index, image in enumerate(normalized_images):
-        label = question_image_label(image, index)
-        if label:
-            refs.add(normalize_image_ref(label))
-            label_number = image_label_number(label)
-            if label_number:
-                refs.add(normalize_image_ref(f"题图{label_number}"))
-                refs.add(normalize_image_ref(f"#{label_number}"))
-        for key in ("path", "url", "name"):
-            value = str(image.get(key) or "").strip()
-            if not value:
-                continue
-            normalized = normalize_asset_path(value)
-            refs.add(normalize_image_ref(value))
-            refs.add(normalize_image_ref(normalized))
-            refs.add(normalize_image_ref(Path(normalized).name))
-
-    def replace_ref(match: re.Match[str]) -> str:
-        src = match.group(1).strip().strip("<>")
-        normalized = normalize_image_ref(src)
-        filename = normalize_image_ref(Path(normalize_asset_path(src)).name)
-        if normalized in refs or filename in refs:
-            return ""
-        return match.group(0)
-
-    return re.sub(r"\n{3,}", "\n\n", MARKDOWN_IMAGE_RE.sub(replace_ref, text)).strip()
 
 
 def parse_structured_questions_legacy(markdown: str, output_dir: Path, assets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -356,7 +274,12 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
                 risk_context=boundary_confidence,
             )
             candidate_structured = build_structure_from_boundaries(markdown, llm_boundaries, assets) if llm_boundaries else {}
-            candidate_validation = validate_structure(candidate_structured, markdown, assets) if candidate_structured.get("questions") else {"valid": False}
+            candidate_validation = validate_structure(
+                candidate_structured,
+                markdown,
+                assets,
+                local_boundaries.get("structureContract"),
+            ) if candidate_structured.get("questions") else {"valid": False}
             if llm_boundaries and not candidate_validation.get("valid"):
                 previous_llm_calls = boundary_splitter.get("llmCalls") if isinstance(boundary_splitter, dict) else []
                 external_boundaries, external_splitter = refine_question_boundaries_in_chunks(
@@ -367,7 +290,12 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
                     force_external=True,
                 )
                 external_structured = build_structure_from_boundaries(markdown, external_boundaries, assets) if external_boundaries else {}
-                external_validation = validate_structure(external_structured, markdown, assets) if external_structured.get("questions") else {"valid": False}
+                external_validation = validate_structure(
+                    external_structured,
+                    markdown,
+                    assets,
+                    local_boundaries.get("structureContract"),
+                ) if external_structured.get("questions") else {"valid": False}
                 if external_boundaries and external_validation.get("valid"):
                     llm_boundaries = external_boundaries
                     boundary_splitter = external_splitter
@@ -400,10 +328,9 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
 
         structured = build_structure_from_boundaries(markdown, boundary_source, assets)
         merge_legacy_images(structured, legacy_structured)
-        layout_image_realign = realign_question_images_from_layout(structured, output_dir, assets)
+        layout_image_realign = {"applied": False, "reason": "layout-read-only", "changed": 0}
         if not structured.get("questions"):
             structured = legacy_structured
-            layout_image_realign = realign_question_images_from_layout(structured, output_dir, assets)
             previous_llm_calls = splitter.get("llmCalls") if isinstance(splitter, dict) else []
             splitter = rule_splitter_metadata("证据边界未生成题目，已回滚旧版规则拆题")
             splitter["llmCalls"] = previous_llm_calls
@@ -439,11 +366,10 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         mark_ocr_flow_step(job, current_step, "running", "正在校验结构证据和题图引用")
         write_job(job)
 
-        structure_validation = validate_structure(structured, markdown, assets)
+        structure_validation = validate_structure(structured, markdown, assets, local_boundaries.get("structureContract"))
         if not structure_validation.get("valid"):
             structured = legacy_structured
-            layout_image_realign = realign_question_images_from_layout(structured, output_dir, assets)
-            fallback_validation = validate_structure(structured, markdown, assets)
+            fallback_validation = validate_structure(structured, markdown, assets, local_boundaries.get("structureContract"))
             structure_validation = {
                 **structure_validation,
                 "fallback": True,

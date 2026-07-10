@@ -1,10 +1,12 @@
 import json
 import shutil
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
 from app.question_layout import (
+    attach_paper_layout,
     build_paper_layout,
     load_layout_items,
     regions_for_items,
@@ -28,6 +30,18 @@ class QuestionLayoutTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.upload_dir, ignore_errors=True)
         shutil.rmtree(self.output_dir, ignore_errors=True)
+
+    def test_attach_paper_layout_returns_empty_layout_when_disabled(self):
+        task = {"id": self.task_id, "paperOcrJobId": self.job_id, "questions": [{"id": "question_a"}]}
+        job = {"jobId": self.job_id, "status": "success", "uploadPath": str(self.paper_path), "outputs": {}}
+
+        with patch.dict("os.environ", {"OCR_PAPER_LAYOUT_ENABLED": "false"}):
+            layout = attach_paper_layout(task, job)
+
+        self.assertEqual([], layout["pages"])
+        self.assertEqual([], layout["regions"])
+        self.assertEqual(["布局解析框已关闭"], layout["warnings"])
+        self.assertEqual(layout, task["paperLayout"])
 
     def test_builds_question_layout_and_binds_question_ids(self):
         markdown = "一、选择题\n1. 第一题题干\n题图\n2. 第二题题干\n"
@@ -160,6 +174,54 @@ class QuestionLayoutTest(unittest.TestCase):
         self.assertEqual(["question_a", "question_b"], [region["questionId"] for region in layout["regions"]])
         self.assertEqual([1, 2], [region["index"] for region in layout["regions"]])
         self.assertGreater(layout["regions"][0]["y"], 0.1)
+
+    def test_question_layout_uses_source_evidence_after_preface_anchors_are_filtered(self):
+        markdown = "考生注意：\n1.本试卷共2题，满分100分；\n2.答题纸另页。\n一、填空题（本大题共有2题）\n1. 第一题题干\n2. 第二题题干\n"
+        q1_start = markdown.index("1. 第一题题干")
+        q2_start = markdown.index("2. 第二题题干")
+        content_list = [
+            {"type": "text", "text": "考生注意：", "bbox": [100, 80, 220, 110], "page_idx": 0},
+            {"type": "text", "text": "1.本试卷共2题，满分100分；", "bbox": [100, 120, 520, 155], "page_idx": 0},
+            {"type": "text", "text": "2.答题纸另页。", "bbox": [100, 165, 360, 195], "page_idx": 0},
+            {"type": "text", "text": "一、填空题（本大题共有2题）", "bbox": [100, 230, 580, 265], "page_idx": 0},
+            {"type": "text", "text": "1. 第一题题干 OCR", "bbox": [120, 320, 520, 360], "page_idx": 0},
+            {"type": "text", "text": "2. 第二题题干 OCR", "bbox": [120, 410, 520, 450], "page_idx": 0},
+        ]
+        (self.output_dir / "paper_content_list.json").write_text(
+            json.dumps(content_list, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        task = {
+            "id": self.task_id,
+            "paperOcrJobId": self.job_id,
+            "questions": [
+                {"id": "question_1", "sourceQuestionId": "ocr_q1", "number": 1},
+                {"id": "question_2", "sourceQuestionId": "ocr_q2", "number": 2},
+            ],
+        }
+        job = {
+            "jobId": self.job_id,
+            "status": "success",
+            "uploadPath": str(self.paper_path),
+            "outputs": {
+                "markdown": markdown,
+                "sections": [
+                    {
+                        "questions": [
+                            {"id": "ocr_q1", "number": 1, "sourceEvidence": {"start": q1_start, "end": q2_start}},
+                            {"id": "ocr_q2", "number": 2, "sourceEvidence": {"start": q2_start, "end": len(markdown)}},
+                        ]
+                    }
+                ],
+            },
+        }
+
+        layout = build_paper_layout(task, job)
+
+        self.assertEqual(2, len(layout["regions"]))
+        self.assertEqual(["question_1", "question_2"], [region["questionId"] for region in layout["regions"]])
+        self.assertEqual([1, 2], [region["index"] for region in layout["regions"]])
+        self.assertGreater(layout["regions"][0]["y"], 0.25)
 
     def test_question_layout_uses_middle_page_size_for_coordinates(self):
         middle = {
@@ -336,7 +398,142 @@ class QuestionLayoutTest(unittest.TestCase):
 
         self.assertEqual(2, len(layout["regions"]))
         self.assertEqual(["question_7", "question_8"], [region["questionId"] for region in layout["regions"]])
-        self.assertEqual([1, 2], [region["index"] for region in layout["regions"]])
+        self.assertEqual([7, 8], [region["index"] for region in layout["regions"]])
+
+    def test_nested_middle_images_and_option_labels_do_not_shift_next_question_region(self):
+        def image_block(index, bbox, image_path):
+            return {
+                "type": "image",
+                "bbox": bbox,
+                "index": index,
+                "blocks": [
+                    {
+                        "type": "image_body",
+                        "bbox": bbox,
+                        "index": index,
+                        "lines": [{"spans": [{"type": "image", "image_path": image_path}]}],
+                    }
+                ],
+            }
+
+        markdown = (
+            "1. 下面四个图中，线段BE是VABC的高的是（）\n\n"
+            "A\n\n![](images/tri_a.jpg)\n\n"
+            "B.\n\n![](images/tri_b.jpg)\n\n"
+            "C.\n\n![](images/tri_c.jpg)\n\n"
+            "D.\n\n![](images/tri_d.jpg)\n\n"
+            "2. 马扎侧面示意图. 若 $\\angle A O B = 8 0 ^ { \\circ }$ ，则 $\\angle A$ 的度数为(）\n\n"
+            "![](images/stool.jpg)"
+        )
+        q2_start = markdown.index("2.")
+        middle = {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [200, 200],
+                    "para_blocks": [
+                        {"type": "text", "bbox": [15, 61, 94, 66], "index": 1, "lines": [{"spans": [{"type": "text", "content": "1. 下面四个图中，线段BE是VABC的高的是（）"}]}]},
+                        {"type": "text", "bbox": [15, 78, 20, 82], "index": 2, "lines": [{"spans": [{"type": "text", "content": "A"}]}]},
+                        image_block(3, [21, 69, 49, 91], "tri_a.jpg"),
+                        {"type": "text", "bbox": [91, 77, 95, 82], "index": 4, "lines": [{"spans": [{"type": "text", "content": "B."}]}]},
+                        image_block(5, [96, 70, 127, 89], "tri_b.jpg"),
+                        {"type": "text", "bbox": [15, 99, 20, 104], "index": 6, "lines": [{"spans": [{"type": "text", "content": "C."}]}]},
+                        image_block(7, [20, 92, 59, 111], "tri_c.jpg"),
+                        {"type": "text", "bbox": [91, 99, 96, 104], "index": 8, "lines": [{"spans": [{"type": "text", "content": "D."}]}]},
+                        image_block(9, [96, 93, 132, 109], "tri_d.jpg"),
+                        {"type": "text", "bbox": [15, 112, 168, 125], "index": 10, "lines": [{"spans": [{"type": "text", "content": "2. 马扎侧面示意图. 若\\angle A O B = 8 0 ^ { \\circ }，则\\angle A的度数为(）"}]}]},
+                        image_block(11, [50, 128, 78, 138], "stool.jpg"),
+                    ],
+                }
+            ],
+        }
+        (self.output_dir / "paper_middle.json").write_text(
+            json.dumps(middle, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        task = {
+            "id": self.task_id,
+            "paperOcrJobId": self.job_id,
+            "questions": [
+                {"id": "question_choice", "sourceQuestionId": "ocr_q1", "images": [{}, {}, {}, {}]},
+                {"id": "question_geometry", "sourceQuestionId": "ocr_q2", "images": [{}]},
+            ],
+        }
+        job = {
+            "jobId": self.job_id,
+            "status": "success",
+            "uploadPath": str(self.paper_path),
+            "outputs": {
+                "markdown": markdown,
+                "sections": [
+                    {
+                        "questions": [
+                            {
+                                "id": "ocr_q1",
+                                "number": "1",
+                                "stemMarkdown": "下面四个图中，线段BE是VABC的高的是（）",
+                                "sourceEvidence": {"start": 0, "end": q2_start},
+                            },
+                            {
+                                "id": "ocr_q2",
+                                "number": "2",
+                                "stemMarkdown": "马扎侧面示意图. 若 $\\angle A O B = 8 0 ^ { \\circ }$ ，则 $\\angle A$ 的度数为(）",
+                                "sourceEvidence": {"start": q2_start, "end": len(markdown)},
+                            },
+                        ]
+                    }
+                ],
+            },
+        }
+
+        layout = build_paper_layout(task, job)
+
+        self.assertEqual(2, len(layout["regions"]))
+        self.assertEqual(["question_choice", "question_geometry"], [region["questionId"] for region in layout["regions"]])
+        self.assertGreater(layout["regions"][0]["w"], 0.55)
+        self.assertGreater(layout["regions"][0]["h"], 0.2)
+        self.assertGreater(layout["regions"][1]["y"], 0.5)
+        self.assertGreater(layout["regions"][1]["w"], 0.7)
+        self.assertGreater(layout["regions"][1]["h"], 0.1)
+
+    def test_question_layout_prefers_original_question_number_for_region_label(self):
+        markdown = "11. 第十一题题干\n12. 第十二题题干\n"
+        content_list = [
+            {"type": "text", "text": "11. 第十一题题干", "bbox": [100, 100, 500, 140], "page_idx": 0},
+            {"type": "text", "text": "12. 第十二题题干", "bbox": [100, 220, 520, 260], "page_idx": 0},
+        ]
+        (self.output_dir / "paper_content_list.json").write_text(
+            json.dumps(content_list, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        task = {
+            "id": self.task_id,
+            "paperOcrJobId": self.job_id,
+            "questions": [
+                {"id": "question_11", "sourceQuestionId": "ocr_q11", "number": 1},
+                {"id": "question_12", "sourceQuestionId": "ocr_q12", "number": 2},
+            ],
+        }
+        job = {
+            "jobId": self.job_id,
+            "status": "success",
+            "uploadPath": str(self.paper_path),
+            "outputs": {
+                "markdown": markdown,
+                "sections": [
+                    {
+                        "questions": [
+                            {"id": "ocr_q11", "number": "11", "sourceEvidence": {"start": 0, "end": markdown.index("12.")}},
+                            {"id": "ocr_q12", "number": "12", "sourceEvidence": {"start": markdown.index("12."), "end": len(markdown)}},
+                        ]
+                    }
+                ],
+            },
+        }
+
+        layout = build_paper_layout(task, job)
+
+        self.assertEqual([11, 12], [region["index"] for region in layout["regions"]])
 
 
 if __name__ == "__main__":

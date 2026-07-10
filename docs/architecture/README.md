@@ -1,6 +1,6 @@
 # 架构图索引与版本治理
 
-本文治理 `docs/architecture` 下的 Mermaid 源图和 SVG 渲染图。当前基准为 2026-07-09 的产品 v14、OpenAPI `1.1.0` 和服务器部署 v14。
+本文治理 `docs/architecture` 下的 Mermaid 源图和 SVG 渲染图。当前基准为 2026-07-10 的产品 v15、OpenAPI `1.1.0` 和服务器部署 v15。
 
 补充结构评审文档：
 
@@ -10,10 +10,10 @@
 
 | 图 | 状态 | 维护用途 | 当前结论 |
 | --- | --- | --- | --- |
-| `ocr-flow.mmd` / `ocr-flow.svg` | current-primary | OCR-Flow 端到端主链路，包含拆题、LLM 路由、重扫、AI 辅助、布局解析框和人工校验 | 保留为 OCR 算法和导入主流程的权威图 |
-| `import-ocr-workbench-flow.mmd` / `import-ocr-workbench-flow.svg` | current-primary | 导入工作台产品流程，包含任务创建、轮询、重扫、布局解析框、AI 解析全部、人工保存和入库 | 保留为前端/产品视角，不再扩展底层 OCR 算法细节 |
+| `ocr-flow.mmd` / `ocr-flow.svg` | current-primary | OCR-Flow 端到端主链路，包含结构契约、拆题、LLM 路由、首次返回前自动标准化、重扫、AI 辅助、布局解析框解耦和人工校验 | 保留为 OCR 算法和导入主流程的权威图 |
+| `import-ocr-workbench-flow.mmd` / `import-ocr-workbench-flow.svg` | current-primary | 导入工作台产品流程，包含任务创建、轮询、结构契约、自动标准化、布局解析框只读定位、重扫、AI 解析全部、人工保存和入库 | 保留为前端/产品视角，不再扩展底层 OCR 算法细节 |
 | `platform-openapi-sdk-overview.mmd` / `platform-openapi-sdk-overview.svg` | current-primary | 平台集成、OpenAPI、SDK、能力边界 | 保留为 SDK/TOGO 移交主图 |
-| `server-ocr-flow.mmd` / `server-ocr-flow.svg` | current-support | 服务器部署、GPU0/GPU1、常驻 MinerU API、外部模型边界 | 保留为服务器运维图，不放入通用平台部署前置要求 |
+| `server-ocr-flow.mmd` / `server-ocr-flow.svg` | current-support | 服务器部署、GPU0/GPU1、常驻 MinerU API、自动标准化并发、布局解析框开关、外部模型边界 | 保留为服务器运维图，不放入通用平台部署前置要求 |
 | `engine-boundary.mmd` / `engine-boundary.svg` | current-support | question-engine、平台、local-platform、Python worker 的职责边界 | 保留为模块边界总览 |
 | `local-platform-overview.mmd` / `local-platform-overview.svg` | current-support | local-platform 作为本地演示壳的模块关系 | 保留，但不得作为公司平台生产架构依据 |
 | `java-transition-flow.mmd` / `java-transition-flow.svg` | historical-reference | 从旧原型/legacy worker 迁移到 Java 主后端的历史参考 | 不再作为当前运行主图扩展；后续可移动到 archive |

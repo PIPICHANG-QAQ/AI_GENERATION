@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app import worker_base
 from app.import_services import (
+    auto_standardize_import_questions,
     build_import_questions,
     clear_standardize_cache,
     detect_severe_latex_issues,
@@ -15,6 +16,7 @@ from app.import_services import (
     top_level_ocr_questions,
     update_import_question_from_payload,
 )
+from app.question_markdown import ensure_question_images_in_markdown
 from app.worker_base import ImportQuestionPayload
 
 
@@ -343,6 +345,100 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual([1, 2], [item["number"] for item in questions])
         self.assertEqual(["q_1", "q_1__occurrence_2"], [item["sourceQuestionId"] for item in questions])
 
+    def test_build_import_questions_keeps_choice_option_images_out_of_stem(self):
+        task = {"stage": "初中", "subject": "数学", "grade": "七年级", "title": "测试卷"}
+        images = [
+            {"name": "a.jpg", "path": "images/a.jpg", "url": "/files/a.jpg"},
+            {"name": "b.jpg", "path": "images/b.jpg", "url": "/files/b.jpg"},
+            {"name": "c.jpg", "path": "images/c.jpg", "url": "/files/c.jpg"},
+            {"name": "d.jpg", "path": "images/d.jpg", "url": "/files/d.jpg"},
+        ]
+        outputs = {
+            "sections": [
+                {
+                    "id": "section_1",
+                    "questions": [
+                        {
+                            "id": "q_3",
+                            "number": 3,
+                            "type": "choice",
+                            "stemMarkdown": "下面四个图中，线段 BE 是高的是（ ）",
+                            "images": images,
+                            "options": [
+                                {"label": "A", "content": "![](images/a.jpg)"},
+                                {"label": "B", "content": "![](images/b.jpg)"},
+                                {"label": "C", "content": "![](images/c.jpg)"},
+                                {"label": "D", "content": "![](images/d.jpg)"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with patch.dict("os.environ", {"ENABLE_IMPORT_SYNC_AI_ENRICH": "false"}):
+            questions = build_import_questions(task, outputs, "")
+
+        question = questions[0]
+        self.assertEqual(4, len(question["images"]))
+        self.assertNotIn("![]", question["stemMarkdown"])
+        self.assertEqual(["![](图1)", "![](图2)", "![](图3)", "![](图4)"], [option["content"] for option in question["options"]])
+
+    def test_build_import_questions_drops_unreferenced_choice_images_without_image_cue(self):
+        task = {"stage": "初中", "subject": "数学", "grade": "七年级", "title": "测试卷"}
+        outputs = {
+            "sections": [
+                {
+                    "id": "section_1",
+                    "questions": [
+                        {
+                            "id": "q_2",
+                            "number": 2,
+                            "type": "choice",
+                            "stemMarkdown": "0.0000025 用科学记数法表示为（ ）",
+                            "images": [
+                                {"name": "a.jpg", "path": "images/a.jpg", "url": "/files/a.jpg"},
+                                {"name": "b.jpg", "path": "images/b.jpg", "url": "/files/b.jpg"},
+                            ],
+                            "options": [
+                                {"label": "A", "content": "$2.5\\times10^{-6}$"},
+                                {"label": "B", "content": "$2.5\\times10^{6}$"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with patch.dict("os.environ", {"ENABLE_IMPORT_SYNC_AI_ENRICH": "false"}):
+            questions = build_import_questions(task, outputs, "")
+
+        self.assertEqual([], questions[0]["images"])
+        self.assertNotIn("![]", questions[0]["stemMarkdown"])
+
+    def test_ensure_question_images_removes_previously_appended_unreferenced_choice_images(self):
+        question = {
+            "id": "q2",
+            "type": "choice",
+            "stemMarkdown": "0.0000025 用科学记数法表示为（ ）\n\n![](图1)\n\n![](图2)",
+            "manualMarkdown": "0.0000025 用科学记数法表示为（ ）\n\n![](图1)\n\n![](图2)",
+            "images": [
+                {"label": "图1", "name": "a.jpg", "path": "images/a.jpg", "url": "/files/a.jpg"},
+                {"label": "图2", "name": "b.jpg", "path": "images/b.jpg", "url": "/files/b.jpg"},
+            ],
+            "options": [
+                {"label": "A", "content": "$2.5\\times10^{-6}$"},
+                {"label": "B", "content": "$2.5\\times10^{6}$"},
+            ],
+        }
+
+        changed = ensure_question_images_in_markdown(question)
+
+        self.assertTrue(changed)
+        self.assertEqual([], question["images"])
+        self.assertNotIn("![]", question["stemMarkdown"])
+        self.assertNotIn("![]", question["manualMarkdown"])
+
     def test_build_import_questions_persists_sub_question_solutions(self):
         task = {"stage": "初中", "subject": "数学", "grade": "九年级", "title": "测试卷"}
         outputs = {
@@ -387,6 +483,106 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual("", questions[0]["analysis"])
         self.assertEqual(2, len(questions[0]["subQuestions"]))
         self.assertEqual("代入计算。", questions[0]["subQuestions"][0]["analysis"])
+
+    def test_build_import_questions_auto_standardizes_risky_questions_with_concurrency(self):
+        task = {"stage": "初中", "subject": "数学", "grade": "七年级", "title": "测试卷"}
+        outputs = {
+            "markdown": "1. 第一题\n2. 第二题",
+            "sections": [
+                {
+                    "id": "section_1",
+                    "questions": [
+                        {
+                            "id": "q_1",
+                            "number": 1,
+                            "type": "choice",
+                            "stemMarkdown": "第一题（ ）",
+                            "options": [{"label": "A", "content": "甲"}],
+                        },
+                        {
+                            "id": "q_2",
+                            "number": 2,
+                            "type": "choice",
+                            "stemMarkdown": "第二题（ ）",
+                            "options": [{"label": "A", "content": "丙"}],
+                        },
+                    ],
+                }
+            ],
+        }
+
+        def standardize(markdown, **_kwargs):
+            if "第一题" in markdown:
+                return (
+                    "第一题（ ）\n\n\\begin{tasks}(2)\n\\task 甲\n\\task 乙\n\\end{tasks}",
+                    {"source": "ai", "provider": "mock", "model": "mock", "error": None, "warnings": [], "confidence": "high"},
+                )
+            return (
+                "第二题（ ）\n\n\\begin{tasks}(2)\n\\task 丙\n\\task 丁\n\\end{tasks}",
+                {"source": "ai", "provider": "mock", "model": "mock", "error": None, "warnings": [], "confidence": "high"},
+            )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ENABLE_IMPORT_SYNC_AI_ENRICH": "false",
+                "OCR_AUTO_STANDARDIZE_MODE": "risky",
+                "OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY": "2",
+                "DASHSCOPE_API_KEY": "key",
+            },
+        ):
+            with patch("app.import_services.standardize_markdown_with_llm", side_effect=standardize) as standardize_llm:
+                questions = build_import_questions(task, outputs, "")
+
+        self.assertEqual(2, standardize_llm.call_count)
+        self.assertEqual(2, task["autoStandardize"]["appliedCount"])
+        self.assertEqual(["A", "B"], [option["label"] for option in questions[0]["options"]])
+        self.assertEqual(["甲", "乙"], [option["content"] for option in questions[0]["options"]])
+        self.assertEqual("applied", questions[0]["autoStandardize"]["status"])
+        self.assertIn("choice-option-count-low", questions[0]["autoStandardize"]["reasons"])
+
+    def test_auto_standardize_blocks_candidate_that_drops_required_images(self):
+        question = {
+            "id": "q1",
+            "number": 1,
+            "type": "choice",
+            "stemMarkdown": "选择正确图片。",
+            "manualMarkdown": "选择正确图片。",
+            "images": [{"label": "图1", "name": "a.jpg", "path": "images/a.jpg", "url": "/files/a.jpg"}],
+            "options": [{"label": "A", "content": "![](图1)"}],
+        }
+        before_options = list(question["options"])
+
+        with patch.dict("os.environ", {"OCR_AUTO_STANDARDIZE_MODE": "all", "DASHSCOPE_API_KEY": "key"}):
+            with patch(
+                "app.import_services.standardize_markdown_ai_response",
+                return_value={
+                    "markdown": "选择正确图片。\n\nA. 文字选项",
+                    "standardizer": {"source": "ai", "error": None, "applyBlocked": False, "warnings": [], "confidence": "medium"},
+                },
+            ):
+                summary = auto_standardize_import_questions([question], {}, {"markdown": "1. 选择正确图片"})
+
+        self.assertEqual(0, summary["appliedCount"])
+        self.assertEqual(before_options, question["options"])
+        self.assertEqual("blocked", question["autoStandardize"]["status"])
+        self.assertIn("candidate-dropped-images:图1", question["autoStandardize"]["validation"]["errors"])
+
+    def test_auto_standardize_off_mode_does_not_call_llm(self):
+        question = {
+            "id": "q1",
+            "number": 1,
+            "type": "choice",
+            "stemMarkdown": "第一题（ ）",
+            "options": [{"label": "A", "content": "甲"}],
+        }
+
+        with patch.dict("os.environ", {"OCR_AUTO_STANDARDIZE_MODE": "off"}):
+            with patch("app.import_services.standardize_markdown_ai_response") as standardize:
+                summary = auto_standardize_import_questions([question], {}, {"markdown": "1. 第一题"})
+
+        standardize.assert_not_called()
+        self.assertFalse(summary["enabled"])
 
     def test_normalize_sub_questions_merges_enriched_solution_by_label(self):
         sub_questions = normalize_sub_questions(

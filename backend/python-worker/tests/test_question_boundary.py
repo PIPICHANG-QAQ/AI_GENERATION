@@ -4,6 +4,7 @@ from app.question_boundary import (
     build_structure_from_boundaries,
     detect_local_boundaries,
     evaluate_boundary_confidence,
+    extract_paper_structure_contract,
     plan_boundary_chunks,
     validate_structure,
 )
@@ -365,6 +366,145 @@ B. 乙
         self.assertEqual("choice", question["type"])
         self.assertIn("下列说法", question["stemMarkdown"])
         self.assertNotIn("一、选择题", question["stemMarkdown"])
+
+    def test_paper_contract_filters_numbered_exam_preface(self):
+        markdown = """# 高二数学试卷
+考生注意：
+1.本试卷共3题，满分150分，考试时间120分钟；
+2.本试卷包括试题卷和答题纸两部分。
+
+一、填空题（本大题共有2题，满分8分）
+1. 第一题题干
+2. 第二题题干
+
+二、解答题（本大题共有1题，满分10分）
+3. 第三题题干
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        validation = validate_structure(structured, markdown, [])
+
+        self.assertEqual(3, boundaries["structureContract"]["totalQuestionCount"])
+        self.assertEqual([1, 2, 3], [question["number"] for question in boundaries["questions"]])
+        self.assertTrue(any(not item["accepted"] and "before-first-section" in item["reasons"] for item in boundaries["anchorCandidates"]))
+        self.assertTrue(validation["valid"], validation)
+
+    def test_contract_infers_explicit_section_question_ranges(self):
+        markdown = """二、选择题（本大题共有4题，满分18分，第13\\~14题每题4分，第15\\~16题每题5分）
+13. 第一题
+14. 第二题
+15. 第三题
+16. 第四题
+"""
+
+        contract = extract_paper_structure_contract(markdown)
+        section = contract["sections"][0]
+
+        self.assertEqual(13, section["rangeStart"])
+        self.assertEqual(16, section["rangeEnd"])
+        self.assertEqual(4, section["declaredCount"])
+
+    def test_single_section_declared_count_allows_partial_page_prefix(self):
+        markdown = """一、选择题（本大题共10个小题，每小题3分）
+1. 第一题
+2. 第二题
+3. 第三题
+4. 第四题
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        validation = validate_structure(structured, markdown, [], boundaries["structureContract"])
+
+        self.assertEqual(10, boundaries["structureContract"]["totalQuestionCount"])
+        self.assertTrue(validation["valid"], validation)
+        self.assertTrue(any("局部页面" in warning for warning in validation["warnings"]))
+
+    def test_detects_glued_next_question_number_inside_line(self):
+        markdown = """一、填空题（本大题共有2题，第11\\~12题每题5分）
+11. 已知数列，求最大值.12. 已知双曲线，求距离
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+
+        self.assertEqual([11, 12], [question["number"] for question in boundaries["questions"]])
+        self.assertEqual([11, 12], [question["number"] for question in structured["questions"]])
+        self.assertTrue(structured["questions"][1]["sourceEvidence"]["start"] > structured["questions"][0]["sourceEvidence"]["start"])
+        self.assertIn("已知双曲线", structured["questions"][1]["stemMarkdown"])
+
+    def test_inline_question_number_does_not_split_image_filename(self):
+        markdown = """一、选择题（本大题共10个小题，每小题3分）
+1. 第一题（）
+![](images/a4.jpg)
+2. 第二题（）
+3. 第三题（）
+A
+![](images/option4.jpg)
+B.
+![](images/option5.jpg)
+4. 第四题（）
+![](images/q4.png)
+"""
+        assets = [
+            {"name": "a4.jpg", "path": "images/a4.jpg", "url": "/a4.jpg"},
+            {"name": "option4.jpg", "path": "images/option4.jpg", "url": "/option4.jpg"},
+            {"name": "option5.jpg", "path": "images/option5.jpg", "url": "/option5.jpg"},
+            {"name": "q4.png", "path": "images/q4.png", "url": "/q4.png"},
+        ]
+
+        boundaries = detect_local_boundaries(markdown, assets)
+        structured = build_structure_from_boundaries(markdown, boundaries, assets)
+
+        self.assertEqual([1, 2, 3, 4], [question["number"] for question in boundaries["questions"]])
+        self.assertEqual([1, 2, 3, 4], [question["number"] for question in structured["questions"]])
+        self.assertNotIn("jpg)", structured["questions"][2]["stemMarkdown"])
+        self.assertEqual(["images/option4.jpg", "images/option5.jpg"], [image["path"] for image in structured["questions"][2]["images"]])
+        self.assertIn("第四题", structured["questions"][3]["stemMarkdown"])
+
+    def test_structure_validation_rejects_question_evidence_starting_mid_formula(self):
+        markdown = """一、填空题（本大题共有2题，第11\\~12题每题5分）
+11. 已知数列，求最大值.12. 已知双曲线 $x^2/144-y^2/25=1$，求距离
+"""
+        contract = extract_paper_structure_contract(markdown)
+        bad_boundaries = {
+            "structureContract": contract,
+            "sections": [
+                {"id": "section_1", "title": contract["sections"][0]["title"], "type": "fill_blank", "start": 0, "end": len(markdown)}
+            ],
+            "questions": [
+                {"id": "q_11", "number": 11, "type": "fill_blank", "sectionId": "section_1", "start": markdown.index("11."), "end": markdown.index("144")},
+                {"id": "q_12", "number": 12, "type": "fill_blank", "sectionId": "section_1", "start": markdown.index("144"), "end": len(markdown)},
+            ],
+        }
+
+        structured = build_structure_from_boundaries(markdown, bad_boundaries, [])
+        validation = validate_structure(structured, markdown, [], contract)
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any("题号 12" in error for error in validation["errors"]))
+
+    def test_structure_validation_rejects_question_evidence_starting_at_image_extension(self):
+        markdown = """一、选择题
+3. 第三题
+![](images/abc4.jpg)
+4. 第四题
+"""
+        bad_start = markdown.index("4.jpg")
+        bad_boundaries = {
+            "sections": [{"id": "section_1", "title": "一、选择题", "type": "choice", "start": 0, "end": len(markdown)}],
+            "questions": [
+                {"id": "q_3", "number": 3, "type": "choice", "sectionId": "section_1", "start": markdown.index("3."), "end": bad_start},
+                {"id": "q_4", "number": 4, "type": "choice", "sectionId": "section_1", "start": bad_start, "end": len(markdown)},
+            ],
+        }
+
+        structured = build_structure_from_boundaries(markdown, bad_boundaries, [])
+        validation = validate_structure(structured, markdown, [])
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any("题号 4" in error for error in validation["errors"]))
 
     def test_choice_question_circled_statement_numbers_are_not_sub_questions(self):
         markdown = """一、选择题

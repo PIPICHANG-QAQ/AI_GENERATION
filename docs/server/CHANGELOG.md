@@ -2,6 +2,25 @@
 
 本文件只记录服务器部署相关变更。项目通用功能变更继续记录在 `docs/CHANGELOG.md`。
 
+## 2026-07-10
+
+### OCR v15 结构契约、自动标准化和布局解耦
+
+- 服务器已重新构建 `ai_generation_docker-question-engine-1`，当前镜像包含结构契约拆题、题号候选评分、首次返回前低置信自动标准化和布局框只读解耦。
+- `.env` 当前启用：
+
+```text
+OCR_PAPER_LAYOUT_ENABLED=true
+OCR_AUTO_STANDARDIZE_MODE=risky
+OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY=2
+```
+
+- `OCR_AUTO_STANDARDIZE_MODE=risky` 只处理严重 LaTeX、渲染失败、重复 Markdown、图片/选项异常等低置信题；不创建 Java AI job，候选通过渲染、选项、题图、小问和严重风险硬校验后才写回。
+- `PaperLayoutCapability` 已确认只做只读定位，不参与题目拆分、题图归属写回或人工编辑稿生成；布局框异常时可把 `OCR_PAPER_LAYOUT_ENABLED=false` 作为快速降级，不影响题目识别能力。
+- 布局框绑定已修复 MinerU `_middle.json` 嵌套图片路径识别，并跳过 `A/B/C/D` 短选项标签作为 Markdown offset 锚点；只命中小标签、极小框、缺题图或 image-only 缺题干时会降级到几何兜底或 warning。
+- 本地验证：Python worker 全量测试 `87 passed`；截图对应 4 题样本回放后，第 3 题覆盖完整图片选项，第 4 题覆盖题干和题图。
+- 服务器验证：容器重建后 `GET /api/java/health` 返回 `success=true`，Docker health 为 `healthy`，客户体验地址仍为 `http://120.211.112.121:5173/`。
+
 ## 2026-07-09
 
 ### AI 解析全部进度反馈

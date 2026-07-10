@@ -27,12 +27,39 @@ export interface QuestionOption {
   raw?: unknown;
 }
 
+function encodeUrlPath(value: string): string {
+  const [pathWithQuery, hash = ""] = value.split("#", 2);
+  const [path, query = ""] = pathWithQuery.split("?", 2);
+  const encodedPath = path
+    .split("/")
+    .map((segment) => {
+      try {
+        return encodeURIComponent(decodeURIComponent(segment));
+      } catch {
+        return encodeURIComponent(segment);
+      }
+    })
+    .join("/");
+  return `${encodedPath}${query ? `?${query}` : ""}${hash ? `#${encodeURIComponent(hash)}` : ""}`;
+}
+
+function encodeBrowserUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.pathname = encodeUrlPath(url.pathname);
+    return url.toString();
+  } catch {
+    return encodeUrlPath(value);
+  }
+}
+
 export function questionImageSrc(value?: string | null): string {
   const src = String(value || "").trim();
   if (!src) return "";
-  if (/^(https?:|data:|blob:)/i.test(src)) return src;
-  if (src.startsWith("/api/")) return apiUrl(src);
-  return src;
+  if (/^(data:|blob:)/i.test(src)) return src;
+  if (/^https?:/i.test(src)) return encodeBrowserUrl(src);
+  if (src.startsWith("/api/")) return apiUrl(encodeUrlPath(src));
+  return encodeBrowserUrl(src);
 }
 
 export function getImageKey(img: QuestionImage): string {
