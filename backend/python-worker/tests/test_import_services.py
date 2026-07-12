@@ -159,6 +159,49 @@ class ImportServicesTest(unittest.TestCase):
         self.assertNotIn(r"\displaystyle$", result["markdown"])
         self.assertEqual([], detect_severe_latex_issues(result["markdown"]))
 
+    def test_clean_structured_choice_uses_same_rules_fast_path_for_single_and_global(self):
+        markdown = r"""已知 $2+3=$（ ）
+
+\begin{tasks}(4)
+\task 4
+\task 5
+\task 6
+\task 7
+\end{tasks}"""
+        hints = {
+            "type": "choice",
+            "answer": "B",
+            "analysis": "直接计算。",
+            "options": [
+                {"label": "A", "content": "4"},
+                {"label": "B", "content": "5"},
+                {"label": "C", "content": "6"},
+                {"label": "D", "content": "7"},
+            ],
+        }
+
+        with patch("app.import_services.standardize_markdown_with_llm") as standardize:
+            single = standardize_markdown_ai_response(
+                markdown,
+                structured_hints=hints,
+                request_source="single",
+            )
+            global_result = standardize_markdown_ai_response(
+                markdown,
+                structured_hints=hints,
+                request_source="global",
+            )
+
+        standardize.assert_not_called()
+        for result in (single, global_result):
+            self.assertEqual("rules", result["executionPath"])
+            self.assertFalse(result["modelInvoked"])
+            self.assertEqual(0, result["providerCallAttempts"])
+            self.assertEqual("safe_to_apply", result["applyRecommendation"])
+            self.assertEqual(4, result["resultStructure"]["optionCount"])
+            self.assertEqual("B", result["answer"])
+            self.assertEqual("直接计算。", result["analysis"])
+
     def test_standardize_uses_clean_raw_ocr_candidate_before_llm(self):
         self.assertEqual([], detect_severe_latex_issues(CLEAN_OCR_MARKDOWN))
         self.assertIn("存在连续 4 个及以上 $", "\n".join(detect_severe_latex_issues(SEVERELY_DAMAGED_MANUAL_MARKDOWN)))
@@ -288,7 +331,8 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual(0, result["providerCallAttempts"])
 
     def test_standardize_preserves_original_choice_image_options_when_llm_drops_them(self):
-        markdown = r"""如图所示的几何体是由 6 个小正方体搭成，它的左视图是（ ）
+        markdown = r"""如图所示的几何体是由 6 个小正方体搭成，它的左视图是（ ）$
+\begin{array}{l}x
 
 \begin{tasks}(4)
 \task ![](图2)
@@ -331,7 +375,8 @@ class ImportServicesTest(unittest.TestCase):
         self.assertIn("已保留原 OCR 选项结构", " ".join(result["standardizer"]["warnings"]))
 
     def test_standardize_blocks_same_count_options_when_image_refs_are_removed(self):
-        markdown = r"""题干
+        markdown = r"""题干 $
+\begin{array}{l}x
 
 \begin{tasks}(2)
 \task ![](图1)

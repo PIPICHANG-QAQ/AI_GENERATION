@@ -1047,6 +1047,48 @@ def standardize_markdown_ai_response(
                     "applyBlocked": not render_validation["valid"],
                 },
             }, structured_hints, "rules", pipeline_version=pipeline_version, input_hash=input_hash)
+    stable_options = normalized_choice_hint_options(structured_hints)
+    if len(stable_options) >= 2 and not severe_issues:
+        local_candidate, duplicate_corrections = collapse_adjacent_duplicate_markdown(
+            normalize_tasks_environment(repaired_markdown)
+        )
+        local_result, local_warnings = safe_normalize_standardize_candidate(local_candidate)
+        candidate_severe_issues = detect_severe_latex_issues(local_result["markdown"])
+        render_validation = render_validate_markdown_candidate(local_result["markdown"])
+        if not candidate_severe_issues and not local_result.get("issues") and render_validation["valid"]:
+            hints = structured_hints if isinstance(structured_hints, dict) else {}
+            return finalize_standardize_response({
+                "markdown": local_result["markdown"],
+                "answer": str(hints.get("answer") or ""),
+                "analysis": str(hints.get("analysis") or ""),
+                "options": copy.deepcopy(hints.get("options") or []),
+                "images": copy.deepcopy(hints.get("images") or []),
+                "imagePlacements": copy.deepcopy(hints.get("imagePlacements") or []),
+                "subQuestions": copy.deepcopy(hints.get("subQuestions") or hints.get("children") or []),
+                "standardizer": {
+                    "source": "rules",
+                    "provider": llm_config["provider"],
+                    "model": llm_config["model"],
+                    "error": None,
+                    "warnings": [*delimiter_warnings, *local_warnings],
+                    "confidence": "high",
+                    "status": local_result["status"],
+                    "changed": local_result["markdown"] != markdown,
+                    "fixes": [
+                        *local_result["fixes"],
+                        *[item["reason"] for item in duplicate_corrections],
+                    ],
+                    "issues": local_result["issues"],
+                    "severeIssues": severe_issues,
+                    "candidateSevereIssues": candidate_severe_issues,
+                    "rawOcrContextUsed": bool(raw_context),
+                    "rawOcrFallbackUsed": False,
+                    "latexDelimiterRepaired": False,
+                    "corrections": duplicate_corrections,
+                    "renderValidation": render_validation,
+                    "applyBlocked": False,
+                },
+            }, structured_hints, "rules", pipeline_version=pipeline_version, input_hash=input_hash)
     if severe_issues and raw_context:
         raw_candidate_severe_issues = detect_severe_latex_issues(raw_context)
         if len(raw_candidate_severe_issues) < len(severe_issues):
