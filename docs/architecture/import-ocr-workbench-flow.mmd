@@ -31,11 +31,12 @@ flowchart TD
   BoundaryValidate["本地结构校验<br/>选项、小问、题图路径和证据回溯"]:::mixed
   BoundaryFallback["本地边界兜底<br/>模型未配置、超时、JSON 非法或校验失败"]:::local
   BoundarySource["确定结构边界源<br/>AI merged 或 local fallback"]:::mixed
+  VisualRepairPreload["视觉修复只读预处理<br/>边界确认期间加载 bbox 索引和有限页图像"]:::local
 
   BuildStructure["question-structure-build<br/>按 OCR 原文切片生成题目结构"]:::local
   SubQuestionSplit["sub-question-split<br/>大题内小问写入 subQuestions/children"]:::local
   ChoiceBlankProtect["选择题/空位题结构保护<br/>选项边界、____ 占位、题图回收"]:::mixed
-  VisualRepair["visual-repair<br/>题目 crop、横线检测、可选 Pix2Text"]:::mixed
+  VisualRepair["visual-repair<br/>边界确认后执行<br/>题目级并发 crop/横线/Pix2Text<br/>按原题顺序合并"]:::mixed
   MathNormalize["本地公式标准化与校验<br/>math_normalizer.py 多轮修复与风险标记"]:::local
   LatexDelimiter["确定性 LaTeX 分隔符修复<br/>展示公式嵌套 $ / 行内公式被运算符切断"]:::mixed
   AutoSemanticMode{"OCR_AUTO_SEMANTIC_REPAIR_MODE"}:::mixed
@@ -93,11 +94,13 @@ flowchart TD
   AnswerOcr --> Collect
   Poll --> Collect
   Collect --> ImageLibrary --> StructureContract --> LocalBoundary --> AnchorCandidate --> BoundaryConfidence --> BoundaryHigh
+  BoundaryConfidence --> VisualRepairPreload
   BoundaryHigh -- "是" --> BoundarySkip --> BoundarySource
   BoundaryHigh -- "否" --> LlmBoundary --> BoundaryValidate
   BoundaryValidate -- "通过" --> BoundarySource
   BoundaryValidate -- "失败 / 不可用" --> BoundaryFallback --> BoundarySource
   BoundarySource --> BuildStructure --> SubQuestionSplit --> ChoiceBlankProtect --> VisualRepair --> MathNormalize
+  VisualRepairPreload -- "只读上下文" --> VisualRepair
   MathNormalize --> LatexDelimiter --> AutoSemanticMode
   AutoSemanticMode -- "skip" --> AutoSemanticSkip --> MetadataFlow
   AutoSemanticMode -- "inline / inline-concurrent" --> SemanticApi --> MathNormalize

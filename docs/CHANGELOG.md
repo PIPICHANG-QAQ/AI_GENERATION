@@ -1,5 +1,12 @@
 # 变更记录
 
+## 2026-07-12
+
+- OCR 视觉修复改为节点内有界并发：`visual-repair` 仍排在 AI 边界确认和结构构建之后，内部按题目并发执行 crop、横线检测和可选 Pix2Text，结果按原始题目顺序统一合并，避免视觉修复影响题目边界识别。
+- 新增视觉修复只读预处理：进入 `llm-boundary-refine` 前异步加载 content_list/middle.json、题号 bbox 索引和有限页图像缓存，真正写回题目仍等待边界确认完成后执行。
+- 新增配置 `OCR_VISUAL_REPAIR_MAX_CONCURRENCY`、`OCR_VISUAL_REPAIR_PRELOAD_ENABLED`、`OCR_VISUAL_REPAIR_PRELOAD_MAX_PAGES`；同步更新 README、运维指南、技术设计和 OCR-Flow 流程图。
+- 回归测试补充：覆盖视觉修复并发合并顺序、预加载页图缓存、Pix2Text 兜底和横线检测；Python worker 全量测试 97 个用例通过。
+
 ## 2026-07-10
 
 - 修复人工校验预览态选择题选项重复渲染：当题干源码已经包含 `tasks` 选项块时，`MarkdownRenderer` 不再额外渲染结构化 `options`，避免标准化保存后预览页出现两组 A-D 题图选项。

@@ -32,7 +32,8 @@ flowchart TD
   LlmRoutePolicy["LLM 路由策略<br/>本地：LLM_ROUTER_MODE=external<br/>服务器：LLM_ROUTER_MODE=hybrid"]:::mixed
   LocalAuxModel["服务器本地模型<br/>aux-qwen3-32b-fp8 on GPU1<br/>小问/标准化等低风险结构任务"]:::gpu
   ExternalFullModel["外部满血模型<br/>deepseek-v4-pro<br/>复杂推理/高风险兜底/AI 解析"]:::external
-  LlmBoundary["llm-boundary-refine<br/>只确认 start/end、label、path<br/>禁止生成正文"]:::mixed
+  VisualRepairPreload["视觉修复只读预处理<br/>边界确认期间并行加载 bbox 索引和有限页图像"]:::local
+  LlmBoundary["llm-boundary-refine<br/>按 chunk 并发确认边界<br/>只确认 start/end、label、path<br/>禁止生成正文"]:::mixed
   ChunkFallback["失败分片回退本地边界<br/>记录 warnings 和 llmCalls[].status"]:::mixed
   MergeBoundary["合并分片边界<br/>保留绝对 offset 和图片归属"]:::mixed
   BoundaryValidate{"AI 边界能否证据回溯？"}:::mixed
@@ -43,7 +44,7 @@ flowchart TD
   ImageCanonical["题图引用标签化<br/>原始路径 / API URL / 文件名 / 换行图片语法 -> ![](图N)<br/>选项图保留在 options；无可靠位置才追加题干并写 warning"]:::local
   SubSplit["sub-question-split<br/>大题内小问写入 subQuestions/children"]:::local
   ChoiceBlankProtect["choice-blank-structure-protect<br/>选项边界、____ 占位、题图回收"]:::mixed
-  VisualRepair["visual-repair<br/>题目 crop、横线检测、可选 Pix2Text"]:::mixed
+  VisualRepair["visual-repair<br/>边界确认后执行<br/>题目级并发 crop/横线/Pix2Text<br/>按原题顺序合并"]:::mixed
   StructureValidate{"structure-validate<br/>结构契约、题号范围、evidence 起点、选项、小问、题图和证据回溯是否通过？"}:::mixed
   RuleFallback["旧版规则拆题兜底<br/>结构校验失败时使用"]:::local
 
@@ -120,6 +121,7 @@ flowchart TD
   Provider --> OcrPaper --> Collect
   Provider --> OcrAnswer --> Collect
   Collect --> ImageLibrary --> StructureContract --> LocalBoundary --> AnchorScore --> BoundaryConfidence --> BoundaryHigh
+  BoundaryConfidence --> VisualRepairPreload
   BoundaryHigh -- "是" --> BoundarySkip --> BoundarySource
   BoundaryHigh -- "否" --> LlmAvailable
   LlmAvailable -- "不可用" --> BoundaryLocalFallback --> BoundarySource
@@ -132,6 +134,7 @@ flowchart TD
   BoundaryValidate -- "失败" --> BoundaryLocalFallback
   BoundarySource --> BuildByEvidence
   BuildByEvidence --> ImageCanonical --> SubSplit --> ChoiceBlankProtect --> VisualRepair --> StructureValidate
+  VisualRepairPreload -- "只读上下文" --> VisualRepair
   StructureValidate -- "通过" --> MathNormalize
   StructureValidate -- "失败" --> RuleFallback --> MathNormalize
   MathNormalize --> LatexDelimiter --> AutoRepairMode

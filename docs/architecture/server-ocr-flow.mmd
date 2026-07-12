@@ -29,14 +29,15 @@ flowchart TD
   Confidence{"boundaryConfidence<br/>本地边界是否高置信？"}:::hybrid
   SkipBoundaryLlm["跳过 llm-boundary-refine<br/>splitter.source=local-boundary"]:::local
 
-  BoundaryRoute["llm-boundary-refine AI 边界确认<br/>默认外部满血模型<br/>只确认边界，不生成题干正文"]:::external
+  VisualRepairPreload["视觉修复只读预处理<br/>AI 边界确认期间加载 bbox 索引和有限页图像"]:::local
+  BoundaryRoute["llm-boundary-refine AI 边界确认<br/>chunk 并发，默认外部满血模型<br/>只确认边界，不生成题干正文"]:::external
   LocalLLM["服务器本地小模型<br/>LOCAL_LLM_BASE_URL<br/>aux-qwen3-32b-fp8<br/>小问结构、标准化等低风险任务优先"]:::gpu
   ExternalLLM["外部满血模型<br/>DEEPSEEK_API_KEY / DASHSCOPE_API_KEY<br/>deepseek-v4-pro 等<br/>高风险、失败兜底、复杂解析"]:::external
   BoundaryFallback["边界失败兜底<br/>超时、JSON/schema 错误、证据回溯失败 -> 本地候选"]:::hybrid
 
   BuildStructure["question-structure-build 结构构建<br/>按 OCR 原文 offset 切片生成题目"]:::local
   SubQuestion["sub-question-split 小问拆解<br/>写入 subQuestions / children"]:::hybrid
-  VisualRepair["visual-repair 视觉修复<br/>题目 crop、横线检测<br/>可选 Pix2Text 二次 OCR"]:::hybrid
+  VisualRepair["visual-repair 视觉修复<br/>边界确认后执行<br/>题目级并发 crop、横线检测<br/>按原题顺序合并"]:::hybrid
   StructureValidate["structure-validate 结构校验<br/>选项、小问、题图、空位、证据回溯"]:::local
   MathNormalize["math-normalize 公式校验<br/>本地 LaTeX 归一化和风险标记"]:::local
   AutoStandardize["first-return auto-standardize<br/>OCR_AUTO_STANDARDIZE_MODE=risky<br/>并发低置信题标准化，不创建 Java AI job"]:::hybrid
@@ -68,12 +69,14 @@ flowchart TD
   Java --> Upload --> Preprocess --> OcrProvider --> MinerU --> Collect
   Collect --> StructureContract --> LocalBoundary --> AnchorScore --> Confidence
   Confidence -- 高置信 --> SkipBoundaryLlm --> BuildStructure
+  Confidence --> VisualRepairPreload
   Confidence -- 低置信 --> BoundaryRoute
   BoundaryRoute -- "默认 external-first" --> ExternalLLM --> BoundaryFallback
   BoundaryFallback --> BuildStructure
 
   BuildStructure --> SubQuestion
   SubQuestion -- "本地规则可完成" --> VisualRepair
+  VisualRepairPreload -- "只读上下文" --> VisualRepair
   SubQuestion -- "低置信小问确认：服务器 hybrid 本地优先" --> LocalLLM
   SubQuestion -- "本地失败兜底" --> ExternalLLM
   VisualRepair --> StructureValidate --> MathNormalize --> AutoStandardize --> AutoStandardizeGate --> AiEnrichDecision

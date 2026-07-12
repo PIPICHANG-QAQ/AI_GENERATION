@@ -22,7 +22,7 @@ from app.question_boundary import (
     plan_boundary_chunks,
     validate_structure,
 )
-from app.visual_repair import apply_visual_repairs
+from app.visual_repair import apply_visual_repairs, prepare_visual_repair_context
 
 def parse_structured_questions_from_v2(content_v2: Any, assets: list[dict[str, Any]]) -> dict[str, Any]:
     """从 MinerU v2 JSON 内容解析结构化题目和资源引用。"""
@@ -202,6 +202,8 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
     job = read_job(job_id)
     mark_ocr_flow_step(job, current_step, "running", "正在读取 OCR 输出文件")
     write_job(job)
+    visual_context_executor: ThreadPoolExecutor | None = None
+    visual_context_future = None
     try:
         output_dir = OUTPUT_ROOT / job_id
         markdown_files = sorted(
@@ -245,6 +247,12 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         legacy_structured = parse_structured_questions_legacy(markdown, output_dir, assets)
         local_boundaries = detect_local_boundaries(markdown, assets)
         boundary_confidence = evaluate_boundary_confidence(markdown, local_boundaries, assets)
+        visual_context_executor = ThreadPoolExecutor(max_workers=1)
+        visual_context_future = visual_context_executor.submit(
+            prepare_visual_repair_context,
+            output_dir,
+            job.get("uploadPath"),
+        )
         job = read_job(job_id)
         mark_ocr_flow_step(
             job,
@@ -353,10 +361,23 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         mark_ocr_flow_step(job, current_step, "running", "正在执行题目 crop、横线检测和可选二次 OCR")
         write_job(job)
 
-        visual_repair = apply_visual_repairs(structured, output_dir, job.get("uploadPath"), job_id)
+        visual_repair_context: dict[str, Any] | None = None
+        if visual_context_future is not None:
+            try:
+                visual_repair_context = visual_context_future.result()
+            except Exception as exc:
+                visual_repair_context = {"warnings": [f"视觉修复预处理失败：{exc}"]}
+            finally:
+                if visual_context_executor is not None:
+                    visual_context_executor.shutdown(wait=False)
+                    visual_context_executor = None
+
+        visual_repair = apply_visual_repairs(structured, output_dir, job.get("uploadPath"), job_id, visual_repair_context)
         visual_status = "success" if visual_repair.get("enabled", True) else "skipped"
+        preprocessed = visual_repair.get("preprocessed") or {}
         visual_message = (
-            f"视觉修复完成，crop {visual_repair.get('cropCount', 0)} 个，检测横线 {visual_repair.get('underlineCount', 0)} 条"
+            f"视觉修复完成，crop {visual_repair.get('cropCount', 0)} 个，检测横线 {visual_repair.get('underlineCount', 0)} 条，"
+            f"并发 {visual_repair.get('maxConcurrency', 1)}，预加载页 {preprocessed.get('preloadedPageCount', 0)}"
             if visual_repair.get("enabled", True)
             else str(visual_repair.get("skippedReason") or "视觉修复未启用")
         )
@@ -417,6 +438,8 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         mark_ocr_flow_step(job, current_step, ai_status, ai_message)
         write_job(job)
     except Exception as exc:
+        if visual_context_executor is not None:
+            visual_context_executor.shutdown(wait=False, cancel_futures=True)
         job = read_job(job_id)
         mark_ocr_flow_step(job, current_step, "failed", str(exc))
         write_job(job)

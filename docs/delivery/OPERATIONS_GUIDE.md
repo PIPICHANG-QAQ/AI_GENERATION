@@ -132,6 +132,9 @@ curl http://<java-host>:8018/api/engine/interfaces
 | `OCR_AUTO_STANDARDIZE_MAX_CONCURRENCY` | `2` | OCR 自动标准化并发上限，建议从 `2` 起步，按模型限流调到 `1` 到 `4` |
 | `OCR_PAPER_LAYOUT_ENABLED` | 预发/演示 `true`，排障可设 `false` | 布局解析框只读定位开关；关闭后不影响题目识别、题图归属或人工编辑稿 |
 | `OCR_VISUAL_REPAIR_ENABLED` | `true` | 是否启用题目 crop、横线检测和可选二次 OCR |
+| `OCR_VISUAL_REPAIR_MAX_CONCURRENCY` | `2` | 视觉修复节点内部的题目级并发上限；节点仍排在 AI 边界确认之后，结果按原题顺序合并 |
+| `OCR_VISUAL_REPAIR_PRELOAD_ENABLED` | `true` | 是否在 AI 边界确认期间提前准备视觉修复只读上下文 |
+| `OCR_VISUAL_REPAIR_PRELOAD_MAX_PAGES` | `4` | 视觉修复预加载 PDF 页图上限，超出部分在视觉修复节点内按需渲染 |
 | `OCR_VISUAL_REPAIR_PDF_RENDER_SCALE` | `2.0` | PDF 页面 crop 渲染倍率 |
 | `OCR_VISUAL_REPAIR_MIN_UNDERLINE_WIDTH_RATIO` | `0.12` | 横线检测的最小宽度比例 |
 | `OCR_VISUAL_REPAIR_APPLY_PIX2TEXT` | `true` | 是否允许高置信 Pix2Text 结果覆盖低置信空位题题干 |

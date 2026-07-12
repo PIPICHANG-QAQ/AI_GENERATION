@@ -12,6 +12,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -32,94 +33,185 @@ def apply_visual_repairs(
     output_dir: Path,
     upload_path: str | Path | None,
     job_id: str,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """对结构化题目应用题目级视觉修复。"""
     if os.getenv("OCR_VISUAL_REPAIR_ENABLED", "true").lower() == "false":
         return {"enabled": False, "skippedReason": "OCR_VISUAL_REPAIR_ENABLED=false"}
 
-    visual_items = load_visual_items(output_dir)
-    page_sizes = load_page_sizes(output_dir)
+    if isinstance(context, dict) and ("visualItems" in context or "pageSizes" in context):
+        repair_context = context
+    else:
+        repair_context = prepare_visual_repair_context(output_dir, upload_path)
+        if isinstance(context, dict):
+            repair_context["warnings"] = [*(context.get("warnings") or []), *(repair_context.get("warnings") or [])]
+    visual_items = repair_context.get("visualItems") or []
+    page_sizes = repair_context.get("pageSizes") or {}
     questions = list(iter_parent_questions(structured))
+    candidates = [
+        (index, question)
+        for index, question in enumerate(questions)
+        if question_needs_visual_repair(question)
+    ]
+    max_workers = min(
+        clamped_int_env("OCR_VISUAL_REPAIR_MAX_CONCURRENCY", 2, 1, 8),
+        max(1, len(candidates)),
+    )
     summary: dict[str, Any] = {
         "enabled": True,
         "questionCount": len(questions),
-        "candidateCount": 0,
+        "candidateCount": len(candidates),
         "cropCount": 0,
         "underlineCount": 0,
         "placeholderRepairCount": 0,
+        "maxConcurrency": max_workers,
+        "preprocessed": {
+            "used": bool(context),
+            "visualItemCount": len(visual_items),
+            "pageSizeCount": len(page_sizes),
+            "preloadedPageCount": len(repair_context.get("pageImages") or {}),
+        },
         "secondaryOcr": {
             "configured": pix2text_configured(),
             "attempted": 0,
             "applied": 0,
             "failed": 0,
         },
-        "warnings": [],
+        "warnings": list(repair_context.get("warnings") or []),
     }
 
     crop_dir = output_dir / "visual_repair"
-    for question in questions:
-        if not question_needs_visual_repair(question):
-            continue
-        summary["candidateCount"] += 1
-        try:
-            item = find_visual_item_for_question(question, visual_items)
-            if not item:
-                summary["warnings"].append(f"{question.get('id')} 未找到题目 bbox，跳过视觉修复")
-                attach_visual_repair(question, {"status": "skipped", "reason": "missing_bbox"})
-                continue
+    if candidates:
+        crop_dir.mkdir(parents=True, exist_ok=True)
 
-            crop = crop_question_image(upload_path, item, page_sizes)
-            if crop is None:
-                summary["warnings"].append(f"{question.get('id')} 无法生成题目 crop")
-                attach_visual_repair(question, {"status": "skipped", "reason": "crop_unavailable"})
-                continue
+    if max_workers > 1 and len(candidates) > 1:
+        results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(repair_visual_question, index, question, repair_context, output_dir, upload_path, crop_dir)
+                for index, question in candidates
+            ]
+            for future in as_completed(futures):
+                results.append(future.result())
+    else:
+        results = [
+            repair_visual_question(index, question, repair_context, output_dir, upload_path, crop_dir)
+            for index, question in candidates
+        ]
 
-            crop_dir.mkdir(parents=True, exist_ok=True)
-            crop_path = crop_dir / f"{safe_crop_name(question)}.png"
-            crop.save(crop_path)
-            summary["cropCount"] += 1
-
-            underlines = detect_underline_segments(crop)
-            summary["underlineCount"] += len(underlines)
-            repair_record: dict[str, Any] = {
-                "status": "checked",
-                "cropPath": crop_path.relative_to(output_dir).as_posix(),
-                "pageIndex": item.get("page_idx"),
-                "bbox": item.get("bbox"),
-                "underlineCount": len(underlines),
-                "underlines": underlines[:20],
-            }
-
-            secondary_text, secondary_error = run_secondary_ocr(crop_path)
-            if secondary_text or secondary_error:
-                summary["secondaryOcr"]["attempted"] += 1
-                repair_record["secondaryOcr"] = {
-                    "provider": "pix2text",
-                    "applied": False,
-                    "error": secondary_error,
-                    "markdown": secondary_text,
-                }
-                if secondary_error:
-                    summary["secondaryOcr"]["failed"] += 1
-
-            applied_secondary = False
-            if secondary_text and should_apply_secondary_ocr(question, secondary_text):
-                apply_secondary_ocr(question, secondary_text)
-                repair_record["secondaryOcr"]["applied"] = True
-                summary["secondaryOcr"]["applied"] += 1
-                applied_secondary = True
-
-            if not applied_secondary:
-                added = apply_underline_placeholders(question, len(underlines))
-                if added:
-                    repair_record["placeholderAdded"] = added
-                    summary["placeholderRepairCount"] += added
-
-            attach_visual_repair(question, repair_record)
-        except Exception as exc:  # pragma: no cover - 单题修复不能中断 OCR 任务
-            summary["warnings"].append(f"{question.get('id')} 视觉修复失败：{exc}")
-            attach_visual_repair(question, {"status": "failed", "error": str(exc)})
+    for result in sorted(results, key=lambda item: int(item.get("index") or 0)):
+        question = result["question"]
+        for key, value in (result.get("updates") or {}).items():
+            question[key] = value
+        attach_visual_repair(question, result.get("repairRecord") or {"status": "failed", "error": "missing repair result"})
+        summary["cropCount"] += int(result.get("cropCount") or 0)
+        summary["underlineCount"] += int(result.get("underlineCount") or 0)
+        summary["placeholderRepairCount"] += int(result.get("placeholderRepairCount") or 0)
+        summary["secondaryOcr"]["attempted"] += int((result.get("secondaryOcr") or {}).get("attempted") or 0)
+        summary["secondaryOcr"]["applied"] += int((result.get("secondaryOcr") or {}).get("applied") or 0)
+        summary["secondaryOcr"]["failed"] += int((result.get("secondaryOcr") or {}).get("failed") or 0)
+        summary["warnings"].extend(result.get("warnings") or [])
     return summary
+
+
+def prepare_visual_repair_context(output_dir: Path, upload_path: str | Path | None) -> dict[str, Any]:
+    """只读准备视觉修复所需索引和有限页图像缓存。"""
+    warnings: list[str] = []
+    visual_items = load_visual_items(output_dir)
+    page_sizes = load_page_sizes(output_dir)
+    page_images = preload_visual_page_images(upload_path, visual_items, page_sizes, warnings)
+    return {
+        "visualItems": visual_items,
+        "pageSizes": page_sizes,
+        "itemNumberIndex": build_visual_item_number_index(visual_items),
+        "pageImages": page_images,
+        "warnings": warnings,
+    }
+
+
+def repair_visual_question(
+    index: int,
+    question: dict[str, Any],
+    repair_context: dict[str, Any],
+    output_dir: Path,
+    upload_path: str | Path | None,
+    crop_dir: Path,
+) -> dict[str, Any]:
+    """计算单题视觉修复结果，不直接写回原题。"""
+    result: dict[str, Any] = {
+        "index": index,
+        "question": question,
+        "updates": {},
+        "cropCount": 0,
+        "underlineCount": 0,
+        "placeholderRepairCount": 0,
+        "secondaryOcr": {"attempted": 0, "applied": 0, "failed": 0},
+        "warnings": [],
+    }
+    try:
+        visual_items = repair_context.get("visualItems") or []
+        page_sizes = repair_context.get("pageSizes") or {}
+        item = find_visual_item_for_question(question, visual_items, repair_context.get("itemNumberIndex") or {})
+        if not item:
+            result["warnings"].append(f"{question.get('id')} 未找到题目 bbox，跳过视觉修复")
+            result["repairRecord"] = {"status": "skipped", "reason": "missing_bbox"}
+            return result
+
+        crop = crop_question_image(upload_path, item, page_sizes, repair_context.get("pageImages") or {})
+        if crop is None:
+            result["warnings"].append(f"{question.get('id')} 无法生成题目 crop")
+            result["repairRecord"] = {"status": "skipped", "reason": "crop_unavailable"}
+            return result
+
+        crop_path = crop_dir / f"{index:03d}_{safe_crop_name(question)}.png"
+        crop.save(crop_path)
+        result["cropCount"] = 1
+
+        underlines = detect_underline_segments(crop)
+        result["underlineCount"] = len(underlines)
+        repair_record: dict[str, Any] = {
+            "status": "checked",
+            "cropPath": crop_path.relative_to(output_dir).as_posix(),
+            "pageIndex": item.get("page_idx"),
+            "bbox": item.get("bbox"),
+            "underlineCount": len(underlines),
+            "underlines": underlines[:20],
+        }
+
+        secondary_text, secondary_error = run_secondary_ocr(crop_path)
+        if secondary_text or secondary_error:
+            result["secondaryOcr"]["attempted"] = 1
+            repair_record["secondaryOcr"] = {
+                "provider": "pix2text",
+                "applied": False,
+                "error": secondary_error,
+                "markdown": secondary_text,
+            }
+            if secondary_error:
+                result["secondaryOcr"]["failed"] = 1
+
+        working_question = dict(question)
+        applied_secondary = False
+        if secondary_text and should_apply_secondary_ocr(working_question, secondary_text):
+            apply_secondary_ocr(working_question, secondary_text)
+            repair_record["secondaryOcr"]["applied"] = True
+            result["secondaryOcr"]["applied"] = 1
+            applied_secondary = True
+
+        if not applied_secondary:
+            added = apply_underline_placeholders(working_question, len(underlines))
+            if added:
+                repair_record["placeholderAdded"] = added
+                result["placeholderRepairCount"] = added
+
+        for key in ("type", "stemMarkdown", "manualMarkdown"):
+            if working_question.get(key) != question.get(key):
+                result["updates"][key] = working_question.get(key)
+        result["repairRecord"] = repair_record
+    except Exception as exc:  # pragma: no cover - 单题修复不能中断 OCR 任务
+        result["warnings"].append(f"{question.get('id')} 视觉修复失败：{exc}")
+        result["repairRecord"] = {"status": "failed", "error": str(exc)}
+    return result
 
 
 def load_visual_items(output_dir: Path) -> list[dict[str, Any]]:
@@ -170,6 +262,56 @@ def load_page_sizes(output_dir: Path) -> dict[int, tuple[float, float]]:
     return sizes
 
 
+def build_visual_item_number_index(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """按题号建立 content_list bbox 索引。"""
+    index: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        match = QUESTION_NUMBER_PREFIX_RE.match(item.get("text") or "")
+        if match:
+            index.setdefault(match.group(1), []).append(item)
+    return index
+
+
+def preload_visual_page_images(
+    upload_path: str | Path | None,
+    visual_items: list[dict[str, Any]],
+    page_sizes: dict[int, tuple[float, float]],
+    warnings: list[str],
+) -> dict[int, tuple[Image.Image, tuple[float, float]]]:
+    """提前加载有限页图像，避免视觉修复节点重复打开或渲染页面。"""
+    if os.getenv("OCR_VISUAL_REPAIR_PRELOAD_ENABLED", "true").lower() == "false":
+        return {}
+    path = Path(str(upload_path or ""))
+    if not path.exists():
+        return {}
+    max_pages = clamped_int_env("OCR_VISUAL_REPAIR_PRELOAD_MAX_PAGES", 4, 0, 32)
+    if max_pages <= 0:
+        return {}
+
+    suffix = path.suffix.lower()
+    page_images: dict[int, tuple[Image.Image, tuple[float, float]]] = {}
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}:
+        try:
+            with Image.open(path) as source:
+                image = source.convert("RGB")
+            page_images[0] = (image, page_sizes.get(0) or image.size)
+        except Exception as exc:
+            warnings.append(f"视觉修复预加载图片失败：{exc}")
+        return page_images
+
+    if suffix != ".pdf":
+        return {}
+
+    page_indices = sorted({parse_int(item.get("page_idx"), 0) for item in visual_items})[:max_pages]
+    for page_idx in page_indices:
+        page_image, page_size = render_pdf_page(path, page_idx, page_sizes.get(page_idx))
+        if page_image is not None:
+            page_images[page_idx] = (page_image, page_size)
+        else:
+            warnings.append(f"视觉修复预加载 PDF 第 {page_idx + 1} 页失败")
+    return page_images
+
+
 def item_text(item: dict[str, Any]) -> str:
     text = item.get("text")
     if isinstance(text, str):
@@ -210,8 +352,16 @@ def question_needs_visual_repair(question: dict[str, Any]) -> bool:
     return question_type == "fill_blank" or is_fill_blank_markdown(text)
 
 
-def find_visual_item_for_question(question: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any] | None:
+def find_visual_item_for_question(
+    question: dict[str, Any],
+    items: list[dict[str, Any]],
+    item_number_index: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any] | None:
     number = str(question.get("number") or "").strip()
+    if number and item_number_index:
+        indexed_items = item_number_index.get(number) or []
+        if indexed_items:
+            return indexed_items[0]
     if number:
         for item in items:
             match = QUESTION_NUMBER_PREFIX_RE.match(item.get("text") or "")
@@ -229,6 +379,7 @@ def crop_question_image(
     upload_path: str | Path | None,
     item: dict[str, Any],
     page_sizes: dict[int, tuple[float, float]],
+    page_images: dict[int, tuple[Image.Image, tuple[float, float]]] | None = None,
 ) -> Image.Image | None:
     path = Path(str(upload_path or ""))
     if not path.exists():
@@ -237,9 +388,13 @@ def crop_question_image(
     if not isinstance(bbox, list) or len(bbox) < 4:
         return None
     page_idx = parse_int(item.get("page_idx"), 0)
+    cached = (page_images or {}).get(page_idx)
+    if cached:
+        return crop_with_scaled_bbox(cached[0], bbox, cached[1])
     suffix = path.suffix.lower()
     if suffix in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}:
-        image = Image.open(path).convert("RGB")
+        with Image.open(path) as source:
+            image = source.convert("RGB")
         page_size = page_sizes.get(page_idx) or image.size
         return crop_with_scaled_bbox(image, bbox, page_size)
     if suffix == ".pdf":
@@ -284,7 +439,7 @@ def crop_with_scaled_bbox(
     y0 = max(0, int(bbox[1] * scale_y) - padding)
     x1 = min(image.width, int(bbox[2] * scale_x) + padding)
     y1 = min(image.height, int(bbox[3] * scale_y) + padding)
-    return image.crop((x0, y0, max(x1, x0 + 1), max(y1, y0 + 1)))
+    return image.crop((x0, y0, max(x1, x0 + 1), max(y1, y0 + 1))).copy()
 
 
 def detect_underline_segments(image: Image.Image) -> list[dict[str, int]]:
@@ -451,3 +606,8 @@ def parse_int(value: Any, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def clamped_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    value = parse_int(os.getenv(name), default)
+    return max(minimum, min(maximum, value))
