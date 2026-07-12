@@ -986,6 +986,10 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
             continue
         source_id = unique_import_source_question_id(source_question, index, source_id_counts)
         metadata = enriched.get(source_id, {})
+        source_answer = str(source_question.get("answer") or "")
+        source_analysis = str(source_question.get("analysis") or "")
+        answer = str(metadata.get("answer") or source_answer)
+        analysis = str(metadata.get("analysis") or source_analysis)
         difficulty = normalize_difficulty(metadata.get("difficulty"))
         images = normalize_question_images(source_question.get("images", []))
         source_options = normalize_question_options_image_refs(source_question.get("options", []), images)
@@ -995,10 +999,15 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
             source_question.get("stemMarkdown") or "",
             source_options,
             question_type=question_type,
-            answer=metadata.get("answer", ""),
-            analysis=metadata.get("analysis", ""),
+            answer=answer,
+            analysis=analysis,
         )
-        source_options = normalize_question_options_image_refs(source_question.get("options", []), images)
+        source_options = attach_choice_images_to_text_options(
+            source_question.get("stemMarkdown") or "",
+            source_question.get("options", []),
+            images,
+            question_type,
+        )
         sibling_texts = option_texts(source_options)
         stem_markdown = strip_question_images_from_markdown(
             source_question.get("stemMarkdown") or "",
@@ -1023,8 +1032,8 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
                 "type": question_type,
                 "stemMarkdown": stem_markdown,
                 "manualMarkdown": manual_markdown,
-                "answer": "" if sub_questions else metadata.get("answer", ""),
-                "analysis": "" if sub_questions else metadata.get("analysis", ""),
+                "answer": "" if sub_questions else answer,
+                "analysis": "" if sub_questions else analysis,
                 "knowledgePointIds": [],
                 "knowledgePoints": normalize_string_values(metadata.get("knowledgePoints")),
                 "difficulty": difficulty,
@@ -1037,9 +1046,9 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
                 "autoSemanticRepair": source_question.get("autoSemanticRepair"),
                 "aiMetadata": {
                     **enrichment_meta,
-                    "contextMatched": bool(metadata.get("contextMatched")),
-                    "answerEvidence": str(metadata.get("answerEvidence") or ""),
-                    "analysisEvidence": str(metadata.get("analysisEvidence") or ""),
+                    "contextMatched": bool(metadata.get("contextMatched") or source_answer or source_analysis),
+                    "answerEvidence": str(metadata.get("answerEvidence") or source_question.get("answerEvidence") or ""),
+                    "analysisEvidence": str(metadata.get("analysisEvidence") or source_question.get("analysisEvidence") or ""),
                     "warnings": normalize_string_values(metadata.get("warnings")),
                     "subQuestions": metadata.get("subQuestions", []),
                 },
@@ -1488,9 +1497,15 @@ def normalize_sub_questions(value: Any, enriched_value: Any = None) -> list[dict
                     images,
                 ),
                 "aiMetadata": {
-                    "contextMatched": bool(enriched.get("contextMatched")),
-                    "answerEvidence": str(enriched.get("answerEvidence") or ""),
-                    "analysisEvidence": str(enriched.get("analysisEvidence") or ""),
+                    "contextMatched": bool(
+                        enriched.get("contextMatched")
+                        or enriched.get("answer")
+                        or enriched.get("analysis")
+                        or item.get("answer")
+                        or item.get("analysis")
+                    ),
+                    "answerEvidence": str(enriched.get("answerEvidence") or item.get("answerEvidence") or ""),
+                    "analysisEvidence": str(enriched.get("analysisEvidence") or item.get("analysisEvidence") or ""),
                     "warnings": normalize_string_values(enriched.get("warnings")),
                 },
             }

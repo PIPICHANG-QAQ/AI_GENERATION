@@ -1,6 +1,7 @@
 package com.aigeneration.questionbank.domain.service;
 
 import com.aigeneration.questionbank.config.PythonWorkerProperties;
+import com.aigeneration.questionbank.domain.entity.ImportQuestionEntity;
 import com.aigeneration.questionbank.domain.entity.ImportTaskEntity;
 import com.aigeneration.questionbank.domain.entity.StorageFileEntity;
 import com.aigeneration.questionbank.domain.support.Ids;
@@ -288,6 +289,52 @@ public class ImportTaskMetadataBridgeService {
         metadataService.syncOne(response);
         applyJavaStatus(response);
         return response;
+    }
+
+    /**
+     * 更新导入题编辑内容，并同步 Java 侧题目快照。
+     *
+     * <p>worker 可用时先写 worker，随后同步 Java，保持运行中任务和历史记录一致；worker 临时
+     * 丢失任务时兜底写 Java 快照，避免人工编辑内容刷新后丢失。</p>
+     *
+     * @param taskId 导入任务 ID
+     * @param questionId 导入题 ID
+     * @param payload 前端编辑载荷
+     * @return 更新后的题目和任务快照
+     */
+    public Map<String, Object> updateQuestion(String taskId, String questionId, Map<String, Object> payload) {
+        RuntimeException workerError = null;
+        try {
+            Map<String, Object> response = jsonToPython(
+                    "PUT",
+                    "/api/import-tasks/" + taskId + "/questions/" + questionId,
+                    payload
+            );
+            Map<String, Object> workerTask = asMap(response.get("task"));
+            if (!workerTask.isEmpty()) {
+                metadataService.syncOne(workerTask);
+                ImportQuestionEntity synced = importQuestionSyncService.getQuestion(questionId);
+                if (synced != null && taskId.equals(synced.getTaskId())) {
+                    return questionUpdateResponse(taskId, synced, null);
+                }
+            }
+        } catch (ResponseStatusException ex) {
+            if (!canFallbackToJavaSnapshot(ex)) {
+                throw ex;
+            }
+            workerError = ex;
+        } catch (RuntimeException ex) {
+            workerError = ex;
+        }
+
+        ImportQuestionEntity updated = importQuestionSyncService.updateQuestionFromPayload(taskId, questionId, payload);
+        if (updated == null) {
+            if (workerError != null) {
+                throw workerError;
+            }
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Import question not found");
+        }
+        return questionUpdateResponse(taskId, updated, workerError);
     }
 
     /**
@@ -684,6 +731,24 @@ public class ImportTaskMetadataBridgeService {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Import task not found");
         }
         return javaSnapshot(entity);
+    }
+
+    /**
+     * 构造导入题编辑响应。
+     *
+     * @param taskId 导入任务 ID
+     * @param question 更新后的题目实体
+     * @param workerError worker 同步异常；为空表示已同步 worker
+     * @return 前端兼容响应
+     */
+    private Map<String, Object> questionUpdateResponse(String taskId, ImportQuestionEntity question, RuntimeException workerError) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("question", importQuestionSyncService.toMap(question));
+        response.put("task", javaSnapshot(taskId));
+        if (workerError != null) {
+            response.put("workerSyncWarning", workerError.getMessage());
+        }
+        return response;
     }
 
     /**

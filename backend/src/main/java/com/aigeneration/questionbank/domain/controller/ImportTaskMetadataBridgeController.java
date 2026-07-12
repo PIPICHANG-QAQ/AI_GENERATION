@@ -132,6 +132,23 @@ public class ImportTaskMetadataBridgeController {
     }
 
     /**
+     * 更新导入题人工编辑内容。
+     *
+     * @param taskId 导入任务 ID
+     * @param questionId 导入题 ID
+     * @param payload 待更新字段
+     * @return 更新后的题目和任务快照
+     */
+    @PutMapping("/{taskId}/questions/{questionId}")
+    public Map<String, Object> updateQuestion(
+            @PathVariable String taskId,
+            @PathVariable String questionId,
+            @RequestBody Map<String, Object> payload
+    ) {
+        return service.updateQuestion(taskId, questionId, payload);
+    }
+
+    /**
      * 删除导入任务。
      *
      * @param taskId 导入任务 ID

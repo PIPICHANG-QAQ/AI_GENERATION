@@ -395,6 +395,64 @@ class DomainControllerTest {
     }
 
     /**
+     * 验证导入题保存会先写 worker，并同步到 Java 题目快照，避免历史记录重新进入后回退到旧内容。
+     *
+     * @throws Exception 测试请求或内置 HTTP 服务失败时抛出
+     */
+    @Test
+    void importQuestionUpdateSyncsWorkerResultIntoJavaSnapshot() throws Exception {
+        String taskId = "import_task_question_update";
+        String questionId = taskId + "_question_1";
+        importTaskMetadataService.syncMap(importTaskPayload(taskId, "待校验", 1));
+
+        Map<String, Object> updatedTask = new LinkedHashMap<>(importTaskPayload(taskId, "部分完成", 1));
+        Map<String, Object> updatedQuestion = new LinkedHashMap<>(((List<Map<String, Object>>) updatedTask.get("questions")).get(0));
+        updatedQuestion.put("status", "已校验");
+        updatedQuestion.put("type", "choice");
+        updatedQuestion.put("stemMarkdown", "编辑后的题干");
+        updatedQuestion.put("manualMarkdown", "编辑后的题干");
+        updatedQuestion.put("answer", "C");
+        updatedQuestion.put("analysis", "编辑后的解析");
+        updatedQuestion.put("options", List.of(
+                Map.of("label", "A", "content", "甲"),
+                Map.of("label", "B", "content", "乙"),
+                Map.of("label", "C", "content", "丙")
+        ));
+        updatedTask.put("questions", List.of(updatedQuestion));
+        updatedTask.put("updatedAt", "2026-06-29T10:05:00Z");
+
+        AtomicReference<String> requestBody = new AtomicReference<>("");
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/import-tasks/" + taskId + "/questions/" + questionId, exchange -> {
+            org.assertj.core.api.Assertions.assertThat(exchange.getRequestMethod()).isEqualTo("PUT");
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            writeJson(exchange, Map.of("question", updatedQuestion, "task", updatedTask));
+        });
+        server.start();
+        try {
+            ImportTaskMetadataBridgeService bridge = metadataBridgeService(server);
+            Map<String, Object> response = bridge.updateQuestion(taskId, questionId, Map.of(
+                    "manualMarkdown", "编辑后的题干",
+                    "status", "已校验",
+                    "answer", "C",
+                    "analysis", "编辑后的解析"
+            ));
+
+            org.assertj.core.api.Assertions.assertThat(requestBody.get()).contains("编辑后的题干");
+            Map<?, ?> responseQuestion = (Map<?, ?>) response.get("question");
+            org.assertj.core.api.Assertions.assertThat(responseQuestion.get("manualMarkdown")).isEqualTo("编辑后的题干");
+            org.assertj.core.api.Assertions.assertThat(responseQuestion.get("status")).isEqualTo("已校验");
+            org.assertj.core.api.Assertions.assertThat(importQuestionSyncService.getQuestion(questionId).getManualMarkdown())
+                    .isEqualTo("编辑后的题干");
+            org.assertj.core.api.Assertions.assertThat(importQuestionSyncService.getQuestion(questionId).getStatus())
+                    .isEqualTo("已校验");
+            org.assertj.core.api.Assertions.assertThat(importQuestionSyncService.listByTask(taskId)).hasSize(1);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /**
      * 验证 worker 任务缺失但 OCR job 可恢复时，会优先返回恢复后的任务并同步 Java 表。
      *
      * @throws Exception 测试请求或内置 HTTP 服务失败时抛出

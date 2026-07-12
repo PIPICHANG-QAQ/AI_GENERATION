@@ -420,6 +420,52 @@ class ImportServicesTest(unittest.TestCase):
         self.assertNotIn("![]", question["stemMarkdown"])
         self.assertEqual(["![](图1)", "![](图2)", "![](图3)", "![](图4)"], [option["content"] for option in question["options"]])
 
+    def test_build_import_questions_attaches_trailing_choice_images_to_text_options(self):
+        task = {"stage": "初中", "subject": "物理", "grade": "八年级", "title": "测试卷"}
+        images = [
+            {"name": "a.jpg", "path": "images/a.jpg", "url": "/files/a.jpg"},
+            {"name": "b.jpg", "path": "images/b.jpg", "url": "/files/b.jpg"},
+            {"name": "c.jpg", "path": "images/c.jpg", "url": "/files/c.jpg"},
+            {"name": "d.jpg", "path": "images/d.jpg", "url": "/files/d.jpg"},
+        ]
+        outputs = {
+            "sections": [
+                {
+                    "id": "section_1",
+                    "questions": [
+                        {
+                            "id": "q_2",
+                            "number": 2,
+                            "type": "choice",
+                            "stemMarkdown": (
+                                "如图所示，属于省力杠杆的是（ ）\n\n"
+                                "![](images/a.jpg)\n\n![](images/b.jpg)\n\n"
+                                "![](images/c.jpg)\n\n![](images/d.jpg)"
+                            ),
+                            "images": images,
+                            "options": [
+                                {"label": "A", "content": "食品夹"},
+                                {"label": "B", "content": "船桨"},
+                                {"label": "C", "content": "修枝剪刀"},
+                                {"label": "D", "content": "托盘天平"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with patch.dict("os.environ", {"ENABLE_IMPORT_SYNC_AI_ENRICH": "false"}):
+            questions = build_import_questions(task, outputs, "")
+
+        question = questions[0]
+        self.assertEqual(4, len(question["images"]))
+        self.assertNotIn("![]", question["stemMarkdown"])
+        self.assertEqual(
+            ["![](图1)\n\n食品夹", "![](图2)\n\n船桨", "![](图3)\n\n修枝剪刀", "![](图4)\n\n托盘天平"],
+            [option["content"] for option in question["options"]],
+        )
+
     def test_build_import_questions_drops_unreferenced_choice_images_without_image_cue(self):
         task = {"stage": "初中", "subject": "数学", "grade": "七年级", "title": "测试卷"}
         outputs = {
@@ -473,6 +519,33 @@ class ImportServicesTest(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual([], question["images"])
         self.assertNotIn("![]", question["stemMarkdown"])
+
+    def test_ensure_question_images_attaches_trailing_choice_images_to_options(self):
+        question = {
+            "id": "q2",
+            "type": "choice",
+            "stemMarkdown": "如图所示，属于省力杠杆的是（ ）\n\n![](图1)\n\n![](图2)\n\n![](图3)\n\n![](图4)",
+            "manualMarkdown": "如图所示，属于省力杠杆的是（ ）\n\n![](图1)\n\n![](图2)\n\n![](图3)\n\n![](图4)",
+            "images": [
+                {"label": "图1", "name": "a.jpg", "path": "images/a.jpg", "url": "/files/a.jpg"},
+                {"label": "图2", "name": "b.jpg", "path": "images/b.jpg", "url": "/files/b.jpg"},
+                {"label": "图3", "name": "c.jpg", "path": "images/c.jpg", "url": "/files/c.jpg"},
+                {"label": "图4", "name": "d.jpg", "path": "images/d.jpg", "url": "/files/d.jpg"},
+            ],
+            "options": [
+                {"label": "A", "content": "食品夹"},
+                {"label": "B", "content": "船桨"},
+                {"label": "C", "content": "修枝剪刀"},
+                {"label": "D", "content": "托盘天平"},
+            ],
+        }
+
+        changed = ensure_question_images_in_markdown(question)
+
+        self.assertTrue(changed)
+        self.assertNotIn("![]", question["stemMarkdown"])
+        self.assertEqual("![](图1)\n\n食品夹", question["options"][0]["content"])
+        self.assertEqual("![](图4)\n\n托盘天平", question["options"][3]["content"])
         self.assertNotIn("![]", question["manualMarkdown"])
 
     def test_build_import_questions_persists_sub_question_solutions(self):
@@ -519,6 +592,43 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual("", questions[0]["analysis"])
         self.assertEqual(2, len(questions[0]["subQuestions"]))
         self.assertEqual("代入计算。", questions[0]["subQuestions"][0]["analysis"])
+
+    def test_build_import_questions_uses_ocr_embedded_solution_without_ai_enrich(self):
+        task = {"stage": "高中", "subject": "数学", "grade": "高三", "title": "专题汇编"}
+        outputs = {
+            "markdown": "1. 已知集合 A，则 A∩B=（ ）\n【答案】C\n【详解】公共元素为 C。",
+            "sections": [
+                {
+                    "id": "section_1",
+                    "questions": [
+                        {
+                            "id": "q_1",
+                            "number": 1,
+                            "type": "choice",
+                            "stemMarkdown": "已知集合 A，则 A∩B=（ ）",
+                            "answer": "C",
+                            "analysis": "公共元素为 C。",
+                            "answerEvidence": "【答案】C",
+                            "analysisEvidence": "【详解】公共元素为 C。",
+                            "options": [
+                                {"label": "A", "content": "甲"},
+                                {"label": "B", "content": "乙"},
+                                {"label": "C", "content": "丙"},
+                                {"label": "D", "content": "丁"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with patch.dict("os.environ", {"ENABLE_IMPORT_SYNC_AI_ENRICH": "false"}):
+            questions = build_import_questions(task, outputs, "")
+
+        self.assertEqual("C", questions[0]["answer"])
+        self.assertEqual("公共元素为 C。", questions[0]["analysis"])
+        self.assertTrue(questions[0]["aiMetadata"]["contextMatched"])
+        self.assertEqual("【答案】C", questions[0]["aiMetadata"]["answerEvidence"])
 
     def test_build_import_questions_auto_standardizes_risky_questions_with_concurrency(self):
         task = {"stage": "初中", "subject": "数学", "grade": "七年级", "title": "测试卷"}

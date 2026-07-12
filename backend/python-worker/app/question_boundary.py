@@ -29,6 +29,20 @@ IMAGE_FILE_EXTENSION_RE = re.compile(r"^\s*(?:jpe?g|png|webp|gif|bmp|tiff?)(?:\b
 PAPER_TOTAL_RE = re.compile(r"(?:本试卷|全卷|试卷)[^\n。；;]{0,40}?(?:共|共有)\s*(\d{1,3})\s*题")
 SECTION_QUESTION_COUNT_RE = re.compile(r"(?:本大题|大题)?\s*(?:共有|共)\s*(\d{1,3})\s*(?:个\s*)?(?:小题|题)")
 SECTION_QUESTION_RANGE_RE = re.compile(r"第\s*(\d{1,3})\s*(?:[~～\-]|\\~)\s*(\d{1,3})\s*题")
+GENERIC_SECTION_HEADING_RE = re.compile(
+    r"^(?:专题|考点|考向|题型|真题(?:感知|演练|汇编)?|模拟(?:预测|演练)?|基础(?:过关)?练|能力(?:提升)?练|综合(?:训练|检测)|易错(?:题)?|热点(?:题)?)"
+    r"\s*(?:\d{1,3}|[一二三四五六七八九十]{1,3})?(?:[、.．:：-]\s*)?.{0,32}$"
+)
+QUESTION_SOURCE_TAG_RE = re.compile(r"^\s*(?:[（(]\s*)?(?:19|20)\d{2}[·.、\-—]")
+QUESTION_STEM_CUE_RE = re.compile(
+    r"已知|若|设|下列|则|求|证明|计算|化简|判断|满足|定义|命题|函数|集合|复数|"
+    r"充要条件|充分|必要|取值范围|完成|补全|观察|选择|如图|"
+    r"第[一二三四五六七八九十\d]{1,3}题|等于|为\s*[（(]|是\s*[“\"]|________|____|（\s*）|\(\s*\)"
+)
+QUESTION_LIST_EXPLANATION_RE = re.compile(
+    r"形式|覆盖面|要求考生|不再直接|定义了|这要求|不仅是|而是在考|"
+    r"试题主要|重点考查|侧重|转向|回归本质|创新考法"
+)
 PREFACE_LINE_RE = re.compile(
     r"本试卷|试题卷|答题纸|考生注意|考试时间|规定位置|计算器|注意事项|姓名|准考证|班级|学校"
 )
@@ -42,9 +56,13 @@ NON_QUESTION_TAIL_RE = re.compile(
     r"\d{4}\s*年[^\n]{0,80}(?:试卷|考试|真题)"
     r"|参考答案(?:与|及)?(?:试题)?解析"
     r"|参考答案|答案解析|试题解析|答案与解析"
-    r"|【\s*(?:解答|解析|答案)\s*】"
-    r"|(?:解答|解析|答案)\s*[:：]"
     r")"
+)
+BRACKETED_SOLUTION_MARKER_RE = re.compile(
+    r"【\s*(?P<label>参考答案|答案|解析|详解|分析|解答)\s*】"
+)
+LINE_SOLUTION_MARKER_RE = re.compile(
+    r"(?im)(?P<prefix>^|[\r\n]+)[ \t]*(?P<label>参考答案|答案|解析|详解|分析|解答)\s*[:：]\s*"
 )
 
 
@@ -86,10 +104,11 @@ def detect_local_boundaries(markdown: str, assets: list[dict[str, Any]]) -> dict
                 "type": "unknown",
                 "start": 0,
                 "end": len(source),
+                "numberingScope": "global",
             }
             sections.append(current_section)
         question = {
-            "id": f"q_{number}",
+            "id": unique_question_id(number, questions),
             "number": number,
             "type": current_section.get("type") or "unknown",
             "sectionId": current_section["id"],
@@ -98,6 +117,7 @@ def detect_local_boundaries(markdown: str, assets: list[dict[str, Any]]) -> dict
             "end": len(source),
             "anchorScore": candidate.get("score"),
             "anchorReasons": candidate.get("reasons", []),
+            "numberingReset": candidate.get("numberingReset", False),
         }
         questions.append(question)
 
@@ -113,7 +133,10 @@ def detect_local_boundaries(markdown: str, assets: list[dict[str, Any]]) -> dict
 
         section_type = infer_question_type(heading_text)
         question_match = QUESTION_NUMBER_RE.match(heading_text)
-        if is_section_heading_line(stripped, heading_text, section_type) and not question_match:
+        if (
+            is_section_heading_line(stripped, heading_text, section_type)
+            or is_generic_section_heading_line(stripped, heading_text)
+        ) and not question_match:
             section_contract = contract_sections_by_start.get(line_start, {})
             current_section = {
                 "id": f"section_{len(sections) + 1}",
@@ -124,6 +147,7 @@ def detect_local_boundaries(markdown: str, assets: list[dict[str, Any]]) -> dict
                 "declaredCount": section_contract.get("declaredCount"),
                 "rangeStart": section_contract.get("rangeStart"),
                 "rangeEnd": section_contract.get("rangeEnd"),
+                "numberingScope": "section" if section_type == "unknown" else "global",
             }
             sections.append(current_section)
             continue
@@ -251,11 +275,28 @@ def extract_paper_structure_contract(markdown: str) -> dict[str, Any]:
         total_question_count = declared_total
         total_question_count_source = "sections"
 
+    first_section_start = sections[0]["start"] if sections else None
+    pre_section_question_like_count = (
+        count_question_like_anchors(source[:first_section_start])
+        if isinstance(first_section_start, int) and first_section_start > 0
+        else 0
+    )
+    first_section_is_authoritative = bool(
+        sections
+        and (
+            total_question_count_source == "paper"
+            or declared_complete
+            or pre_section_question_like_count == 0
+        )
+    )
+
     return {
         "totalQuestionCount": total_question_count,
         "totalQuestionCountSource": total_question_count_source,
         "sections": sections,
-        "firstSectionStart": sections[0]["start"] if sections else None,
+        "firstSectionStart": first_section_start if first_section_is_authoritative else None,
+        "firstSectionStartReliable": first_section_is_authoritative,
+        "preSectionQuestionLikeCount": pre_section_question_like_count,
         "declaredSectionTotal": declared_total if declared_complete else None,
     }
 
@@ -278,10 +319,25 @@ def score_question_anchor_candidate(
     score = 0
     contract_sections = [section for section in contract.get("sections", []) if isinstance(section, dict)]
     first_section_start = contract.get("firstSectionStart")
+    strong_question_anchor = looks_like_question_anchor(raw, body)
+    typed_section_context = bool(
+        current_section
+        and (
+            normalize_type(current_section.get("type")) != "unknown"
+            or isinstance(current_section.get("rangeStart"), int)
+            or isinstance(current_section.get("declaredCount"), int)
+        )
+    )
+    numbering_reset = False
+    authoritative_contract = bool(
+        isinstance(first_section_start, int)
+        or contract_expected_numbers(contract)
+        or isinstance(contract.get("totalQuestionCount"), int)
+    )
 
     if isinstance(first_section_start, int) and start < first_section_start:
         reasons.append("before-first-section")
-    elif contract_sections and current_section is None:
+    elif authoritative_contract and contract_sections and current_section is None:
         reasons.append("outside-declared-section")
     else:
         score += 30
@@ -290,6 +346,11 @@ def score_question_anchor_candidate(
         reasons.append("preface-numbered-line")
     else:
         score += 20
+
+    if strong_question_anchor:
+        score += 15
+    elif (previous_question is None or number == 1) and not typed_section_context:
+        reasons.append("weak-question-anchor")
 
     if current_section is not None:
         score += 25
@@ -306,6 +367,9 @@ def score_question_anchor_candidate(
         if isinstance(previous_number, int):
             if number == previous_number + 1:
                 score += 15
+            elif is_allowed_question_number_reset(number, previous_question, current_section, strong_question_anchor):
+                score += 10
+                numbering_reset = True
             elif number <= previous_number:
                 reasons.append("non-increasing-question-number")
             else:
@@ -322,6 +386,7 @@ def score_question_anchor_candidate(
             "preface-numbered-line",
             "outside-section-number-range",
             "non-increasing-question-number",
+            "weak-question-anchor",
         }
         for reason in reasons
     )
@@ -332,6 +397,7 @@ def score_question_anchor_candidate(
         "source": source_kind,
         "score": score,
         "accepted": accepted,
+        "numberingReset": numbering_reset,
         "reasons": list(dict.fromkeys(reasons)),
         "preview": source[start : min(len(source), start + 80)],
     }
@@ -339,6 +405,59 @@ def score_question_anchor_candidate(
 
 def looks_like_exam_preface(text: str) -> bool:
     return bool(PREFACE_LINE_RE.search(str(text or "")))
+
+
+def count_question_like_anchors(text: str) -> int:
+    count = 0
+    for line in str(text or "").splitlines():
+        heading_text = line.strip().lstrip("#").strip()
+        match = QUESTION_NUMBER_RE.match(heading_text)
+        if not match:
+            continue
+        if looks_like_exam_preface(heading_text):
+            continue
+        if looks_like_question_anchor(heading_text, match.group(2)):
+            count += 1
+    return count
+
+
+def looks_like_question_anchor(raw: str, body: str) -> bool:
+    """Return true when a numbered line looks like a question, not an overview list item."""
+    text = re.sub(r"\s+", " ", str(body or raw or "")).strip()
+    if not text:
+        return False
+    if QUESTION_LIST_EXPLANATION_RE.search(text) and not QUESTION_SOURCE_TAG_RE.search(text):
+        return False
+    return bool(QUESTION_SOURCE_TAG_RE.search(text) or QUESTION_STEM_CUE_RE.search(text))
+
+
+def is_allowed_question_number_reset(
+    number: int,
+    previous_question: dict[str, Any],
+    current_section: dict[str, Any] | None,
+    strong_question_anchor: bool,
+) -> bool:
+    """Allow topic compilations to restart numbering while preserving exam strictness."""
+    previous_number = previous_question.get("number")
+    if number != 1 or not isinstance(previous_number, int) or previous_number < 2 or not strong_question_anchor:
+        return False
+    previous_section_id = str(previous_question.get("sectionId") or "")
+    current_section_id = str((current_section or {}).get("id") or "")
+    if current_section_id and current_section_id != previous_section_id:
+        return True
+    return previous_number >= 3
+
+
+def unique_question_id(number: int, questions: list[dict[str, Any]]) -> str:
+    """Return a stable unique id while keeping q_N for the first occurrence."""
+    base = f"q_{number}"
+    existing = {str(question.get("id") or "") for question in questions}
+    if base not in existing:
+        return base
+    suffix = 2
+    while f"{base}_{suffix}" in existing:
+        suffix += 1
+    return f"{base}_{suffix}"
 
 
 def is_valid_inline_question_anchor(source: str, line: str, line_start: int, match: re.Match[str]) -> bool:
@@ -382,10 +501,14 @@ def evaluate_boundary_confidence(markdown: str, boundaries: dict[str, Any], asse
     expected_numbers = contract_expected_numbers(contract)
     if expected_numbers and numbers != expected_numbers and not allows_partial_prefix:
         reasons.append("question-number-contract-mismatch")
-    if len(set(numbers)) != len(numbers):
+    reset_flags = [bool(question.get("numberingReset")) for question in questions if isinstance(question.get("number"), int)]
+    allows_numbering_resets = sequence_allows_numbering_resets(numbers, reset_flags)
+    if len(set(numbers)) != len(numbers) and not allows_numbering_resets:
         reasons.append("duplicate-question-number")
     if len(numbers) >= 2:
-        for previous, current in zip(numbers, numbers[1:]):
+        for index, (previous, current) in enumerate(zip(numbers, numbers[1:]), start=1):
+            if index < len(reset_flags) and reset_flags[index]:
+                continue
             if current <= previous or current - previous > 1:
                 reasons.append("question-number-gap")
                 break
@@ -667,6 +790,7 @@ def normalize_boundaries(boundaries: dict[str, Any], source: str) -> dict[str, A
                 "type": normalize_type(section.get("type")),
                 "start": clamp_int(section.get("start"), 0, len(source)),
                 "end": clamp_int(section.get("end"), 0, len(source)),
+                "numberingScope": str(section.get("numberingScope") or section.get("numbering_scope") or "global"),
             }
         )
 
@@ -687,6 +811,7 @@ def normalize_boundaries(boundaries: dict[str, Any], source: str) -> dict[str, A
             "start": start,
             "end": end,
             "pageIndex": question.get("pageIndex"),
+            "numberingReset": bool(question.get("numberingReset") or question.get("numbering_reset")),
             "_rawSubQuestions": question.get("subQuestions") or question.get("children"),
             "_rawOptions": question.get("options"),
             "_rawImages": question.get("images"),
@@ -767,10 +892,15 @@ def build_question(source: str, raw_question: dict[str, Any], assets: list[dict[
 
     number = parse_number(raw_question.get("number"), fallback_index)
     question_id = str(raw_question.get("id") or f"q_{number}")
-    body = strip_question_number(raw_text)
+    solution = extract_embedded_solution_blocks(raw_text, start)
+    stem_raw_text = solution["stemText"]
+    body = strip_question_number(stem_raw_text)
     question_type = refine_question_type_from_markdown(normalize_type(raw_question.get("type")), body)
+    if question_type == "unknown" and raw_question.get("options"):
+        question_type = "choice"
     child_boundaries = raw_question.get("subQuestions") or []
-    parent_images = images_for_range(raw_question.get("images") or [], assets, start, end)
+    stem_end = start + len(stem_raw_text)
+    parent_images = images_for_range(raw_question.get("images") or [], assets, start, stem_end)
     question = {
         "id": question_id,
         "number": number,
@@ -780,21 +910,28 @@ def build_question(source: str, raw_question: dict[str, Any], assets: list[dict[
         "pageIndex": raw_question.get("pageIndex"),
         "stemMarkdown": "",
         "manualMarkdown": "",
-        "answer": "",
-        "analysis": "",
+        "answer": solution["answer"],
+        "analysis": solution["analysis"],
+        "answerEvidence": solution["answerEvidence"],
+        "analysisEvidence": solution["analysisEvidence"],
         "images": parent_images,
         "options": [],
         "children": [],
         "subQuestions": [],
-        "sourceEvidence": {"start": start, "end": end},
+        "sourceEvidence": {"start": start, "end": stem_end},
+        "numberingReset": bool(raw_question.get("numberingReset")),
     }
 
     if child_boundaries:
+        question["answer"] = ""
+        question["analysis"] = ""
+        question["answerEvidence"] = ""
+        question["analysisEvidence"] = ""
         first_child_start = int(child_boundaries[0]["start"])
-        parent_stem_raw = source[start:first_child_start]
+        parent_stem_raw = source[start:min(first_child_start, stem_end)]
         question["stemMarkdown"] = normalize_fill_blank_markdown(strip_question_number(parent_stem_raw).strip(), question["type"])
         question["manualMarkdown"] = question["stemMarkdown"]
-        question["images"] = images_for_range(raw_question.get("images") or [], assets, start, first_child_start)
+        question["images"] = images_for_range(raw_question.get("images") or [], assets, start, min(first_child_start, stem_end))
         question_images = raw_question.get("images") or []
         for child_index, child_boundary in enumerate(child_boundaries, start=1):
             child_start = int(child_boundary.get("start") or start)
@@ -841,11 +978,14 @@ def build_sub_question(
     if not raw_text.strip():
         return None
     label = normalize_sub_label(str(raw_child.get("label") or f"({fallback_index})"))
-    body = strip_sub_label(raw_text, label)
+    solution = extract_embedded_solution_blocks(raw_text, start)
+    stem_raw_text = solution["stemText"]
+    body = strip_sub_label(stem_raw_text, label)
     stem, options = split_choice_options(body, "choice")
     base_type = normalize_type(raw_child.get("type") or "unknown")
     question_type = "choice" if options else refine_question_type_from_markdown(base_type, body)
     normalized_stem = stem if options else normalize_fill_blank_markdown(body.strip(), question_type)
+    stem_end = start + len(stem_raw_text)
     child = {
         "id": str(raw_child.get("id") or f"{parent['id']}_sub_{fallback_index}"),
         "label": label,
@@ -857,19 +997,130 @@ def build_sub_question(
         "stem": normalized_stem,
         "stemMarkdown": normalized_stem,
         "manualMarkdown": normalized_stem,
-        "answer": "",
-        "analysis": "",
+        "answer": solution["answer"],
+        "analysis": solution["analysis"],
+        "answerEvidence": solution["answerEvidence"],
+        "analysisEvidence": solution["analysisEvidence"],
         "knowledgePointIds": [],
         "knowledgePoints": [],
         "difficulty": "",
         "score": 0.0,
-        "images": images_for_range(raw_child.get("images") or [], assets, start, end),
+        "images": images_for_range(raw_child.get("images") or [], assets, start, stem_end),
         "options": options,
         "children": [],
         "subQuestions": [],
-        "sourceEvidence": {"start": start, "end": end},
+        "sourceEvidence": {"start": start, "end": stem_end},
     }
     return child
+
+
+def extract_embedded_solution_blocks(text: str, base_offset: int = 0) -> dict[str, Any]:
+    """Split embedded OCR answer/analysis markers out of a question slice."""
+    source = str(text or "")
+    markers = detect_solution_markers(source)
+    if not markers:
+        return {
+            "stemText": source,
+            "answer": "",
+            "analysis": "",
+            "answerEvidence": "",
+            "analysisEvidence": "",
+        }
+
+    first_start = markers[0]["start"]
+    answer_parts: list[str] = []
+    analysis_parts: list[str] = []
+    answer_evidence: list[str] = []
+    analysis_evidence: list[str] = []
+    for index, marker in enumerate(markers):
+        content_start = int(marker["end"])
+        content_end = int(markers[index + 1]["start"]) if index + 1 < len(markers) else len(source)
+        content = source[content_start:content_end].strip()
+        if not content:
+            continue
+        kind = solution_marker_kind(str(marker["label"]))
+        evidence = source[int(marker["start"]) : content_end].strip()
+        if kind == "answer":
+            answer_text, trailing_analysis = split_answer_content(content)
+            if answer_text:
+                answer_parts.append(answer_text)
+                answer_evidence.append(evidence if not trailing_analysis else source[int(marker["start"]) : content_start + len(answer_text)].strip())
+            if trailing_analysis:
+                analysis_parts.append(trailing_analysis)
+                analysis_evidence.append(trailing_analysis)
+        else:
+            analysis_parts.append(content)
+            analysis_evidence.append(evidence)
+
+    return {
+        "stemText": source[:first_start].rstrip(),
+        "answer": "\n\n".join(answer_parts).strip(),
+        "analysis": "\n\n".join(analysis_parts).strip(),
+        "answerEvidence": "\n\n".join(answer_evidence).strip(),
+        "analysisEvidence": "\n\n".join(analysis_evidence).strip(),
+        "solutionEvidence": {
+            "start": base_offset + first_start,
+            "end": base_offset + len(source),
+        },
+    }
+
+
+def detect_solution_markers(text: str) -> list[dict[str, Any]]:
+    markers: list[dict[str, Any]] = []
+    for match in BRACKETED_SOLUTION_MARKER_RE.finditer(text):
+        markers.append(
+            {
+                "label": match.group("label"),
+                "start": match.start(),
+                "end": match.end(),
+            }
+        )
+    for match in LINE_SOLUTION_MARKER_RE.finditer(text):
+        start = match.start("label")
+        markers.append(
+            {
+                "label": match.group("label"),
+                "start": start,
+                "end": match.end(),
+            }
+        )
+    markers.sort(key=lambda item: (int(item["start"]), int(item["end"])))
+    deduped: list[dict[str, Any]] = []
+    occupied: set[tuple[int, int]] = set()
+    for marker in markers:
+        key = (int(marker["start"]), int(marker["end"]))
+        if key in occupied:
+            continue
+        occupied.add(key)
+        deduped.append(marker)
+    return deduped
+
+
+def solution_marker_kind(label: str) -> str:
+    return "answer" if "答案" in label else "analysis"
+
+
+def split_answer_content(content: str) -> tuple[str, str]:
+    """Keep concise answer text separate from unlabeled following explanation."""
+    text = str(content or "").strip()
+    if not text:
+        return "", ""
+    paragraphs = re.split(r"\n\s*\n", text, maxsplit=1)
+    if len(paragraphs) == 2 and looks_like_short_answer(paragraphs[0]):
+        return paragraphs[0].strip(), paragraphs[1].strip()
+    lines = text.splitlines()
+    if len(lines) > 1 and looks_like_short_answer(lines[0]):
+        return lines[0].strip(), "\n".join(lines[1:]).strip()
+    return text, ""
+
+
+def looks_like_short_answer(text: str) -> bool:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact:
+        return False
+    if len(compact) > 80:
+        return False
+    return not re.search(r"因为|所以|由题|可得|解得|证明|计算|根据|对于|若|则", compact)
 
 
 def trim_non_question_tail_end(source: str, start: int, end: int) -> int:
@@ -898,6 +1149,7 @@ def validate_structure(
     question_count = 0
     sub_question_count = 0
     question_numbers: list[int] = []
+    question_numbering_resets: list[bool] = []
 
     for section in structured.get("sections") or []:
         if not isinstance(section, dict):
@@ -909,6 +1161,7 @@ def validate_structure(
             if isinstance(question.get("number"), int):
                 number = int(question["number"])
                 question_numbers.append(number)
+                question_numbering_resets.append(bool(question.get("numberingReset")))
                 if not question_evidence_starts_with_number(markdown, question.get("sourceEvidence"), number):
                     errors.append(f"{question.get('id')} 证据片段未从题号 {number} 开始")
             children = question.get("subQuestions") or question.get("children") or []
@@ -935,7 +1188,7 @@ def validate_structure(
 
     if question_count == 0:
         errors.append("未生成题目结构")
-    validate_structure_contract(contract or {}, question_numbers, question_count, errors, warnings)
+    validate_structure_contract(contract or {}, question_numbers, question_count, errors, warnings, question_numbering_resets)
     return {
         "valid": not errors,
         "questionCount": question_count,
@@ -965,6 +1218,7 @@ def validate_structure_contract(
     question_count: int,
     errors: list[str],
     warnings: list[str],
+    numbering_resets: list[bool] | None = None,
 ) -> None:
     if not isinstance(contract, dict) or not contract:
         return
@@ -990,12 +1244,33 @@ def validate_structure_contract(
         else:
             errors.append(f"题号序列 {question_numbers} 与卷面声明 {expected_numbers} 不一致")
     elif len(set(question_numbers)) != len(question_numbers):
-        errors.append("题号序列存在重复")
+        if sequence_allows_numbering_resets(question_numbers, numbering_resets or []):
+            warnings.append("题号按专题/练习分组重置")
+        else:
+            errors.append("题号序列存在重复")
     elif question_numbers:
-        for previous, current in zip(question_numbers, question_numbers[1:]):
+        for index, (previous, current) in enumerate(zip(question_numbers, question_numbers[1:]), start=1):
+            if numbering_resets and index < len(numbering_resets) and numbering_resets[index]:
+                continue
             if current != previous + 1:
                 warnings.append("题号序列不连续")
                 break
+
+
+def sequence_allows_numbering_resets(numbers: list[int], reset_flags: list[bool]) -> bool:
+    if len(numbers) < 2 or not reset_flags or len(reset_flags) != len(numbers):
+        return False
+    saw_reset = False
+    previous = numbers[0]
+    for index, current in enumerate(numbers[1:], start=1):
+        if reset_flags[index]:
+            if current != 1 or previous < 2:
+                return False
+            saw_reset = True
+        elif current != previous + 1:
+            return False
+        previous = current
+    return saw_reset
 
 
 def validate_images(question: dict[str, Any], asset_paths: set[str], errors: list[str]) -> None:
@@ -1009,20 +1284,29 @@ def validate_images(question: dict[str, Any], asset_paths: set[str], errors: lis
 
 def merge_legacy_images(structured: dict[str, Any], legacy: dict[str, Any]) -> None:
     """Preserve image assignments from the legacy content_list parser when present."""
-    legacy_by_number: dict[int, dict[str, Any]] = {}
+    legacy_by_number: dict[int, list[dict[str, Any]]] = {}
     for section in legacy.get("sections") or []:
         if not isinstance(section, dict):
             continue
         for question in section.get("questions") or []:
             if isinstance(question, dict) and isinstance(question.get("number"), int):
-                legacy_by_number[question["number"]] = question
+                legacy_by_number.setdefault(question["number"], []).append(question)
+    occurrence_by_number: dict[int, int] = {}
     for section in structured.get("sections") or []:
         if not isinstance(section, dict):
             continue
         for question in section.get("questions") or []:
-            if not isinstance(question, dict) or question.get("images"):
+            if not isinstance(question, dict):
                 continue
-            legacy_question = legacy_by_number.get(question.get("number"))
+            number = question.get("number")
+            if not isinstance(number, int):
+                continue
+            occurrence = occurrence_by_number.get(number, 0)
+            occurrence_by_number[number] = occurrence + 1
+            if question.get("images"):
+                continue
+            legacy_candidates = legacy_by_number.get(number) or []
+            legacy_question = legacy_candidates[occurrence] if occurrence < len(legacy_candidates) else None
             if legacy_question and legacy_question.get("images"):
                 question["images"] = legacy_question["images"]
 
@@ -1092,6 +1376,20 @@ def is_section_heading_line(stripped: str, heading_text: str, section_type: str)
     if len(heading_text) > 80:
         return False
     return False
+
+
+def is_generic_section_heading_line(stripped: str, heading_text: str) -> bool:
+    """Return true for topic-compilation headings that do not imply a question type."""
+    text = str(heading_text or "").strip()
+    if not text:
+        return False
+    if len(text) > 48:
+        return False
+    if QUESTION_NUMBER_RE.match(text):
+        return False
+    if stripped.startswith("#") and GENERIC_SECTION_HEADING_RE.match(text):
+        return True
+    return bool(GENERIC_SECTION_HEADING_RE.match(text))
 
 
 def normalize_type(value: Any) -> str:

@@ -265,6 +265,7 @@ def detect_choice_option_markers(markdown: str) -> list[dict[str, Any]]:
         rf"(^|[\r\n]+|[ \t　]+|[。；;：:，,、?？）)]\s*)"
         rf"(?:[-*+]\s*)?(?:[（(]?({label_pattern})[）)]|({label_pattern})[\.．、:：])\s*"
     )
+    glued_punctuated_pattern = re.compile(rf"(?<=[\u4e00-\u9fff）)\]}}])([B-Hb-hＢ-Ｈｂ-ｈ])[\.．、:：]\s*")
     bare_line_pattern = re.compile(rf"(^|[\r\n]+)\s*(?:[-*+]\s*)?({label_pattern})(?=\s+)")
     markers: list[dict[str, Any]] = []
     for match in punctuated_pattern.finditer(markdown):
@@ -275,6 +276,17 @@ def detect_choice_option_markers(markdown: str) -> list[dict[str, Any]]:
             {
                 "label": label,
                 "marker_start": match.start() + len(match.group(1) or ""),
+                "content_start": match.end(),
+            }
+        )
+    for match in glued_punctuated_pattern.finditer(markdown):
+        label = normalize_choice_label(match.group(1) or "")
+        if not label:
+            continue
+        markers.append(
+            {
+                "label": label,
+                "marker_start": match.start(1),
                 "content_start": match.end(),
             }
         )
@@ -573,6 +585,62 @@ def normalize_question_options_image_refs(options: Any, images: Any) -> list[dic
     return normalized_options
 
 
+def trailing_question_images(markdown: str, images: Any) -> list[dict[str, Any]]:
+    """提取题干末尾连续题图块对应的题图。"""
+    normalized_images = normalize_question_images(images)
+    match = TRAILING_IMAGE_BLOCK_RE.search(str(markdown or ""))
+    if not match or not normalized_images:
+        return []
+    matched_images: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for image_match in MARKDOWN_IMAGE_RE.finditer(match.group(0)):
+        src = image_match.group(1).strip().strip("<>")
+        probe = f"![]({src})"
+        for image in normalized_images:
+            label = question_image_label(image, len(matched_images))
+            if label in seen_labels:
+                continue
+            if markdown_contains_question_image(probe, image):
+                matched_images.append(image)
+                seen_labels.add(label)
+                break
+    return matched_images
+
+
+def attach_choice_images_to_text_options(
+    stem_markdown: str,
+    options: Any,
+    images: Any,
+    question_type: str,
+) -> list[dict[str, Any]]:
+    """把 OCR 识别到但堆在题干尾部的选项题图分配回 A/B/C/D 选项。"""
+    normalized_images = normalize_question_images(images)
+    normalized_options = normalize_question_options_image_refs(options, normalized_images)
+    if str(question_type or "").strip() != "choice" or len(normalized_options) < 2 or not normalized_images:
+        return normalized_options
+    if any(markdown_referenced_image_labels(option.get("content") or "", normalized_images) for option in normalized_options):
+        return normalized_options
+
+    option_count = len(normalized_options)
+    candidates = trailing_question_images(stem_markdown, normalized_images)
+    if len(candidates) != option_count:
+        candidates = normalized_images if len(normalized_images) == option_count else []
+    if len(candidates) != option_count or not question_text_suggests_image(stem_markdown):
+        return normalized_options
+
+    attached_options: list[dict[str, Any]] = []
+    for option, image in zip(normalized_options, candidates):
+        content = str(option.get("content") or option.get("contentMarkdown") or "").strip()
+        image_markdown = question_image_markdown(image, 0)
+        next_content = f"{image_markdown}\n\n{content}".strip() if content else image_markdown
+        attached_options.append({
+            **option,
+            "content": next_content,
+            "contentMarkdown": next_content,
+        })
+    return attached_options
+
+
 def option_texts(options: Any) -> list[str]:
     """提取选项正文，用于题图引用去重。"""
     if not isinstance(options, list):
@@ -641,7 +709,12 @@ def ensure_question_images_in_markdown(question: dict[str, Any]) -> bool:
         question["images"] = images
         changed = True
     if question.get("options"):
-        next_options = normalize_question_options_image_refs(question.get("options"), images)
+        next_options = attach_choice_images_to_text_options(
+            str(question.get("stemMarkdown") or question.get("manualMarkdown") or ""),
+            question.get("options"),
+            images,
+            str(question.get("type") or ""),
+        )
         if next_options != question.get("options"):
             question["options"] = next_options
             changed = True
@@ -672,7 +745,12 @@ def ensure_question_images_in_markdown(question: dict[str, Any]) -> bool:
         question["images"] = images
         changed = True
         if question.get("options"):
-            next_options = normalize_question_options_image_refs(question.get("options"), images)
+            next_options = attach_choice_images_to_text_options(
+                str(question.get("stemMarkdown") or question.get("manualMarkdown") or ""),
+                question.get("options"),
+                images,
+                str(question.get("type") or ""),
+            )
             if next_options != question.get("options"):
                 question["options"] = next_options
                 changed = True

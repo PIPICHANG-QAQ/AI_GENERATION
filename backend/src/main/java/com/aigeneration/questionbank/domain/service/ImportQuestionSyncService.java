@@ -238,6 +238,89 @@ public class ImportQuestionSyncService {
     }
 
     /**
+     * 将人工编辑载荷写入 Java 侧导入题快照。
+     *
+     * <p>正常路径下编辑请求会先写 worker 再同步 Java；该方法用于 worker 临时不可用时的
+     * 本地兜底，也保证历史记录和入库读取的是最新人工编辑内容。</p>
+     *
+     * @param taskId 任务 ID
+     * @param questionId 导入题 ID
+     * @param payload 前端编辑载荷
+     * @return 更新后的题目实体；题目不存在或任务不匹配时返回 null
+     */
+    public ImportQuestionEntity updateQuestionFromPayload(String taskId, String questionId, Map<String, Object> payload) {
+        ImportQuestionEntity question = questionMapper.selectById(questionId);
+        if (question == null || !taskId.equals(question.getTaskId())) {
+            return null;
+        }
+        Map<String, Object> raw = json.readMap(question.getRawJson());
+        LocalDateTime now = LocalDateTime.now();
+        boolean imagesChanged = false;
+
+        if (payload.containsKey("type")) {
+            question.setType(text(payload.get("type")));
+        }
+        if (payload.containsKey("status")) {
+            question.setStatus(text(payload.get("status")));
+        }
+        if (payload.containsKey("stemMarkdown")) {
+            question.setStemMarkdown(text(payload.get("stemMarkdown")));
+        }
+        if (payload.containsKey("manualMarkdown")) {
+            question.setManualMarkdown(text(payload.get("manualMarkdown")));
+            raw.put("manualEditedAt", now.toString());
+        }
+        if (payload.containsKey("answer")) {
+            question.setAnswer(text(payload.get("answer")));
+        }
+        if (payload.containsKey("analysis")) {
+            question.setAnalysis(text(payload.get("analysis")));
+        }
+        if (payload.containsKey("knowledgePointIds")) {
+            question.setKnowledgePointIdsJson(json.write(payload.get("knowledgePointIds")));
+        }
+        if (payload.containsKey("knowledgePoints")) {
+            question.setKnowledgePointsJson(json.write(payload.get("knowledgePoints")));
+        }
+        if (payload.containsKey("difficulty")) {
+            question.setDifficulty(text(payload.get("difficulty")));
+        }
+        if (payload.containsKey("score")) {
+            question.setScore(decimal(payload.get("score")));
+        }
+        if (payload.containsKey("images")) {
+            question.setImagesJson(json.write(payload.get("images")));
+            imagesChanged = true;
+        }
+        if (payload.containsKey("options")) {
+            question.setOptionsJson(json.write(payload.get("options")));
+        }
+        if (payload.containsKey("mathValidation")) {
+            question.setMathValidationJson(json.write(payload.get("mathValidation")));
+        }
+        if (payload.containsKey("subQuestions") || payload.containsKey("children")) {
+            Object children = payload.containsKey("subQuestions") ? payload.get("subQuestions") : payload.get("children");
+            question.setChildrenJson(json.write(children));
+            if (!listValue(children).isEmpty()) {
+                question.setAnswer("");
+                question.setAnalysis("");
+            }
+        } else if (!json.readList(question.getChildrenJson()).isEmpty()) {
+            question.setAnswer("");
+            question.setAnalysis("");
+        }
+
+        question.setUpdatedAt(now);
+        mergeRawQuestionFields(raw, question);
+        question.setRawJson(json.write(raw));
+        questionMapper.updateById(question);
+        if (imagesChanged) {
+            syncImages(taskId, questionId, payload.get("images"), now);
+        }
+        return question;
+    }
+
+    /**
      * 删除任务下所有导入题目和题图快照。
      *
      * @param taskId 任务 ID
@@ -346,6 +429,36 @@ public class ImportQuestionSyncService {
         question.setUpdatedAt(now);
         questionMapper.updateById(question);
         syncImages(question.getTaskId(), question.getId(), images, now);
+    }
+
+    /**
+     * 将实体字段回写到原始题目快照，保持旧 worker 兼容字段一致。
+     *
+     * @param raw 原始题目 Map
+     * @param question 已更新的题目实体
+     */
+    private void mergeRawQuestionFields(Map<String, Object> raw, ImportQuestionEntity question) {
+        raw.put("id", question.getId());
+        raw.put("taskId", question.getTaskId());
+        raw.put("sourceQuestionId", question.getSourceQuestionId());
+        raw.put("number", question.getQuestionNumber());
+        raw.put("status", question.getStatus());
+        raw.put("type", question.getType());
+        raw.put("stemMarkdown", question.getStemMarkdown());
+        raw.put("manualMarkdown", question.getManualMarkdown());
+        raw.put("answer", question.getAnswer());
+        raw.put("analysis", question.getAnalysis());
+        raw.put("knowledgePointIds", json.readList(question.getKnowledgePointIdsJson()));
+        raw.put("knowledgePoints", json.readList(question.getKnowledgePointsJson()));
+        raw.put("difficulty", question.getDifficulty());
+        raw.put("score", question.getScore());
+        raw.put("images", json.readList(question.getImagesJson()));
+        raw.put("options", json.readList(question.getOptionsJson()));
+        List<Object> children = json.readList(question.getChildrenJson());
+        raw.put("children", children);
+        raw.put("subQuestions", children);
+        raw.put("mathValidation", json.readMap(question.getMathValidationJson()));
+        raw.put("updatedAt", question.getUpdatedAt());
     }
 
     /**

@@ -31,6 +31,107 @@ D. 丁
         self.assertTrue(confidence["highConfidence"])
         self.assertEqual([], confidence["lowConfidenceQuestionIds"])
 
+    def test_topic_compilation_allows_numbering_resets(self):
+        markdown = """专题 01 集合、常用逻辑用语与复数
+
+考点 01 集合
+
+1．（2026·新课标全国Ⅰ卷·高考真题）已知集合 A，则 A∩B=（ ）
+A. 甲 B. 乙 C. 丙 D. 丁
+【答案】A
+
+2．（2026·北京卷·高考真题）已知集合 M，则 M∪N=（ ）
+A. 甲 B. 乙 C. 丙 D. 丁
+【答案】B
+
+考点 02 常用逻辑用语
+
+1．（2026·天津卷·高考真题）设 x∈R，则“x>0”是“x^2+3x>0”的（ ）
+A. 充分而不必要条件 B. 必要而不充分条件 C. 充分必要条件 D. 既不充分也不必要条件
+【答案】A
+
+2．（2026·北京卷·高考真题）若 p 是真命题，则下列说法正确的是（ ）
+A. 甲 B. 乙 C. 丙 D. 丁
+【答案】C
+
+三、填空题
+
+3．（2026·上海·三模）已知全集 U=R，则 A∩B=________．
+【答案】{1}
+"""
+        boundaries = detect_local_boundaries(markdown, [])
+        confidence = evaluate_boundary_confidence(markdown, boundaries, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        validation = validate_structure(structured, markdown, [], boundaries.get("structureContract"))
+
+        self.assertTrue(confidence["highConfidence"])
+        self.assertEqual([1, 2, 1, 2, 3], [question["number"] for question in structured["questions"]])
+        self.assertTrue(structured["questions"][2]["numberingReset"])
+        self.assertEqual(["q_1", "q_2", "q_1_2", "q_2_2", "q_3"], [question["id"] for question in structured["questions"]])
+        self.assertTrue(validation["valid"])
+        self.assertIn("题号按专题/练习分组重置", validation["warnings"])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in structured["questions"][0]["options"]])
+        self.assertEqual("A", structured["questions"][0]["answer"])
+        self.assertNotIn("【答案】", structured["questions"][0]["stemMarkdown"])
+
+    def test_extracts_inline_answer_and_analysis_from_question_slice(self):
+        markdown = """## 一、选择题
+1. 已知集合 A，则 A∩B=（ ）A. 甲 B. 乙 C. 丙 D. 丁【答案】C【详解】因为 A 和 B 的公共元素为丙，所以选 C。
+2. 已知集合 M，则 M∪N=（ ）
+A. 甲 B. 乙 C. 丙 D. 丁
+【答案】B
+【分析】根据并集定义处理。
+【详解】合并两个集合中的元素，得到乙。
+"""
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        first, second = structured["questions"]
+
+        self.assertEqual("C", first["answer"])
+        self.assertIn("公共元素", first["analysis"])
+        self.assertNotIn("【答案】", first["stemMarkdown"])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in first["options"]])
+        self.assertEqual("B", second["answer"])
+        self.assertIn("根据并集定义处理", second["analysis"])
+        self.assertIn("得到乙", second["analysis"])
+        self.assertNotIn("【详解】", second["stemMarkdown"])
+
+    def test_short_answer_followed_by_unlabeled_solution_goes_to_analysis(self):
+        markdown = """## 一、选择题
+1. 已知全集 U，则结果为（ ）A. 甲 B. 乙 C. 丙 D. 丁
+【答案】D
+
+$$
+A \\cup B = U
+$$
+
+所以选 D。
+"""
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        question = structured["questions"][0]
+
+        self.assertEqual("D", question["answer"])
+        self.assertIn("A \\cup B", question["analysis"])
+        self.assertIn("所以选 D", question["analysis"])
+
+    def test_topic_overview_numbered_list_is_not_question(self):
+        markdown = """专题 01 集合、常用逻辑用语与复数
+
+创新考法
+1. 多选题形式（全国Ⅰ卷）：增加了试题的覆盖面，要求考生全面判断。
+
+考点 01 集合
+
+1．（2026·新课标全国Ⅰ卷·高考真题）已知集合 A，则 A∩B=（ ）
+A. 甲 B. 乙 C. 丙 D. 丁
+"""
+        boundaries = detect_local_boundaries(markdown, [])
+
+        self.assertEqual([1], [question["number"] for question in boundaries["questions"]])
+        self.assertFalse(boundaries["anchorCandidates"][0]["accepted"])
+        self.assertIn("weak-question-anchor", boundaries["anchorCandidates"][0]["reasons"])
+
     def test_low_confidence_when_question_numbers_are_not_monotonic(self):
         markdown = """一、选择题
 1. 第一题
@@ -142,6 +243,23 @@ D. $x=1$ 或 $x=-3$
         self.assertEqual(["甲", "乙", "丙", "丁"], [option["content"] for option in first["options"]])
         self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in second["options"]])
         self.assertEqual(["甲", "乙", "丙", "丁"], [option["content"] for option in second["options"]])
+
+    def test_splits_glued_later_choice_markers(self):
+        markdown = """一、选择题
+1. 设 x∈R，则下列条件判断正确的是（ ）
+A. 充分而不必要条件
+B. 必要而不充分条件C. 充分必要条件 D. 既不充分也不必要条件
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        structured = build_structure_from_boundaries(markdown, boundaries, [])
+        question = structured["sections"][0]["questions"][0]
+
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in question["options"]])
+        self.assertEqual(
+            ["充分而不必要条件", "必要而不充分条件", "充分必要条件", "既不充分也不必要条件"],
+            [option["content"] for option in question["options"]],
+        )
 
     def test_splits_bare_choice_markers_only_at_line_start(self):
         markdown = """一、选择题

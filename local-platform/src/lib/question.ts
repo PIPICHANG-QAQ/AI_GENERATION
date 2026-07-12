@@ -572,6 +572,47 @@ export function normalizeQuestionOptions(value: unknown, images: QuestionImage[]
   return options;
 }
 
+function optionContainsImageRef(option: QuestionOption): boolean {
+  return /!\[[^\]]*]\s*\([^)]+\)/.test(option.contentMarkdown || option.content || "");
+}
+
+function optionsContainImageRefs(options: QuestionOption[]): boolean {
+  return options.some(optionContainsImageRef);
+}
+
+function questionTextSuggestsOptionImages(markdown: string): boolean {
+  const text = String(markdown || "").replace(/!\[[^\]]*]\s*\([^)]+\)/g, "");
+  return /如图|下图|图中|图示|示意图|图形|标志|图[①②③④⑤⑥⑦⑧⑨⑩一二三四五六七八九十1-9]/.test(text);
+}
+
+function attachChoiceImagesToTextOptions(
+  markdown: string,
+  rawOptions: unknown,
+  images: QuestionImage[] = [],
+  questionType: string = "",
+): QuestionOption[] {
+  const options = normalizeQuestionOptions(rawOptions, images);
+  const labeledImages = ensureQuestionImageLabels(images);
+  if (
+    questionType !== "choice" ||
+    options.length < 2 ||
+    labeledImages.length !== options.length ||
+    optionsContainImageRefs(options) ||
+    !questionTextSuggestsOptionImages(markdown)
+  ) {
+    return options;
+  }
+  return options.map((option, index) => {
+    const imageMarkdown = `![](${getQuestionImageLabel(labeledImages[index], index)})`;
+    const content = [imageMarkdown, option.contentMarkdown || option.content].filter(Boolean).join("\n\n");
+    return {
+      ...option,
+      content,
+      contentMarkdown: content,
+    };
+  });
+}
+
 export function serializeQuestionOptions(value: unknown, images: QuestionImage[] = []): QuestionOption[] {
   return normalizeQuestionOptions(value, images).map((option) => ({
     label: option.label,
@@ -753,15 +794,23 @@ export function getQuestionMarkdownParts(
 ): { stemMarkdown: string; options: QuestionOption[] } {
   const normalizedMarkdown = normalizeQuestionImageRefsInMarkdown(markdown, images);
   const parsed = splitChoiceOptionsFromMarkdown(normalizedMarkdown, questionType);
+  const normalizedFallbackOptions =
+    questionType === "choice"
+      ? attachChoiceImagesToTextOptions(parsed.stemMarkdown || normalizedMarkdown, fallbackOptions, images, questionType)
+      : [];
   if (parsed.options.length > 0) {
+    const parsedOptions = normalizeQuestionOptions(parsed.options, images);
     return {
       stemMarkdown: parsed.stemMarkdown,
-      options: normalizeQuestionOptions(parsed.options, images),
+      options:
+        optionsContainImageRefs(normalizedFallbackOptions) && !optionsContainImageRefs(parsedOptions)
+          ? normalizedFallbackOptions
+          : parsedOptions,
     };
   }
   return {
     stemMarkdown: String(normalizedMarkdown || "").trim(),
-    options: questionType === "choice" ? normalizeQuestionOptions(fallbackOptions, images) : [],
+    options: normalizedFallbackOptions,
   };
 }
 

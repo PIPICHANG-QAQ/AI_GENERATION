@@ -15,6 +15,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { RefreshCcw, CheckCircle2, FileText, Database, ExternalLink, Eye, EyeOff, Circle, Clock3, AlertCircle, MinusCircle, Wand2, ScanSearch, Sparkles } from "lucide-react";
 import { QuestionCard } from "./QuestionCard";
@@ -265,6 +271,8 @@ function OcrFlowProgress({ task, onRefresh }: { task: any; onRefresh: () => void
   const jobs = activeOcrJobs(task);
   const runningJob = jobs.find((view) => view.job?.ocrFlow?.status === "running");
   const runningStep = runningJob?.job?.ocrFlow?.steps?.find((step) => step.id === runningJob.job?.ocrFlow?.currentStep);
+  const hasRunningJob = Boolean(runningJob);
+  const finishedJobs = jobs.filter((view) => view.job?.ocrFlow?.status === "success" || view.job?.status === "success").length;
 
   return (
     <div className="space-y-4">
@@ -272,11 +280,19 @@ function OcrFlowProgress({ task, onRefresh }: { task: any; onRefresh: () => void
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-              <RefreshCcw className="w-4 h-4 animate-spin text-primary" />
-              OCR-Flow 正在执行
+              {hasRunningJob ? (
+                <RefreshCcw className="w-4 h-4 animate-spin text-primary" />
+              ) : (
+                <Clock3 className="w-4 h-4 text-primary" />
+              )}
+              {hasRunningJob ? "OCR-Flow 正在执行" : "OCR-Flow 节点流程"}
             </div>
             <p className="mt-1 truncate text-xs text-muted-foreground">
-              {runningJob && runningStep ? `${runningJob.title}：${runningStep.label || runningStep.id}` : "等待最新节点状态"}
+              {runningJob && runningStep
+                ? `${runningJob.title}：${runningStep.label || runningStep.id}`
+                : finishedJobs > 0
+                  ? `已完成 ${finishedJobs}/${jobs.length} 个 OCR job`
+                  : "等待最新节点状态"}
             </p>
           </div>
           <Button variant="outline" size="sm" onClick={onRefresh} className="h-8 shrink-0 gap-1.5">
@@ -481,6 +497,7 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
   const [aiProgress, setAiProgress] = useState<BatchAiProgress | null>(null);
   const [stdProgress, setStdProgress] = useState<BatchAiProgress | null>(null);
   const [rescanDialogOpen, setRescanDialogOpen] = useState(false);
+  const [ocrFlowOpen, setOcrFlowOpen] = useState(false);
   const [showLayoutBoxes, setShowLayoutBoxes] = useState(true);
   const [highlightQuestionId, setHighlightQuestionId] = useState<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -938,6 +955,7 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
 
   const hasAnswer = !!task.answerFile;
   const isProcessing = task.status === "处理中";
+  const hasOcrFlow = activeOcrJobs(task).some((view) => view.job || view.status);
   const paperLayout = (task.paperLayout || null) as PaperLayout | null;
   const hasPaperLayout =
     fileType === "paper"
@@ -963,6 +981,15 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
           </div>
         </div>
         <div className="flex flex-wrap justify-end gap-2 shrink-0">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setOcrFlowOpen(true)}
+            disabled={!hasOcrFlow}
+            className="gap-2"
+          >
+            <Clock3 className="w-4 h-4" /> OCR 流程
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -1001,6 +1028,17 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
           </Button>
         </div>
       </div>
+
+      <Dialog open={ocrFlowOpen} onOpenChange={setOcrFlowOpen}>
+        <DialogContent className="max-h-[86vh] max-w-4xl overflow-hidden p-0">
+          <DialogHeader className="px-5 pt-5">
+            <DialogTitle>OCR 节点流程</DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[70vh] overflow-y-auto px-5 pb-5">
+            <OcrFlowProgress task={task} onRefresh={handleRefresh} />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={aiDialogOpen} onOpenChange={(open) => !batchRunning && setAiDialogOpen(open)}>
         <AlertDialogContent>
