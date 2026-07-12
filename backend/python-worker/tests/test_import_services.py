@@ -227,6 +227,12 @@ class ImportServicesTest(unittest.TestCase):
         self.assertFalse(first["standardizer"].get("cacheHit", False))
         self.assertTrue(second["standardizer"]["cacheHit"])
         self.assertEqual(first["markdown"], second["markdown"])
+        self.assertEqual("llm", first["executionPath"])
+        self.assertTrue(first["modelInvoked"])
+        self.assertEqual("cache", second["executionPath"])
+        self.assertEqual("llm", second["cachedExecutionPath"])
+        self.assertFalse(second["modelInvoked"])
+        self.assertEqual("safe_to_apply", second["applyRecommendation"])
 
     def test_standardize_llm_timeout_returns_local_fallback_candidate(self):
         markdown = r"计算：$x + 1$。"
@@ -296,6 +302,51 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in result["options"]])
         self.assertIn("AI 标准化选择题结构保护", result["standardizer"]["fixes"])
         self.assertIn("已保留原 OCR 选项结构", " ".join(result["standardizer"]["warnings"]))
+
+    def test_standardize_blocks_same_count_options_when_image_refs_are_removed(self):
+        markdown = r"""题干
+
+\begin{tasks}(2)
+\task ![](图1)
+\task ![](图2)
+\end{tasks}"""
+        hints = {
+            "type": "choice",
+            "options": [
+                {"label": "A", "content": "![](图1)"},
+                {"label": "B", "content": "![](图2)"},
+            ],
+            "images": [
+                {"imageId": "i1", "label": "图1"},
+                {"imageId": "i2", "label": "图2"},
+            ],
+        }
+        candidate = r"""题干
+
+\begin{tasks}(2)
+\task 文字甲
+\task 文字乙
+\end{tasks}"""
+
+        with patch("app.import_services.standardize_markdown_with_llm") as standardize:
+            standardize.return_value = (
+                candidate,
+                {
+                    "source": "ai",
+                    "provider": "mock",
+                    "model": "mock-model",
+                    "error": None,
+                    "corrections": [],
+                    "warnings": [],
+                    "confidence": "medium",
+                    "answer": "",
+                    "analysis": "",
+                },
+            )
+            result = standardize_markdown_ai_response(markdown, structured_hints=hints)
+
+        self.assertEqual("review_required", result["applyRecommendation"])
+        self.assertIn("option_image_reference_removed", result["reviewReasons"])
 
     def test_standardize_collapses_adjacent_duplicate_llm_markdown(self):
         markdown = (

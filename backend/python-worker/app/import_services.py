@@ -705,8 +705,6 @@ def normalized_choice_hint_options(structured_hints: dict[str, Any] | None) -> l
     """从结构化提示中提取稳定选择题选项。"""
     if not isinstance(structured_hints, dict):
         return []
-    if str(structured_hints.get("type") or "").strip() != "choice":
-        return []
     options = []
     seen: set[str] = set()
     for index, item in enumerate(structured_hints.get("options") or []):
@@ -718,6 +716,91 @@ def normalized_choice_hint_options(structured_hints: dict[str, Any] | None) -> l
         seen.add(label)
         options.append({"label": label, "content": content})
     return options
+
+
+def standardize_structure_summary(value: dict[str, Any] | None) -> dict[str, int]:
+    """Return stable structure counts without exposing question content."""
+    source = value if isinstance(value, dict) else {}
+    return {
+        "optionCount": len(source.get("options") or []),
+        "imageCount": len(source.get("images") or []),
+        "subQuestionCount": len(source.get("subQuestions") or source.get("children") or []),
+    }
+
+
+def markdown_image_refs(markdown: str) -> set[str]:
+    return {
+        normalize_image_ref(match.group(1))
+        for match in re.finditer(r"!\[[^\]]*]\(([^)]+)\)", str(markdown or ""))
+        if normalize_image_ref(match.group(1))
+    }
+
+
+def standardize_structure_review_reasons(
+    response: dict[str, Any],
+    structured_hints: dict[str, Any] | None,
+) -> list[str]:
+    """Block candidates that change stable choice/image structure."""
+    original_options = normalized_choice_hint_options(structured_hints)
+    if len(original_options) < 2:
+        return []
+    _stem, markdown_options = split_choice_options(str(response.get("markdown") or ""), "choice")
+    candidate_options = normalized_choice_hint_options({"options": markdown_options})
+    if len(candidate_options) < 2:
+        candidate_options = normalized_choice_hint_options({"options": response.get("options") or []})
+    reasons: list[str] = []
+    if len(candidate_options) != len(original_options):
+        reasons.append("option_count_changed")
+        return reasons
+    if [item["label"] for item in candidate_options] != [item["label"] for item in original_options]:
+        reasons.append("option_labels_changed")
+    for original, candidate in zip(original_options, candidate_options):
+        original_refs = markdown_image_refs(original["content"])
+        candidate_refs = markdown_image_refs(candidate["content"])
+        if original_refs and not original_refs.issubset(candidate_refs):
+            reasons.append("option_image_reference_removed")
+            break
+    return reasons
+
+
+def finalize_standardize_response(
+    response: dict[str, Any],
+    structured_hints: dict[str, Any] | None,
+    execution_path: str,
+    *,
+    model_invoked: bool = False,
+    cache_hit: bool = False,
+    cached_execution_path: str | None = None,
+    pipeline_version: str = "standardization.v1",
+    input_hash: str = "",
+) -> dict[str, Any]:
+    """Attach one stable envelope and run guards for every pipeline exit."""
+    result = copy.deepcopy(response)
+    hints = structured_hints if isinstance(structured_hints, dict) else {}
+    stable_options = normalized_choice_hint_options(hints)
+    if not result.get("options") and len(stable_options) >= 2:
+        result["options"] = copy.deepcopy(hints["options"])
+    if not result.get("images") and hints.get("images"):
+        result["images"] = copy.deepcopy(hints["images"])
+    if not result.get("imagePlacements") and hints.get("imagePlacements"):
+        result["imagePlacements"] = copy.deepcopy(hints["imagePlacements"])
+    reasons = standardize_structure_review_reasons(result, hints)
+    standardizer = result.setdefault("standardizer", {})
+    apply_blocked = bool(standardizer.get("applyBlocked") or standardizer.get("writeBlocked"))
+    result["pipelineVersion"] = pipeline_version or "standardization.v1"
+    result["inputHash"] = input_hash or ""
+    result["executionPath"] = execution_path
+    result["modelInvoked"] = bool(model_invoked)
+    result["cacheHit"] = bool(cache_hit)
+    result["cachedExecutionPath"] = cached_execution_path
+    result["reviewReasons"] = reasons
+    result["applyRecommendation"] = "review_required" if reasons or apply_blocked else "safe_to_apply"
+    result["originalStructure"] = standardize_structure_summary(hints)
+    result["resultStructure"] = standardize_structure_summary(result)
+    calls = standardizer.get("llmCalls") or []
+    result["providerCallAttempts"] = len(calls) if isinstance(calls, list) else 0
+    standardizer["cacheHit"] = bool(cache_hit)
+    return result
 
 
 def choice_tasks_block(options: list[dict[str, str]]) -> str:
@@ -913,6 +996,9 @@ def standardize_markdown_ai_response(
     markdown: str,
     raw_ocr_context: str = "",
     structured_hints: dict[str, Any] | None = None,
+    pipeline_version: str = "standardization.v1",
+    input_hash: str = "",
+    request_source: str = "single",
 ) -> dict[str, Any]:
     """调用 AI 标准化并合并规则修复结果。"""
     severe_issues = detect_severe_latex_issues(markdown)
@@ -925,7 +1011,7 @@ def standardize_markdown_ai_response(
         local_repair_severe_issues = detect_severe_latex_issues(local_repair_result["markdown"])
         if severe_issues and not local_repair_severe_issues:
             render_validation = render_validate_markdown_candidate(local_repair_result["markdown"])
-            return {
+            return finalize_standardize_response({
                 "markdown": local_repair_result["markdown"],
                 "answer": "",
                 "analysis": "",
@@ -956,7 +1042,7 @@ def standardize_markdown_ai_response(
                     "renderValidation": render_validation,
                     "applyBlocked": not render_validation["valid"],
                 },
-            }
+            }, structured_hints, "rules", pipeline_version=pipeline_version, input_hash=input_hash)
     if severe_issues and raw_context:
         raw_candidate_severe_issues = detect_severe_latex_issues(raw_context)
         if len(raw_candidate_severe_issues) < len(severe_issues):
@@ -964,7 +1050,7 @@ def standardize_markdown_ai_response(
             raw_candidate, duplicate_corrections = collapse_adjacent_duplicate_markdown(raw_candidate)
             raw_candidate_severe_issues = detect_severe_latex_issues(raw_candidate)
             render_validation = render_validate_markdown_candidate(raw_candidate)
-            return {
+            return finalize_standardize_response({
                 "markdown": raw_candidate,
                 "standardizer": {
                     "source": "ocr-fallback",
@@ -996,25 +1082,41 @@ def standardize_markdown_ai_response(
                 },
                 "answer": "",
                 "analysis": "",
-            }
+            }, structured_hints, "ocr-fallback", pipeline_version=pipeline_version, input_hash=input_hash)
     cache_key = standardize_cache_key(markdown, raw_context, structured_hints)
     cached_response = cached_standardize_response(cache_key)
     if cached_response:
-        return cached_response
+        cached_path = str(cached_response.get("executionPath") or "llm")
+        return finalize_standardize_response(
+            cached_response,
+            structured_hints,
+            "cache",
+            cache_hit=True,
+            cached_execution_path=cached_path,
+            pipeline_version=pipeline_version,
+            input_hash=input_hash,
+        )
     standardized_markdown, metadata = standardize_markdown_with_llm(
         repaired_markdown,
         raw_ocr_context=raw_context,
         structured_hints=structured_hints,
     )
     if standardized_markdown is None:
-        return standardize_markdown_fallback_response(
-            markdown,
-            repaired_markdown,
-            raw_context,
-            metadata,
-            severe_issues,
-            delimiter_corrections,
-            delimiter_warnings,
+        return finalize_standardize_response(
+            standardize_markdown_fallback_response(
+                markdown,
+                repaired_markdown,
+                raw_context,
+                metadata,
+                severe_issues,
+                delimiter_corrections,
+                delimiter_warnings,
+            ),
+            structured_hints,
+            "llm",
+            model_invoked=True,
+            pipeline_version=pipeline_version,
+            input_hash=input_hash,
         )
     standardized_markdown = normalize_tasks_environment(standardized_markdown)
     standardized_markdown, post_delimiter_corrections, post_delimiter_warnings = repair_latex_delimiter_fragments(standardized_markdown)
@@ -1090,6 +1192,14 @@ def standardize_markdown_ai_response(
             "cacheHit": False,
         },
     }
+    response = finalize_standardize_response(
+        response,
+        structured_hints,
+        "llm",
+        model_invoked=True,
+        pipeline_version=pipeline_version,
+        input_hash=input_hash,
+    )
     store_standardize_response(cache_key, response)
     return response
 

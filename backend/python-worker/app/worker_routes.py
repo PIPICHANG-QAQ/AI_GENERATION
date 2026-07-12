@@ -821,6 +821,9 @@ def standardize_markdown_ai(payload: MarkdownPayload) -> dict[str, Any]:
         payload.markdown,
         raw_ocr_context=payload.rawOcrContext,
         structured_hints=payload.structuredHints,
+        pipeline_version=payload.pipelineVersion,
+        input_hash=payload.inputHash,
+        request_source=payload.requestSource,
     )
 
 

@@ -125,6 +125,9 @@ class MarkdownPayload(BaseModel):
     markdown: str = Field(default="", max_length=100000)
     rawOcrContext: str = Field(default="", max_length=100000)
     structuredHints: dict[str, Any] | None = None
+    pipelineVersion: str = Field(default="standardization.v1", max_length=80)
+    inputHash: str = Field(default="", max_length=128)
+    requestSource: str = Field(default="single", max_length=40)
 
 
 class QuestionManualMarkdownPayload(BaseModel):
