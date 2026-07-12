@@ -9,6 +9,7 @@ from app.import_services import (
     bank_question_duplicate_reason,
     bank_question_from_import,
     build_import_questions,
+    canonicalize_import_outputs,
     clear_standardize_cache,
     detect_severe_latex_issues,
     find_bank_question_index_for_import,
@@ -54,6 +55,94 @@ $$\left\{\begin{array}{l l}{\displaystyle${\frac{5 x - 1}{6}$} + 2$\geq$ \displa
 class ImportServicesTest(unittest.TestCase):
     def setUp(self):
         clear_standardize_cache()
+
+    def test_canonicalize_import_outputs_merges_answer_zone_duplicate(self):
+        markdown = "1. 第一题\n参考答案与试题解析\n1. 第一题\n【解答】解析"
+        answer_start = markdown.rindex("1. 第一题")
+        task = {"id": "task-1", "paperOcrJobId": "ocr-1"}
+        outputs = {
+            "markdown": markdown,
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "stemMarkdown": "第一题",
+                    "sourceEvidence": {"start": 0, "end": markdown.index("参考答案")},
+                },
+                {
+                    "id": "q_1_2",
+                    "number": 1,
+                    "stemMarkdown": "第一题",
+                    "analysis": "解析",
+                    "sourceEvidence": {"start": answer_start, "end": len(markdown)},
+                },
+            ],
+        }
+
+        result = canonicalize_import_outputs(task, outputs)
+        repeated = canonicalize_import_outputs(task, outputs)
+
+        self.assertEqual(2, result["summary"]["beforeQuestionCount"])
+        self.assertEqual(1, result["summary"]["afterQuestionCount"])
+        self.assertEqual(1, result["summary"]["mergedQuestionCount"])
+        self.assertEqual("解析", result["questions"][0]["analysis"])
+        self.assertEqual([], result["blockingIssues"])
+        self.assertTrue(result["applyToken"])
+        self.assertEqual(result["applyToken"], repeated["applyToken"])
+        self.assertEqual(result["questions"][0]["id"], repeated["questions"][0]["id"])
+
+    def test_canonicalization_preview_preserves_saved_paper_question_edits(self):
+        markdown = "1. 第一题\n参考答案\n1. 第一题"
+        task = {
+            "id": "task-1",
+            "paperOcrJobId": "ocr-1",
+            "questions": [
+                {
+                    "id": "saved-paper-id",
+                    "sourceQuestionId": "q_1",
+                    "number": 1,
+                    "manualMarkdown": "人工修订后的第一题",
+                    "analysis": "",
+                    "images": [{"imageId": "saved-image"}],
+                    "options": [],
+                },
+                {
+                    "id": "saved-answer-id",
+                    "sourceQuestionId": "q_1_2",
+                    "number": 2,
+                },
+            ],
+        }
+        outputs = {
+            "markdown": markdown,
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "stemMarkdown": "第一题",
+                    "sourceEvidence": {"start": 0, "end": markdown.index("参考答案")},
+                },
+                {
+                    "id": "q_1_2",
+                    "number": 1,
+                    "stemMarkdown": "第一题",
+                    "analysis": "答案区解析",
+                    "sourceEvidence": {"start": markdown.rindex("1. 第一题"), "end": len(markdown)},
+                },
+            ],
+        }
+
+        result = canonicalize_import_outputs(task, outputs)
+
+        canonical = result["questions"][0]
+        self.assertEqual("saved-paper-id", canonical["id"])
+        self.assertEqual("人工修订后的第一题", canonical["manualMarkdown"])
+        self.assertEqual([{"imageId": "saved-image"}], canonical["images"])
+        self.assertEqual("答案区解析", canonical["analysis"])
+        self.assertEqual(
+            {"saved-paper-id": "saved-paper-id", "saved-answer-id": "saved-paper-id"},
+            result["canonicalization"]["idMap"],
+        )
 
     def test_standardize_repairs_fragmented_latex_delimiters_without_llm(self):
         self.assertIn("展示公式内部嵌套了单个 $ 分隔符", detect_severe_latex_issues(BROKEN_MARKDOWN))

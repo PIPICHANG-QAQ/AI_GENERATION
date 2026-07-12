@@ -14,6 +14,7 @@ from app.worker_base import *
 from app.question_markdown import *
 from app.ocr_processing import *
 from app.question_boundary import detect_sub_question_boundaries, strip_sub_label
+from app.question_canonicalization import apply_canonicalization, build_canonicalization_plan
 
 AI_STANDARDIZE_CACHE_VERSION = "2026-07-09-choice-image-ref-guard-v1"
 AI_STANDARDIZE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -98,7 +99,13 @@ def sync_import_task(task: dict[str, Any], store: dict[str, Any]) -> dict[str, A
                 answer_job["outputs"] = collect_outputs(answer_job["jobId"])
                 write_job(answer_job)
             answer_context = str((answer_job.get("outputs") or {}).get("markdown") or "")
-        task["questions"] = build_import_questions(task, paper_job.get("outputs") or {}, answer_context)
+        canonical_preview = canonicalize_import_outputs(task, paper_job.get("outputs") or {}, answer_context)
+        task["questions"] = canonical_preview["questions"]
+        task["canonicalization"] = canonical_preview["canonicalization"]
+        task["canonicalization"]["applyToken"] = canonical_preview["applyToken"]
+        task["autoStandardize"] = auto_standardize_import_questions(
+            task["questions"], task, paper_job.get("outputs") or {}
+        )
         task["updatedAt"] = now_iso()
 
     if task.get("questions"):
@@ -120,6 +127,165 @@ def safe_read_job(job_id: Any) -> dict[str, Any] | None:
     path = job_file(str(job_id))
     job = read_json_with_backup(path)
     return job if isinstance(job, dict) else None
+
+
+def canonicalize_import_outputs(
+    task: dict[str, Any],
+    outputs: dict[str, Any],
+    answer_context: str = "",
+) -> dict[str, Any]:
+    """Build a deterministic, read-only import preview from canonical OCR questions."""
+    task_copy = copy.deepcopy(task) if isinstance(task, dict) else {}
+    outputs_copy = copy.deepcopy(outputs) if isinstance(outputs, dict) else {}
+    source_questions = unique_source_question_ids(top_level_ocr_questions(outputs_copy))
+    markdown = str(outputs_copy.get("markdown") or "")
+    plan = build_canonicalization_plan(markdown, source_questions)
+    applied = apply_canonicalization(source_questions, plan)
+    canonical_sources = applied["questions"]
+
+    canonical_outputs = copy.deepcopy(outputs_copy)
+    canonical_outputs["questions"] = canonical_sources
+    canonical_outputs["sections"] = [{"id": "canonical", "questions": canonical_sources}]
+    import_questions = build_import_questions(
+        task_copy,
+        canonical_outputs,
+        answer_context,
+        run_auto_standardize=False,
+    )
+
+    task_id = str(task_copy.get("id") or "").strip()
+    existing_questions_by_source = {
+        str(item.get("sourceQuestionId") or "").strip(): copy.deepcopy(item)
+        for item in task_copy.get("questions") or []
+        if isinstance(item, dict)
+        and str(item.get("sourceQuestionId") or "").strip()
+        and str(item.get("id") or "").strip()
+    }
+    existing_by_source = {
+        source_id: str(item.get("id") or "").strip()
+        for source_id, item in existing_questions_by_source.items()
+    }
+    source_import_ids: dict[str, str] = {}
+    for index, source in enumerate(source_questions, start=1):
+        source_id = question_source_id(source, index)
+        source_import_ids[source_id] = existing_by_source.get(source_id) or stable_import_question_id(task_id, source_id)
+
+    canonical_by_id = {str(item.get("id") or ""): item for item in canonical_sources if isinstance(item, dict)}
+    for index, question in enumerate(import_questions, start=1):
+        source_id = str(question.get("sourceQuestionId") or "").strip()
+        question["id"] = source_import_ids.get(source_id) or stable_import_question_id(task_id, source_id or str(index))
+        existing = existing_questions_by_source.get(source_id)
+        if isinstance(existing, dict):
+            question = preserve_existing_import_question(existing, question)
+            import_questions[index - 1] = question
+        source = canonical_by_id.get(source_id)
+        if isinstance(source, dict):
+            merged_sources = [str(value) for value in source.get("mergedFromQuestionIds") or [] if str(value)]
+            if merged_sources:
+                question["mergedFromQuestionIds"] = [
+                    source_import_ids.get(value) or stable_import_question_id(task_id, value)
+                    for value in merged_sources
+                ]
+            if source.get("canonicalizationIssues"):
+                question["canonicalizationIssues"] = copy.deepcopy(source["canonicalizationIssues"])
+
+    import_id_map: dict[str, str] = {}
+    for source_id, canonical_source_id in (plan.get("idMap") or {}).items():
+        source_import_id = source_import_ids.get(source_id) or stable_import_question_id(task_id, source_id)
+        canonical_import_id = source_import_ids.get(canonical_source_id) or stable_import_question_id(
+            task_id, canonical_source_id
+        )
+        import_id_map[source_import_id] = canonical_import_id
+
+    summary = {
+        "beforeQuestionCount": len(source_questions),
+        "afterQuestionCount": len(import_questions),
+        "mergedQuestionCount": len(source_questions) - len(import_questions),
+    }
+    canonicalization = {
+        **copy.deepcopy(plan),
+        "sourceIdMap": copy.deepcopy(plan.get("idMap") or {}),
+        "idMap": import_id_map,
+        "requiresReview": bool(plan.get("reviewItems")),
+        "summary": summary,
+    }
+    token_payload = {
+        "taskId": task_id,
+        "paperOcrJobId": str(task_copy.get("paperOcrJobId") or ""),
+        "questions": stable_token_value(import_questions),
+    }
+    apply_token = hashlib.sha256(
+        json.dumps(token_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    return {
+        "applyToken": apply_token,
+        "summary": summary,
+        "questions": import_questions,
+        "canonicalization": canonicalization,
+        "automaticMerges": copy.deepcopy(plan.get("automaticMerges") or []),
+        "reviewItems": copy.deepcopy(plan.get("reviewItems") or []),
+        "blockingIssues": copy.deepcopy(plan.get("blockingIssues") or []),
+    }
+
+
+def question_source_id(question: dict[str, Any], index: int) -> str:
+    return str(question.get("id") or f"q_{index}").strip() or f"q_{index}"
+
+
+def unique_source_question_ids(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy OCR questions and make repeated splitter IDs deterministic before matching."""
+    output: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for index, raw in enumerate(questions or [], start=1):
+        if not isinstance(raw, dict):
+            continue
+        question = copy.deepcopy(raw)
+        base_id = question_source_id(question, index)
+        occurrence = counts.get(base_id, 0) + 1
+        counts[base_id] = occurrence
+        question["id"] = base_id if occurrence == 1 else f"{base_id}__occurrence_{occurrence}"
+        output.append(question)
+    return output
+
+
+def stable_import_question_id(task_id: str, source_id: str) -> str:
+    digest = hashlib.sha256(f"{task_id}:{source_id}".encode("utf-8")).hexdigest()[:24]
+    return f"import_question_{digest}"
+
+
+def preserve_existing_import_question(
+    existing: dict[str, Any], generated: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep saved paper-side edits while filling fields newly recovered from the answer zone."""
+    merged = copy.deepcopy(existing)
+    for key, value in generated.items():
+        if key not in merged or merged.get(key) is None:
+            merged[key] = copy.deepcopy(value)
+    for field in ("answer", "analysis"):
+        if not str(merged.get(field) or "").strip() and str(generated.get(field) or "").strip():
+            merged[field] = copy.deepcopy(generated[field])
+    existing_children = merged.get("subQuestions") or merged.get("children") or []
+    generated_children = generated.get("subQuestions") or generated.get("children") or []
+    if not existing_children and generated_children:
+        merged["subQuestions"] = copy.deepcopy(generated_children)
+        merged["children"] = copy.deepcopy(generated_children)
+    merged["id"] = generated.get("id")
+    merged["sourceQuestionId"] = generated.get("sourceQuestionId")
+    merged["number"] = generated.get("number")
+    return merged
+
+
+def stable_token_value(value: Any) -> Any:
+    """Remove preview-only timestamps while preserving content-sensitive token input."""
+    if isinstance(value, list):
+        return [stable_token_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: stable_token_value(item)
+            for key, item in value.items()
+            if key not in {"createdAt", "updatedAt", "previewedAt"}
+        }
+    return value
 
 
 def detect_severe_latex_issues(markdown: str) -> list[str]:
@@ -970,7 +1136,13 @@ def summarize_ocr_job(job: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer_context: str) -> list[dict[str, Any]]:
+def build_import_questions(
+    task: dict[str, Any],
+    outputs: dict[str, Any],
+    answer_context: str,
+    *,
+    run_auto_standardize: bool = True,
+) -> list[dict[str, Any]]:
     """根据 OCR 输出和答案上下文构造导入题列表。"""
     source_questions = top_level_ocr_questions(outputs)
     paper_ocr_context = str(outputs.get("markdown") or "")
@@ -1067,7 +1239,8 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
                 "bankQuestionId": None,
             }
         )
-    task["autoStandardize"] = auto_standardize_import_questions(import_questions, task, outputs)
+    if run_auto_standardize:
+        task["autoStandardize"] = auto_standardize_import_questions(import_questions, task, outputs)
     return import_questions
 
 

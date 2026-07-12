@@ -68,6 +68,27 @@ def recover_import_task(payload: dict[str, Any]) -> dict[str, Any]:
     return task
 
 
+@app.post("/worker/import-tasks/canonicalization/preview")
+def preview_import_task_canonicalization(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a canonical question/layout preview without mutating worker state."""
+    task = copy.deepcopy(payload.get("task") or payload)
+    task_id = str(task.get("id") or "").strip()
+    if not task_id:
+        raise HTTPException(status_code=400, detail="Import task id is required")
+    paper_job = safe_read_job(task.get("paperOcrJobId"))
+    if not paper_job:
+        raise HTTPException(status_code=404, detail="Paper OCR job not found")
+    outputs = paper_job.get("outputs") if isinstance(paper_job.get("outputs"), dict) else {}
+    answer_job = safe_read_job(task.get("answerOcrJobId")) if task.get("answerOcrJobId") else None
+    answer_context = str(((answer_job or {}).get("outputs") or {}).get("markdown") or "")
+    preview = canonicalize_import_outputs(task, outputs, answer_context)
+    preview_task = copy.deepcopy(task)
+    preview_task["questions"] = preview["questions"]
+    preview_task["canonicalization"] = preview["canonicalization"]
+    preview["paperLayout"] = attach_paper_layout(preview_task, paper_job)
+    return preview
+
+
 @app.get("/api/import-tasks")
 def list_import_tasks() -> dict[str, Any]:
     """返回本地导入任务列表。"""
