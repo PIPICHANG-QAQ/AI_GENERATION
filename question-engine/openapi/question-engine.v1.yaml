@@ -1257,26 +1257,41 @@ components:
       properties:
         id: { type: string }
         questionId: { type: string }
-        status: { type: string, enum: [queued, running, success, failed] }
+        status: { type: string, enum: [queued, running, success, review_required, failed] }
         attemptCount: { type: integer }
         totalItems: { type: integer }
         completedItems: { type: integer }
         successItems: { type: integer }
         failedItems: { type: integer }
+        executionPath: { type: string, enum: [rules, ocr-fallback, cache, llm] }
+        writeDecision: { type: string, enum: [candidate, applied, unchanged, review_required, failed] }
+        modelInvoked: { type: boolean }
+        cacheHit: { type: boolean }
+        providerCallAttempts: { type: integer }
+        reviewReasons: { type: array, items: { type: string } }
     StandardizationBatchJob:
       type: object
       required: [id, taskId, status, totalQuestions, totalItems, maxConcurrency]
       properties:
         id: { type: string }
         taskId: { type: string }
-        status: { type: string, enum: [queued, running, cancelling, cancelled, completed, partial_failed, failed] }
+        status: { type: string, enum: [queued, running, cancelling, cancelled, completed, partial_review, partial_failed, failed] }
         totalQuestions: { type: integer }
         totalItems: { type: integer }
         completedQuestions: { type: integer }
         completedItems: { type: integer }
         successItems: { type: integer }
         failedItems: { type: integer }
-        maxConcurrency: { type: integer, maximum: 2 }
+        maxConcurrency: { type: integer, maximum: 12 }
+        rulesCount: { type: integer }
+        ocrFallbackCount: { type: integer }
+        cacheHitCount: { type: integer }
+        llmQuestionCount: { type: integer }
+        reviewRequiredCount: { type: integer }
+        failedCount: { type: integer }
+        providerCallAttempts: { type: integer }
+        currentLlmConcurrency: { type: integer, minimum: 0, maximum: 8 }
+        maximumLlmConcurrency: { type: integer, minimum: 2, maximum: 8 }
         items: { type: array, items: { $ref: "#/components/schemas/StandardizationBatchItem" } }
     MathValidationIssue:
       type: object

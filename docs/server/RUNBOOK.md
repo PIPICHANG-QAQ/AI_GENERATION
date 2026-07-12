@@ -246,6 +246,37 @@ PY
 
 ## 配置备份
 
+## 检查全局标准化并发
+
+```bash
+sudo docker exec ai_generation_docker-question-engine-1 sh -lc '
+env | grep -E "^(AI_STANDARDIZATION_MAX_CONCURRENCY|LLM_STANDARDIZE_(INITIAL|MIN|MAX)_CONCURRENCY|LLM_EXTERNAL_MAX_CONCURRENCY)=" | sort
+'
+```
+
+默认值：
+
+```text
+AI_STANDARDIZATION_MAX_CONCURRENCY=12
+LLM_EXTERNAL_MAX_CONCURRENCY=8
+LLM_STANDARDIZE_INITIAL_CONCURRENCY=4
+LLM_STANDARDIZE_MIN_CONCURRENCY=2
+LLM_STANDARDIZE_MAX_CONCURRENCY=8
+```
+
+Java 的12表示可并行推进的题目预处理窗口，不是模型并发。真实标准化模型并发由 worker 在2到8之间自适应控制。
+
+模型网关持续出现429、503或超时时，可临时固定为2并重建容器：
+
+```text
+LLM_STANDARDIZE_INITIAL_CONCURRENCY=2
+LLM_STANDARDIZE_MIN_CONCURRENCY=2
+LLM_STANDARDIZE_MAX_CONCURRENCY=2
+LLM_EXTERNAL_MAX_CONCURRENCY=2
+```
+
+任务详情中的 `rulesCount + ocrFallbackCount + cacheHitCount + llmQuestionCount` 用于核对执行路径；`providerCallAttempts` 包含重试，不能当作题目数。
+
 每次修改 `.env` 前先备份：
 
 ```bash

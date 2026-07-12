@@ -251,6 +251,16 @@
 
 ## 工程化验证
 
+### 全局标准化流水线
+
+- 单题和全局标准化必须使用同一份题干、选项、题图归属和小问结构输入。
+- `totalQuestions` 和 `totalItems` 都按 canonical 题目计数；51 道题不得显示成 225 个 AI 任务。
+- 批任务摘要必须区分 `rulesCount`、`ocrFallbackCount`、`cacheHitCount`、`llmQuestionCount`、`reviewRequiredCount` 和 `failedCount`。
+- 规则、OCR 回退和缓存命中不得占用真实模型调用名额。
+- 选择题标准化后选项数量、标签和图片引用不得减少；不安全候选必须进入 `review_required`，原题保持不变。
+- 模型并发初始为4、最低2、最高8；429、503或超时必须降低并发，稳定成功窗口后允许逐级恢复。
+- 模型调用期间发生人工编辑时，返回 `stale_input` 并拒绝覆盖。
+
 - `cd backend && JAVA_HOME=$(/usr/libexec/java_home -v 17) mvn test` 必须通过。
 - `backend/python-worker/.venv/bin/python -m py_compile backend/python-worker/app/*.py` 必须通过。
 - `PYTHONPATH=backend/python-worker backend/python-worker/.venv/bin/python -c "from app.main import app; print(app.title)"` 必须能导入 FastAPI app。
