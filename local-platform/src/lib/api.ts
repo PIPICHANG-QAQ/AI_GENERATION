@@ -164,6 +164,25 @@ export const api = {
     fetcher(`/api/import-tasks/${taskId}/bank`, { method: "POST" }),
   rescanImportTask: (id: string) =>
     fetcher(`/api/import-tasks/${id}/rescan`, { method: "POST" }),
+  previewCanonicalization: (id: string) =>
+    fetcher(`/api/import-tasks/${id}/canonicalization/preview`, { method: "POST" }),
+  applyCanonicalization: (id: string, applyToken: string) =>
+    fetcher(`/api/import-tasks/${id}/canonicalization/apply`, {
+      method: "POST",
+      body: JSON.stringify({ applyToken }),
+    }),
+  rollbackCanonicalization: (id: string) =>
+    fetcher(`/api/import-tasks/${id}/canonicalization/rollback`, { method: "POST" }),
+  createStandardizationJob: (id: string) =>
+    fetcher(`/api/import-tasks/${id}/standardization-jobs`, { method: "POST" }),
+  getStandardizationJob: (id: string, jobId: string) =>
+    fetcher(`/api/import-tasks/${id}/standardization-jobs/${jobId}`),
+  cancelStandardizationJob: (id: string, jobId: string) =>
+    fetcher(`/api/import-tasks/${id}/standardization-jobs/${jobId}/cancel`, { method: "POST" }),
+  resumeStandardizationJob: (id: string, jobId: string) =>
+    fetcher(`/api/import-tasks/${id}/standardization-jobs/${jobId}/resume`, { method: "POST" }),
+  retryFailedStandardizationJob: (id: string, jobId: string) =>
+    fetcher(`/api/import-tasks/${id}/standardization-jobs/${jobId}/retry-failed`, { method: "POST" }),
 
   // Question bank
   getQuestions: (params: Record<string, unknown> = {}) =>
