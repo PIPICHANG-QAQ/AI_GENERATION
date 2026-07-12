@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 from app.llm_splitter import (
@@ -180,6 +181,50 @@ class LlmSplitterTest(unittest.TestCase):
         self.assertEqual("standardize", metadata["llmCall"]["callType"])
         self.assertEqual("failed", metadata["llmCall"]["status"])
         self.assertIn("durationMs", metadata["llmCall"])
+
+    def test_standardize_uses_interactive_adaptive_gate(self):
+        class Gate:
+            def __init__(self):
+                self.priorities = []
+                self.successes = []
+
+            def slot(self, priority):
+                self.priorities.append(priority)
+                return nullcontext()
+
+            def record_success(self, duration_ms):
+                self.successes.append(duration_ms)
+
+            def record_failure(self, _kind):
+                raise AssertionError("successful call must not record failure")
+
+            def snapshot(self):
+                return {"active": 0, "limit": 4, "minimum": 2, "maximum": 8, "cooldown": False}
+
+        gate = Gate()
+        response = {
+            "choices": [{"message": {"content": json.dumps({
+                "markdown": "题干 $x+1=2$",
+                "answer": "",
+                "analysis": "",
+                "subQuestions": [],
+                "corrections": [],
+                "warnings": [],
+                "confidence": "high",
+            }, ensure_ascii=False)}}]
+        }
+        with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test-key", "ENABLE_LLM_SPLIT": "true"}):
+            with patch("app.llm_splitter.standardization_concurrency_gate", return_value=gate):
+                with patch("app.llm_splitter.post_llm_json_for_endpoint", return_value=(response, False)):
+                    standardized, metadata = standardize_markdown_with_llm(
+                        "题干 $x+1=2$",
+                        structured_hints={"requestPriority": "interactive"},
+                    )
+
+        self.assertEqual("题干 $x+1=2$", standardized)
+        self.assertEqual(["interactive"], gate.priorities)
+        self.assertEqual(1, len(gate.successes))
+        self.assertEqual(4, metadata["adaptiveConcurrency"]["limit"])
 
     def test_analysis_failure_returns_retryable_fallback_metadata(self):
         with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test-key", "ENABLE_LLM_SPLIT": "true"}):

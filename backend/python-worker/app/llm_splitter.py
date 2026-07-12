@@ -19,6 +19,8 @@ from typing import Any
 
 import httpx
 
+from app.adaptive_concurrency import standardization_concurrency_gate
+
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-pro"
@@ -274,7 +276,7 @@ def endpoint_timeout_seconds(endpoint: dict[str, Any], task_type: str, default_t
 
 def endpoint_semaphore(endpoint: dict[str, Any]) -> threading.BoundedSemaphore:
     role = str(endpoint.get("role") or "external")
-    limit = int_env("LOCAL_LLM_MAX_CONCURRENCY", 4, 1, 16) if role == "local" else int_env("LLM_EXTERNAL_MAX_CONCURRENCY", 1, 1, 4)
+    limit = int_env("LOCAL_LLM_MAX_CONCURRENCY", 4, 1, 16) if role == "local" else int_env("LLM_EXTERNAL_MAX_CONCURRENCY", 1, 1, 8)
     key = f"{role}:{limit}"
     with LLM_ENDPOINT_SEMAPHORES_LOCK:
         semaphore = LLM_ENDPOINT_SEMAPHORES.get(key)
@@ -299,6 +301,18 @@ def task_semaphore(task_type: str) -> threading.BoundedSemaphore:
             semaphore = threading.BoundedSemaphore(limit)
             LLM_TASK_SEMAPHORES[key] = semaphore
         return semaphore
+
+
+def classify_standardize_provider_failure(exc: Exception) -> str:
+    """Map provider pressure failures to AIMD signals."""
+    message = str(exc or "").lower()
+    if "429" in message or "rate limit" in message or "too many requests" in message:
+        return "rate_limit"
+    if "503" in message or "service unavailable" in message or "server busy" in message:
+        return "service_unavailable"
+    if isinstance(exc, TimeoutError) or "timeout" in message or "timed out" in message:
+        return "timeout"
+    return "other"
 
 
 def llm_risk_score(task_type: str, context: dict[str, Any] | None = None) -> float:
@@ -898,55 +912,61 @@ def standardize_markdown_with_llm(
     calls: list[dict[str, Any]] = []
     attempt_payload = payload
     max_attempts = int_env("LLM_STANDARDIZE_MAX_ATTEMPTS", 2, 1, 3)
-    with task_semaphore("standardize"):
-        for attempt in range(max_attempts):
-            endpoints = route_llm_endpoints(
-                "standardize",
-                {
-                    "markdown": markdown,
-                    "rawOcrContext": raw_ocr_context,
-                    "structuredHints": structured_hints or {},
-                },
-            )
-            for endpoint in endpoints:
-                started = time.perf_counter()
-                try:
+    gate = standardization_concurrency_gate()
+    priority = str((structured_hints or {}).get("requestPriority") or "batch")
+    for attempt in range(max_attempts):
+        endpoints = route_llm_endpoints(
+            "standardize",
+            {
+                "markdown": markdown,
+                "rawOcrContext": raw_ocr_context,
+                "structuredHints": structured_hints or {},
+            },
+        )
+        for endpoint in endpoints:
+            started = time.perf_counter()
+            try:
+                with gate.slot(priority):
                     data, cache_hit = post_llm_json_for_endpoint(endpoint, attempt_payload, timeout_seconds, "standardize")
                     content = data["choices"][0]["message"]["content"]
                     parsed = extract_json_object(content)
                     standardized = str(parsed.get("markdown") or "").strip()
                     if not standardized:
                         raise ValueError("模型未返回 markdown 字段")
-                    success_call = llm_call_metadata("standardize", started, "success", retry_count=attempt, endpoint=endpoint, cache_hit=cache_hit)
-                    calls.append(success_call)
-                    return standardized, {
-                        "source": "ai",
-                        "provider": endpoint["provider"],
-                        "model": endpoint["model"],
-                        "route": endpoint.get("role"),
-                        "riskScore": endpoint.get("riskScore"),
-                        "error": None,
-                        "answer": str(parsed.get("answer") or parsed.get("suggestedAnswer") or "").strip(),
-                        "analysis": str(parsed.get("analysis") or parsed.get("explanation") or "").strip(),
-                        "subQuestions": normalize_solution_sub_questions(parsed.get("subQuestions") or parsed.get("children")),
-                        "corrections": normalize_corrections(parsed.get("corrections")),
-                        "warnings": normalize_string_list(parsed.get("warnings")),
-                        "confidence": str(parsed.get("confidence") or "unknown"),
-                        "llmCall": success_call,
-                        "llmCalls": calls,
-                    }
-                except Exception as exc:
-                    last_error = exc
-                    calls.append(llm_call_metadata("standardize", started, "failed", error=str(exc), retry_count=attempt, endpoint=endpoint))
-                    continue
-            if attempt < max_attempts - 1:
-                attempt_payload = llm_json_retry_payload(
-                    payload,
-                    str(last_error or "模型返回不符合 schema"),
-                    ["markdown", "answer", "analysis", "subQuestions", "corrections", "warnings", "confidence"],
-                )
+                duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+                gate.record_success(duration_ms)
+                success_call = llm_call_metadata("standardize", started, "success", retry_count=attempt, endpoint=endpoint, cache_hit=cache_hit)
+                calls.append(success_call)
+                return standardized, {
+                    "source": "ai",
+                    "provider": endpoint["provider"],
+                    "model": endpoint["model"],
+                    "route": endpoint.get("role"),
+                    "riskScore": endpoint.get("riskScore"),
+                    "error": None,
+                    "answer": str(parsed.get("answer") or parsed.get("suggestedAnswer") or "").strip(),
+                    "analysis": str(parsed.get("analysis") or parsed.get("explanation") or "").strip(),
+                    "subQuestions": normalize_solution_sub_questions(parsed.get("subQuestions") or parsed.get("children")),
+                    "corrections": normalize_corrections(parsed.get("corrections")),
+                    "warnings": normalize_string_list(parsed.get("warnings")),
+                    "confidence": str(parsed.get("confidence") or "unknown"),
+                    "llmCall": success_call,
+                    "llmCalls": calls,
+                    "adaptiveConcurrency": gate.snapshot(),
+                }
+            except Exception as exc:
+                last_error = exc
+                gate.record_failure(classify_standardize_provider_failure(exc))
+                calls.append(llm_call_metadata("standardize", started, "failed", error=str(exc), retry_count=attempt, endpoint=endpoint))
                 continue
-            break
+        if attempt < max_attempts - 1:
+            attempt_payload = llm_json_retry_payload(
+                payload,
+                str(last_error or "模型返回不符合 schema"),
+                ["markdown", "answer", "analysis", "subQuestions", "corrections", "warnings", "confidence"],
+            )
+            continue
+        break
 
     error = str(last_error or "AI 标准化失败")
     return None, {
@@ -960,6 +980,7 @@ def standardize_markdown_with_llm(
         "imageCount": 0,
         "llmCall": calls[-1] if calls else llm_call_metadata("standardize", time.perf_counter(), "failed", error=error, retry_count=max_attempts - 1),
         "llmCalls": calls,
+        "adaptiveConcurrency": gate.snapshot(),
     }
 
 
