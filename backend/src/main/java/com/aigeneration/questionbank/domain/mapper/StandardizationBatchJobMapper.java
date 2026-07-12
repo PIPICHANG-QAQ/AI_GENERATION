@@ -4,6 +4,7 @@ import com.aigeneration.questionbank.domain.entity.StandardizationBatchJobEntity
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Select;
+import java.util.List;
 
 @Mapper
 public interface StandardizationBatchJobMapper extends BaseMapper<StandardizationBatchJobEntity> {
@@ -12,4 +13,7 @@ public interface StandardizationBatchJobMapper extends BaseMapper<Standardizatio
 
     @Select("SELECT * FROM java_standardization_batch_jobs WHERE task_id=#{taskId} AND id=#{jobId}")
     StandardizationBatchJobEntity selectByTaskAndId(String taskId, String jobId);
+
+    @Select("SELECT * FROM java_standardization_batch_jobs WHERE status IN ('queued','running') ORDER BY created_at")
+    List<StandardizationBatchJobEntity> selectRecoverableJobs();
 }

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -20,6 +21,10 @@ import com.aigeneration.questionbank.domain.support.JsonSupport;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
@@ -29,6 +34,7 @@ class StandardizationBatchServiceTest {
     private StandardizationBatchItemMapper itemMapper;
     private ImportQuestionSyncService questionService;
     private ImportTaskCanonicalizationService canonicalization;
+    private AiFlowOrchestrationService ai;
     private StandardizationBatchService service;
 
     @BeforeEach
@@ -37,14 +43,109 @@ class StandardizationBatchServiceTest {
         itemMapper = mock(StandardizationBatchItemMapper.class);
         questionService = mock(ImportQuestionSyncService.class);
         canonicalization = mock(ImportTaskCanonicalizationService.class);
+        ai = mock(AiFlowOrchestrationService.class);
         service = new StandardizationBatchService(
                 jobMapper,
                 itemMapper,
                 questionService,
                 canonicalization,
-                mock(AiFlowOrchestrationService.class),
+                ai,
                 new JsonSupport(new ObjectMapper().findAndRegisterModules())
         );
+    }
+
+    @AfterEach
+    void tearDown() {
+        System.clearProperty("AI_STANDARDIZATION_RETRY_DELAY_MS");
+        service.shutdown();
+    }
+
+    @Test
+    void retryableFailureStopsAfterThreeTotalAttempts() throws Exception {
+        System.setProperty("AI_STANDARDIZATION_RETRY_DELAY_MS", "0");
+        StandardizationBatchJobEntity job = job("job-1", "queued");
+        StandardizationBatchItemEntity item = item("item-1", "queued"); item.setTotalItems(1);
+        when(jobMapper.selectById("job-1")).thenReturn(job);
+        when(itemMapper.selectByJobId("job-1")).thenReturn(List.of(item));
+        when(questionService.getQuestion("q1")).thenReturn(question("q1"));
+        when(ai.standardizeImportQuestion(any(), any(), any()))
+                .thenThrow(new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY));
+
+        service.start("job-1");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!"failed".equals(item.getStatus()) && System.nanoTime() < deadline) Thread.sleep(10);
+
+        assertEquals("failed", item.getStatus());
+        assertEquals(3, item.getAttemptCount());
+        verify(ai, org.mockito.Mockito.times(3)).standardizeImportQuestion(any(), any(), any());
+    }
+
+    @Test
+    void successfulInputHashIsReused() throws Exception {
+        StandardizationBatchJobEntity job = job("job-1", "queued");
+        StandardizationBatchItemEntity item = item("item-1", "queued"); item.setTotalItems(1); item.setInputHash("same");
+        StandardizationBatchItemEntity previous = item("old", "success"); previous.setInputHash("same");
+        when(jobMapper.selectById("job-1")).thenReturn(job);
+        when(itemMapper.selectByJobId("job-1")).thenReturn(List.of(item));
+        when(itemMapper.selectSuccessfulByInputHash("same")).thenReturn(previous);
+        when(questionService.getQuestion("q1")).thenReturn(question("q1"));
+
+        service.start("job-1");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!"success".equals(item.getStatus()) && System.nanoTime() < deadline) Thread.sleep(10);
+
+        assertEquals("success", item.getStatus());
+        verify(ai, never()).standardizeImportQuestion(any(), any(), any());
+    }
+
+    @Test
+    void startupRecoveryRequeuesRunningItems() {
+        StandardizationBatchJobEntity job = job("job-1", "running");
+        StandardizationBatchItemEntity item = item("item-1", "running");
+        when(jobMapper.selectRecoverableJobs()).thenReturn(List.of(job));
+        when(itemMapper.selectByJobId("job-1")).thenReturn(List.of(item));
+
+        service.recoverOnStartup();
+
+        assertEquals("queued", item.getStatus());
+        verify(itemMapper).updateById(item);
+    }
+
+    @Test
+    void executesAtMostTwoQuestionsConcurrentlyAndSavesEachOnce() throws Exception {
+        StandardizationBatchJobEntity job = job("job-1", "queued");
+        job.setTotalQuestions(3);
+        job.setTotalItems(3);
+        StandardizationBatchItemEntity first = item("first", "queued"); first.setQuestionId("q1"); first.setTotalItems(1);
+        StandardizationBatchItemEntity second = item("second", "queued"); second.setQuestionId("q2"); second.setTotalItems(1);
+        StandardizationBatchItemEntity third = item("third", "queued"); third.setQuestionId("q3"); third.setTotalItems(1);
+        List<StandardizationBatchItemEntity> items = List.of(first, second, third);
+        when(jobMapper.selectById("job-1")).thenReturn(job);
+        when(itemMapper.selectByJobId("job-1")).thenReturn(items);
+        when(questionService.getQuestion(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation -> question(invocation.getArgument(0)));
+        CountDownLatch started = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger peak = new AtomicInteger();
+        when(ai.standardizeImportQuestion(any(), any(), any())).thenAnswer(invocation -> {
+            int current = active.incrementAndGet();
+            peak.accumulateAndGet(current, Math::max);
+            started.countDown();
+            release.await(2, TimeUnit.SECONDS);
+            active.decrementAndGet();
+            return Map.of("writeResult", true);
+        });
+
+        service.start("job-1");
+        org.junit.jupiter.api.Assertions.assertTrue(started.await(2, TimeUnit.SECONDS));
+        assertEquals(2, peak.get());
+        release.countDown();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!"completed".equals(job.getStatus()) && System.nanoTime() < deadline) Thread.sleep(10);
+
+        assertEquals("completed", job.getStatus());
+        verify(ai, org.mockito.Mockito.times(3)).standardizeImportQuestion(any(), any(), any());
+        assertEquals(List.of("success", "success", "success"), items.stream().map(StandardizationBatchItemEntity::getStatus).toList());
     }
 
     @Test

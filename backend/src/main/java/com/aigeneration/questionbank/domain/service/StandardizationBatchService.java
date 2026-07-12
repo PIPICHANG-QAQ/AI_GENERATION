@@ -15,9 +15,19 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import jakarta.annotation.PreDestroy;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.server.ResponseStatusException;
 
 /** Persistent lifecycle for task-wide, question-atomic AI standardization batches. */
@@ -29,6 +39,9 @@ public class StandardizationBatchService {
     private final ImportTaskCanonicalizationService canonicalization;
     private final AiFlowOrchestrationService ai;
     private final JsonSupport json;
+    private final int maxConcurrency = configuredConcurrency();
+    private final ExecutorService coordinator = Executors.newSingleThreadExecutor(runnable -> daemonThread(runnable, "standardization-coordinator"));
+    private final ExecutorService workers = Executors.newFixedThreadPool(maxConcurrency, runnable -> daemonThread(runnable, "standardization-worker"));
 
     public StandardizationBatchService(
             StandardizationBatchJobMapper jobMapper,
@@ -67,7 +80,7 @@ public class StandardizationBatchService {
         job.setCompletedItems(0);
         job.setSuccessItems(0);
         job.setFailedItems(0);
-        job.setMaxConcurrency(2);
+        job.setMaxConcurrency(maxConcurrency);
         job.setCreatedAt(now);
         job.setUpdatedAt(now);
         jobMapper.insert(job);
@@ -87,7 +100,9 @@ public class StandardizationBatchService {
             item.setUpdatedAt(now);
             itemMapper.insert(item);
         }
-        return toMap(job, itemMapper.selectByJobId(job.getId()));
+        Map<String, Object> created = toMap(job, itemMapper.selectByJobId(job.getId()));
+        startAfterCommit(job.getId());
+        return created;
     }
 
     public Map<String, Object> get(String taskId, String jobId) {
@@ -105,7 +120,9 @@ public class StandardizationBatchService {
         job.setCancelRequestedAt(LocalDateTime.now());
         job.setUpdatedAt(LocalDateTime.now());
         jobMapper.updateById(job);
-        return toMap(job, itemMapper.selectByJobId(jobId));
+        Map<String, Object> result = toMap(job, itemMapper.selectByJobId(jobId));
+        startAfterCommit(jobId);
+        return result;
     }
 
     @Transactional
@@ -117,7 +134,190 @@ public class StandardizationBatchService {
         job.setFinishedAt(null);
         job.setUpdatedAt(LocalDateTime.now());
         jobMapper.updateById(job);
-        return toMap(job, itemMapper.selectByJobId(jobId));
+        Map<String, Object> result = toMap(job, itemMapper.selectByJobId(jobId));
+        startAfterCommit(jobId);
+        return result;
+    }
+
+    private void startAfterCommit(String jobId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            start(jobId);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override public void afterCommit() { start(jobId); }
+        });
+    }
+
+    /** Start or continue a persisted job without blocking the HTTP request. */
+    public void start(String jobId) {
+        coordinator.submit(() -> runJob(jobId));
+    }
+
+    private void runJob(String jobId) {
+        StandardizationBatchJobEntity job = jobMapper.selectById(jobId);
+        if (job == null || !List.of("queued", "running").contains(job.getStatus())) return;
+        job.setStatus("running");
+        if (job.getStartedAt() == null) job.setStartedAt(LocalDateTime.now());
+        job.setUpdatedAt(LocalDateTime.now());
+        jobMapper.updateById(job);
+        List<StandardizationBatchItemEntity> queued = itemMapper.selectByJobId(jobId).stream()
+                .filter(item -> "queued".equals(item.getStatus()) || "running".equals(item.getStatus()))
+                .toList();
+        CompletionService<Void> completion = new ExecutorCompletionService<>(workers);
+        int cursor = 0;
+        int active = 0;
+        try {
+            while (cursor < queued.size() || active > 0) {
+                while (active < maxConcurrency && cursor < queued.size() && !cancellationRequested(jobId)) {
+                    StandardizationBatchItemEntity item = queued.get(cursor++);
+                    completion.submit(() -> { processItem(job, item); return null; });
+                    active++;
+                }
+                if (active == 0) break;
+                Future<Void> done = completion.take();
+                done.get();
+                active--;
+            }
+        } catch (Exception ignored) {
+            Thread.currentThread().interrupt();
+        }
+        finishJob(jobId);
+    }
+
+    private void processItem(StandardizationBatchJobEntity job, StandardizationBatchItemEntity item) {
+        ImportQuestionEntity question = questionService.getQuestion(item.getQuestionId());
+        if (question == null) {
+            failItem(item, "Question no longer exists");
+            return;
+        }
+        StandardizationBatchItemEntity reused = itemMapper.selectSuccessfulByInputHash(item.getInputHash());
+        if (reused != null && !item.getId().equals(reused.getId())) {
+            succeedItem(item);
+            return;
+        }
+        for (int attempt = number(item.getAttemptCount()) + 1; attempt <= 3; attempt++) {
+            item.setStatus("running");
+            item.setAttemptCount(attempt);
+            if (item.getStartedAt() == null) item.setStartedAt(LocalDateTime.now());
+            item.setUpdatedAt(LocalDateTime.now());
+            itemMapper.updateById(item);
+            try {
+                Map<String, Object> response = ai.standardizeImportQuestion(
+                        job.getTaskId(),
+                        item.getQuestionId(),
+                        Map.of("markdown", editableMarkdown(question), "writeResult", true)
+                );
+                if (!Boolean.TRUE.equals(response.get("writeResult"))) {
+                    throw new IllegalStateException("Standardizer did not save the question");
+                }
+                succeedItem(item);
+                return;
+            } catch (RuntimeException ex) {
+                if (attempt >= 3 || !retryable(ex)) {
+                    failItem(item, ex.getMessage());
+                    return;
+                }
+                sleepRetry(attempt);
+            }
+        }
+    }
+
+    private void succeedItem(StandardizationBatchItemEntity item) {
+        item.setStatus("success");
+        item.setCompletedItems(number(item.getTotalItems()));
+        item.setSuccessItems(number(item.getTotalItems()));
+        item.setFailedItems(0);
+        item.setErrorMessage(null);
+        item.setFinishedAt(LocalDateTime.now());
+        item.setUpdatedAt(LocalDateTime.now());
+        itemMapper.updateById(item);
+    }
+
+    private void failItem(StandardizationBatchItemEntity item, String message) {
+        item.setStatus("failed");
+        item.setCompletedItems(number(item.getTotalItems()));
+        item.setSuccessItems(0);
+        item.setFailedItems(number(item.getTotalItems()));
+        item.setErrorMessage(text(message));
+        item.setFinishedAt(LocalDateTime.now());
+        item.setUpdatedAt(LocalDateTime.now());
+        itemMapper.updateById(item);
+    }
+
+    private boolean cancellationRequested(String jobId) {
+        StandardizationBatchJobEntity latest = jobMapper.selectById(jobId);
+        return latest == null || List.of("cancelling", "cancelled").contains(latest.getStatus());
+    }
+
+    private void finishJob(String jobId) {
+        StandardizationBatchJobEntity job = jobMapper.selectById(jobId);
+        if (job == null) return;
+        List<StandardizationBatchItemEntity> items = itemMapper.selectByJobId(jobId);
+        int succeeded = items.stream().filter(item -> "success".equals(item.getStatus())).mapToInt(item -> number(item.getTotalItems())).sum();
+        int failed = items.stream().filter(item -> "failed".equals(item.getStatus())).mapToInt(item -> number(item.getTotalItems())).sum();
+        int completedQuestions = (int) items.stream().filter(item -> List.of("success", "failed").contains(item.getStatus())).count();
+        job.setCompletedQuestions(completedQuestions);
+        job.setCompletedItems(succeeded + failed);
+        job.setSuccessItems(succeeded);
+        job.setFailedItems(failed);
+        if ("cancelling".equals(job.getStatus())) job.setStatus("cancelled");
+        else if (failed == 0) job.setStatus("completed");
+        else if (succeeded == 0) job.setStatus("failed");
+        else job.setStatus("partial_failed");
+        job.setFinishedAt(LocalDateTime.now());
+        job.setUpdatedAt(LocalDateTime.now());
+        jobMapper.updateById(job);
+    }
+
+    private boolean retryable(RuntimeException ex) {
+        if (ex instanceof ResponseStatusException response) {
+            int status = response.getStatusCode().value();
+            return status == 429 || status >= 500;
+        }
+        String message = text(ex.getMessage()).toLowerCase(java.util.Locale.ROOT);
+        return message.contains("timeout") || message.contains("timed out");
+    }
+
+    private void sleepRetry(int attempt) {
+        long delay = attempt == 1 ? 2000 : 5000;
+        String override = System.getProperty("AI_STANDARDIZATION_RETRY_DELAY_MS", System.getenv("AI_STANDARDIZATION_RETRY_DELAY_MS"));
+        if (override != null && !override.isBlank()) {
+            try { delay = Math.max(0, Long.parseLong(override)); } catch (NumberFormatException ignored) { delay = attempt == 1 ? 2000 : 5000; }
+        }
+        try {
+            Thread.sleep(delay);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private String editableMarkdown(ImportQuestionEntity question) {
+        return nonBlank(question.getManualMarkdown()) ? question.getManualMarkdown() : text(question.getStemMarkdown());
+    }
+
+    /** Requeue interrupted items and resume jobs after a server restart. */
+    @EventListener(ApplicationReadyEvent.class)
+    public void recoverOnStartup() {
+        for (StandardizationBatchJobEntity job : jobMapper.selectRecoverableJobs()) {
+            for (StandardizationBatchItemEntity item : itemMapper.selectByJobId(job.getId())) {
+                if ("running".equals(item.getStatus())) {
+                    item.setStatus("queued");
+                    item.setUpdatedAt(LocalDateTime.now());
+                    itemMapper.updateById(item);
+                }
+            }
+            job.setStatus("queued");
+            job.setUpdatedAt(LocalDateTime.now());
+            jobMapper.updateById(job);
+            start(job.getId());
+        }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        coordinator.shutdownNow();
+        workers.shutdownNow();
     }
 
     @Transactional
@@ -207,4 +407,10 @@ public class StandardizationBatchService {
     private int number(Integer value) { return value == null ? 0 : value; }
     private boolean nonBlank(Object... values) { for (Object value : values) if (!text(value).isBlank()) return true; return false; }
     private String text(Object value) { return value == null ? "" : String.valueOf(value).trim(); }
+    private static Thread daemonThread(Runnable runnable, String name) { Thread thread = new Thread(runnable, name); thread.setDaemon(true); return thread; }
+    private static int configuredConcurrency() {
+        String value = System.getProperty("AI_STANDARDIZATION_MAX_CONCURRENCY", System.getenv("AI_STANDARDIZATION_MAX_CONCURRENCY"));
+        try { return Math.max(1, Math.min(2, Integer.parseInt(value == null ? "2" : value))); }
+        catch (NumberFormatException ignored) { return 2; }
+    }
 }
