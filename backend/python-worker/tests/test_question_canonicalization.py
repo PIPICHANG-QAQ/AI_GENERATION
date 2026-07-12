@@ -1,4 +1,4 @@
-from app.question_canonicalization import build_canonicalization_plan
+from app.question_canonicalization import apply_canonicalization, build_canonicalization_plan
 
 
 def test_answer_zone_duplicate_merges_into_paper_question():
@@ -78,3 +78,78 @@ def test_ambiguous_answer_match_is_left_for_review():
     assert plan["automaticMerges"] == []
     assert plan["reviewItems"][0]["duplicateId"] == "answer-a"
     assert plan["blockingIssues"] == ["ambiguous-duplicate-question"]
+
+
+def test_apply_keeps_paper_visuals_and_adds_answer_analysis():
+    questions = [
+        {
+            "id": "q_2",
+            "number": 2,
+            "stemMarkdown": "杠杆题",
+            "options": [{"label": "A", "content": "食品夹"}],
+            "images": [{"imageId": "paper-a"}],
+            "imagePlacements": [{"imageId": "paper-a", "target": "option", "optionLabel": "A"}],
+            "analysis": "",
+        },
+        {
+            "id": "q_2_2",
+            "number": 2,
+            "stemMarkdown": "杠杆题",
+            "options": [{"label": "A", "content": "答案区食品夹"}],
+            "images": [{"imageId": "answer-a"}],
+            "imagePlacements": [{"imageId": "answer-a", "target": "stem"}],
+            "analysis": "修枝剪刀是省力杠杆",
+        },
+    ]
+    plan = {
+        "idMap": {"q_2": "q_2", "q_2_2": "q_2"},
+        "automaticMerges": [{"canonicalId": "q_2", "duplicateId": "q_2_2", "score": 1.0}],
+    }
+
+    result = apply_canonicalization(questions, plan)
+
+    assert len(result["questions"]) == 1
+    canonical = result["questions"][0]
+    assert canonical["options"] == [{"label": "A", "content": "食品夹"}]
+    assert canonical["images"] == [{"imageId": "paper-a"}]
+    assert canonical["imagePlacements"] == [{"imageId": "paper-a", "target": "option", "optionLabel": "A"}]
+    assert canonical["analysis"] == "修枝剪刀是省力杠杆"
+    assert canonical["mergedFromQuestionIds"] == ["q_2_2"]
+
+
+def test_repeated_solution_labels_do_not_create_extra_subquestions():
+    question = {
+        "id": "q_30",
+        "subQuestions": [
+            {"label": "(1)", "stemMarkdown": "题干一"},
+            {"label": "(2)", "stemMarkdown": "题干二"},
+            {"label": "(1)", "stemMarkdown": "分析重复一"},
+            {"label": "(2)", "stemMarkdown": "答案重复二"},
+        ],
+    }
+
+    result = apply_canonicalization(
+        [question], {"idMap": {"q_30": "q_30"}, "automaticMerges": []}
+    )
+
+    canonical = result["questions"][0]
+    assert [sub["label"] for sub in canonical["subQuestions"]] == ["(1)", "(2)"]
+    assert canonical["children"] == canonical["subQuestions"]
+    assert len(canonical["canonicalizationIssues"]) == 2
+
+
+def test_conflicting_answers_are_reported_without_overwriting_paper_answer():
+    questions = [
+        {"id": "q_1", "number": 1, "answer": "A"},
+        {"id": "q_1_2", "number": 1, "answer": "B"},
+    ]
+    plan = {
+        "idMap": {"q_1": "q_1", "q_1_2": "q_1"},
+        "automaticMerges": [{"canonicalId": "q_1", "duplicateId": "q_1_2", "score": 1.0}],
+    }
+
+    result = apply_canonicalization(questions, plan)
+
+    canonical = result["questions"][0]
+    assert canonical["answer"] == "A"
+    assert canonical["canonicalizationIssues"][0]["type"] == "answer-conflict"

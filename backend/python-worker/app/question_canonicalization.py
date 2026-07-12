@@ -13,6 +13,7 @@ ANSWER_HEADING_RE = re.compile(
 )
 TASKS_BLOCK_RE = re.compile(r"\\begin\{tasks\}[\s\S]*?\\end\{tasks\}", re.IGNORECASE)
 QUESTION_PREFIX_RE = re.compile(r"^\s*\d+\s*[.．、]\s*")
+SUB_QUESTION_LABEL_RE = re.compile(r"\(?\s*([0-9]+|[a-zA-Z])\s*\)?")
 
 
 def build_canonicalization_plan(markdown: str, questions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -49,6 +50,167 @@ def build_canonicalization_plan(markdown: str, questions: list[dict[str, Any]]) 
         "reviewItems": review_items,
         "blockingIssues": ["ambiguous-duplicate-question"] if review_items else [],
     }
+
+
+def apply_canonicalization(
+    questions: list[dict[str, Any]], plan: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply an approved merge plan without replacing paper-side visual content."""
+    originals = [item for item in questions if isinstance(item, dict)]
+    by_id = {question_id(item): copy.deepcopy(item) for item in originals if question_id(item)}
+
+    for evidence in plan.get("automaticMerges") or []:
+        if not isinstance(evidence, dict):
+            continue
+        canonical_id = str(evidence.get("canonicalId") or "").strip()
+        duplicate_id = str(evidence.get("duplicateId") or "").strip()
+        canonical = by_id.get(canonical_id)
+        duplicate = by_id.get(duplicate_id)
+        if canonical is None or duplicate is None or canonical_id == duplicate_id:
+            continue
+        merge_answer_fields(canonical, duplicate)
+        merged_ids = canonical.setdefault("mergedFromQuestionIds", [])
+        if duplicate_id not in merged_ids:
+            merged_ids.append(duplicate_id)
+        for nested_id in duplicate.get("mergedFromQuestionIds") or []:
+            if nested_id and nested_id not in merged_ids:
+                merged_ids.append(nested_id)
+        by_id.pop(duplicate_id, None)
+
+    output: list[dict[str, Any]] = []
+    emitted: set[str] = set()
+    for original in originals:
+        original_id = question_id(original)
+        canonical_id = str((plan.get("idMap") or {}).get(original_id) or original_id)
+        if canonical_id in emitted or canonical_id not in by_id:
+            continue
+        question = by_id.pop(canonical_id)
+        raw_children = question.get("subQuestions")
+        if not isinstance(raw_children, list):
+            raw_children = question.get("children") if isinstance(question.get("children"), list) else []
+        cleaned, issues = clean_subquestions(raw_children)
+        question["subQuestions"] = cleaned
+        question["children"] = cleaned
+        if issues:
+            question.setdefault("canonicalizationIssues", []).extend(issues)
+        output.append(question)
+        emitted.add(canonical_id)
+
+    for remaining_id, question in by_id.items():
+        if remaining_id in emitted:
+            continue
+        cleaned, issues = clean_subquestions(
+            question.get("subQuestions")
+            if isinstance(question.get("subQuestions"), list)
+            else question.get("children") or []
+        )
+        question["subQuestions"] = cleaned
+        question["children"] = cleaned
+        if issues:
+            question.setdefault("canonicalizationIssues", []).extend(issues)
+        output.append(question)
+
+    return {"questions": output, "plan": copy.deepcopy(plan)}
+
+
+def merge_answer_fields(canonical: dict[str, Any], duplicate: dict[str, Any]) -> None:
+    """Fill answer-side fields and record conflicts, leaving paper visuals untouched."""
+    for field in ("answer", "analysis"):
+        current = str(canonical.get(field) or "").strip()
+        incoming = str(duplicate.get(field) or "").strip()
+        if not incoming:
+            continue
+        if not current:
+            canonical[field] = duplicate.get(field)
+        elif current != incoming:
+            canonical.setdefault("canonicalizationIssues", []).append(
+                {
+                    "type": f"{field}-conflict",
+                    "field": field,
+                    "kept": canonical.get(field),
+                    "candidate": duplicate.get(field),
+                    "sourceQuestionId": question_id(duplicate),
+                }
+            )
+
+    canonical_children = canonical.get("subQuestions")
+    if not isinstance(canonical_children, list):
+        canonical_children = canonical.get("children") if isinstance(canonical.get("children"), list) else []
+    duplicate_children = duplicate.get("subQuestions")
+    if not isinstance(duplicate_children, list):
+        duplicate_children = duplicate.get("children") if isinstance(duplicate.get("children"), list) else []
+
+    merged_children = copy.deepcopy(canonical_children)
+    child_by_label = {
+        normalize_subquestion_label(child.get("label")): child
+        for child in merged_children
+        if isinstance(child, dict) and normalize_subquestion_label(child.get("label"))
+    }
+    for incoming in duplicate_children:
+        if not isinstance(incoming, dict):
+            continue
+        label = normalize_subquestion_label(incoming.get("label"))
+        target = child_by_label.get(label) if label else None
+        if target is None:
+            copied = copy.deepcopy(incoming)
+            merged_children.append(copied)
+            if label:
+                child_by_label[label] = copied
+            continue
+        merge_answer_fields(target, incoming)
+    if canonical_children or duplicate_children:
+        canonical["subQuestions"] = merged_children
+        canonical["children"] = merged_children
+
+
+def clean_subquestions(
+    subquestions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep the first increasing label run and report repeats/regressions."""
+    cleaned: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    last_rank: tuple[int, int] | None = None
+    for index, child in enumerate(subquestions or []):
+        if not isinstance(child, dict):
+            continue
+        label = normalize_subquestion_label(child.get("label"))
+        rank = subquestion_rank(label)
+        issue_type = ""
+        if label and label in seen:
+            issue_type = "repeated-subquestion-label"
+        elif rank is not None and last_rank is not None and rank <= last_rank:
+            issue_type = "regressing-subquestion-label"
+        if issue_type:
+            issues.append(
+                {
+                    "type": issue_type,
+                    "label": str(child.get("label") or ""),
+                    "sourceIndex": index,
+                }
+            )
+            continue
+        copied = copy.deepcopy(child)
+        cleaned.append(copied)
+        if label:
+            seen.add(label)
+        if rank is not None:
+            last_rank = rank
+    return cleaned, issues
+
+
+def normalize_subquestion_label(value: Any) -> str:
+    source = str(value or "").strip()
+    match = SUB_QUESTION_LABEL_RE.search(source)
+    return match.group(1).lower() if match else source.lower()
+
+
+def subquestion_rank(label: str) -> tuple[int, int] | None:
+    if label.isdigit():
+        return (0, int(label))
+    if len(label) == 1 and label.isalpha():
+        return (1, ord(label.lower()) - ord("a") + 1)
+    return None
 
 
 def answer_zone_start(markdown: str) -> int:
@@ -171,4 +333,3 @@ def parse_number(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
-
