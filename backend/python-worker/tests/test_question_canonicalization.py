@@ -80,6 +80,25 @@ def test_ambiguous_answer_match_is_left_for_review():
     assert plan["blockingIssues"] == ["ambiguous-duplicate-question"]
 
 
+def test_unique_exact_stem_without_type_or_options_is_merged():
+    markdown = "26. 证明题\n参考答案\n26. 证明题"
+    answer_start = markdown.rindex("26. 证明题")
+    questions = [
+        {"id": "q_26", "number": 26, "stemMarkdown": "证明题", "sourceEvidence": {"start": 0, "end": 8}},
+        {
+            "id": "q_26_2",
+            "number": 26,
+            "stemMarkdown": "证明题",
+            "sourceEvidence": {"start": answer_start, "end": len(markdown)},
+        },
+    ]
+
+    plan = build_canonicalization_plan(markdown, questions)
+
+    assert plan["idMap"]["q_26_2"] == "q_26"
+    assert plan["reviewItems"] == []
+
+
 def test_apply_keeps_paper_visuals_and_adds_answer_analysis():
     questions = [
         {

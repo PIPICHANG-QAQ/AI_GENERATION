@@ -34,7 +34,7 @@ def build_canonicalization_plan(markdown: str, questions: list[dict[str, Any]]) 
         )
         best_score, best = ranked[0] if ranked else (0.0, None)
         runner_up = ranked[1][0] if len(ranked) > 1 else 0.0
-        if best is not None and best_score >= 0.85 and best_score - runner_up >= 0.08:
+        if best is not None and best_score >= 0.75 and best_score - runner_up >= 0.12:
             canonical_id = question_id(best)
             duplicate_id = question_id(duplicate)
             id_map[duplicate_id] = canonical_id
