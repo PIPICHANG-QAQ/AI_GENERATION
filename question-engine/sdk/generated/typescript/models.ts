@@ -222,6 +222,26 @@ export type AiAnalysisInput = {
 
 export type AiAnalysisResult = AiStandardizeResult;
 
+export type CanonicalizationApplyInput = { applyToken: string };
+export type CanonicalizationPreview = {
+  applyToken: string;
+  summary: { beforeQuestionCount: number; afterQuestionCount: number; mergedQuestionCount: number };
+  questions: JsonObject[];
+  blockingIssues: string[];
+  canonicalization?: JsonObject;
+  paperLayout?: JsonObject;
+};
+export type StandardizationBatchItem = {
+  id: string; questionId: string; status: "queued" | "running" | "success" | "failed" | string;
+  attemptCount?: number; totalItems?: number; completedItems?: number; successItems?: number; failedItems?: number;
+};
+export type StandardizationBatchJob = {
+  id: string; taskId: string;
+  status: "queued" | "running" | "cancelling" | "cancelled" | "completed" | "partial_failed" | "failed" | string;
+  totalQuestions: number; totalItems: number; completedQuestions?: number; completedItems?: number;
+  successItems?: number; failedItems?: number; maxConcurrency: number; items?: StandardizationBatchItem[];
+};
+
 export type QuestionChild = {
   childId?: string;
   sourceQuestionId?: string;

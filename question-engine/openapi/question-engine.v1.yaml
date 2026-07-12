@@ -376,6 +376,68 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AiAnalysisResult"
+  /api/import-tasks/{jobId}/canonicalization/preview:
+    post:
+      tags: [review-workbench]
+      operationId: previewImportTaskCanonicalization
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200": { description: Read-only canonicalization preview, content: { application/json: { schema: { $ref: "#/components/schemas/CanonicalizationPreview" } } } }
+  /api/import-tasks/{jobId}/canonicalization/apply:
+    post:
+      tags: [review-workbench]
+      operationId: applyImportTaskCanonicalization
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CanonicalizationApplyRequest" } } } }
+      responses:
+        "200": { description: Applied canonical structure, content: { application/json: { schema: { $ref: "#/components/schemas/CanonicalizationPreview" } } } }
+        "409": { description: Stale preview token or unresolved structure }
+  /api/import-tasks/{jobId}/canonicalization/rollback:
+    post:
+      tags: [review-workbench]
+      operationId: rollbackImportTaskCanonicalization
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses: { "200": { description: Restored latest snapshot } }
+  /api/import-tasks/{jobId}/standardization-jobs:
+    post:
+      tags: [review-workbench, ai-flow]
+      operationId: createStandardizationBatchJob
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200": { description: Created durable batch, content: { application/json: { schema: { $ref: "#/components/schemas/StandardizationBatchJob" } } } }
+        "409": { description: Active job exists or structure is blocked }
+  /api/import-tasks/{jobId}/standardization-jobs/{batchJobId}:
+    get:
+      tags: [review-workbench, ai-flow]
+      operationId: getStandardizationBatchJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - { name: batchJobId, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: Durable batch state, content: { application/json: { schema: { $ref: "#/components/schemas/StandardizationBatchJob" } } } } }
+  /api/import-tasks/{jobId}/standardization-jobs/{batchJobId}/cancel:
+    post:
+      tags: [review-workbench, ai-flow]
+      operationId: cancelStandardizationBatchJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - { name: batchJobId, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: Cancellation requested, content: { application/json: { schema: { $ref: "#/components/schemas/StandardizationBatchJob" } } } } }
+  /api/import-tasks/{jobId}/standardization-jobs/{batchJobId}/resume:
+    post:
+      tags: [review-workbench, ai-flow]
+      operationId: resumeStandardizationBatchJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - { name: batchJobId, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: Batch resumed, content: { application/json: { schema: { $ref: "#/components/schemas/StandardizationBatchJob" } } } } }
+  /api/import-tasks/{jobId}/standardization-jobs/{batchJobId}/retry-failed:
+    post:
+      tags: [review-workbench, ai-flow]
+      operationId: retryFailedStandardizationBatchItems
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - { name: batchJobId, in: path, required: true, schema: { type: string } }
+      responses: { "200": { description: Failed items requeued, content: { application/json: { schema: { $ref: "#/components/schemas/StandardizationBatchJob" } } } } }
   /api/question-bank/questions/{questionId}/image-library:
     get:
       tags: [review-workbench, file-flow]
@@ -1170,6 +1232,52 @@ components:
         raw:
           type: object
           additionalProperties: true
+    CanonicalizationApplyRequest:
+      type: object
+      required: [applyToken]
+      properties:
+        applyToken: { type: string }
+    CanonicalizationPreview:
+      type: object
+      required: [applyToken, summary, questions, blockingIssues]
+      properties:
+        applyToken: { type: string }
+        summary:
+          type: object
+          properties:
+            beforeQuestionCount: { type: integer }
+            afterQuestionCount: { type: integer }
+            mergedQuestionCount: { type: integer }
+        questions: { type: array, items: { type: object, additionalProperties: true } }
+        blockingIssues: { type: array, items: { type: string } }
+        canonicalization: { type: object, additionalProperties: true }
+        paperLayout: { type: object, additionalProperties: true }
+    StandardizationBatchItem:
+      type: object
+      properties:
+        id: { type: string }
+        questionId: { type: string }
+        status: { type: string, enum: [queued, running, success, failed] }
+        attemptCount: { type: integer }
+        totalItems: { type: integer }
+        completedItems: { type: integer }
+        successItems: { type: integer }
+        failedItems: { type: integer }
+    StandardizationBatchJob:
+      type: object
+      required: [id, taskId, status, totalQuestions, totalItems, maxConcurrency]
+      properties:
+        id: { type: string }
+        taskId: { type: string }
+        status: { type: string, enum: [queued, running, cancelling, cancelled, completed, partial_failed, failed] }
+        totalQuestions: { type: integer }
+        totalItems: { type: integer }
+        completedQuestions: { type: integer }
+        completedItems: { type: integer }
+        successItems: { type: integer }
+        failedItems: { type: integer }
+        maxConcurrency: { type: integer, maximum: 2 }
+        items: { type: array, items: { $ref: "#/components/schemas/StandardizationBatchItem" } }
     MathValidationIssue:
       type: object
       properties:

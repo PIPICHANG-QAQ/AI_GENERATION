@@ -17,6 +17,8 @@ import com.aigeneration.questionengine.sdk.QuestionEngineModels.QuestionImageMut
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.QuestionPackage;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.QuestionProcessingDescriptor;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.SelectQuestionImagesRequest;
+import com.aigeneration.questionengine.sdk.QuestionEngineModels.CanonicalizationPreview;
+import com.aigeneration.questionengine.sdk.QuestionEngineModels.StandardizationBatchJob;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -87,6 +89,42 @@ public class QuestionEngineClient {
                 "/api/import-tasks/" + encode(jobId) + "/rescan",
                 Map.of()
         ), ImportTaskRescanResult.class);
+    }
+
+    public CanonicalizationPreview previewImportTaskCanonicalization(String jobId) throws IOException, InterruptedException {
+        return objectMapper.readValue(postJson("/api/import-tasks/" + encode(jobId) + "/canonicalization/preview", Map.of()), CanonicalizationPreview.class);
+    }
+
+    public CanonicalizationPreview applyImportTaskCanonicalization(String jobId, String applyToken) throws IOException, InterruptedException {
+        return objectMapper.readValue(postJson("/api/import-tasks/" + encode(jobId) + "/canonicalization/apply", Map.of("applyToken", applyToken)), CanonicalizationPreview.class);
+    }
+
+    public String rollbackImportTaskCanonicalization(String jobId) throws IOException, InterruptedException {
+        return postJson("/api/import-tasks/" + encode(jobId) + "/canonicalization/rollback", Map.of());
+    }
+
+    public StandardizationBatchJob createStandardizationBatchJob(String jobId) throws IOException, InterruptedException {
+        return objectMapper.readValue(postJson("/api/import-tasks/" + encode(jobId) + "/standardization-jobs", Map.of()), StandardizationBatchJob.class);
+    }
+
+    public StandardizationBatchJob getStandardizationBatchJob(String jobId, String batchJobId) throws IOException, InterruptedException {
+        return objectMapper.readValue(get("/api/import-tasks/" + encode(jobId) + "/standardization-jobs/" + encode(batchJobId)), StandardizationBatchJob.class);
+    }
+
+    public StandardizationBatchJob cancelStandardizationBatchJob(String jobId, String batchJobId) throws IOException, InterruptedException {
+        return batchAction(jobId, batchJobId, "cancel");
+    }
+
+    public StandardizationBatchJob resumeStandardizationBatchJob(String jobId, String batchJobId) throws IOException, InterruptedException {
+        return batchAction(jobId, batchJobId, "resume");
+    }
+
+    public StandardizationBatchJob retryFailedStandardizationBatchItems(String jobId, String batchJobId) throws IOException, InterruptedException {
+        return batchAction(jobId, batchJobId, "retry-failed");
+    }
+
+    private StandardizationBatchJob batchAction(String jobId, String batchJobId, String action) throws IOException, InterruptedException {
+        return objectMapper.readValue(postJson("/api/import-tasks/" + encode(jobId) + "/standardization-jobs/" + encode(batchJobId) + "/" + action, Map.of()), StandardizationBatchJob.class);
     }
 
     public QuestionImageLibrary getImportTaskImageLibrary(String jobId) throws IOException, InterruptedException {

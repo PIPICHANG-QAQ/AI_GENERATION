@@ -19,6 +19,8 @@ import type {
   QuestionPackage,
   QuestionProcessingDescriptor,
   SelectQuestionImagesInput,
+  CanonicalizationPreview,
+  StandardizationBatchJob,
 } from "./models";
 
 export type QuestionEngineClientOptions = {
@@ -71,6 +73,40 @@ export class QuestionEngineClient {
     return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/rescan`, {
       method: "POST",
     });
+  }
+
+  previewImportTaskCanonicalization(jobId: string): Promise<CanonicalizationPreview> {
+    return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/canonicalization/preview`, { method: "POST" });
+  }
+
+  applyImportTaskCanonicalization(jobId: string, applyToken: string): Promise<CanonicalizationPreview> {
+    return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/canonicalization/apply`, {
+      method: "POST", body: JSON.stringify({ applyToken }), headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  rollbackImportTaskCanonicalization(jobId: string): Promise<Record<string, unknown>> {
+    return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/canonicalization/rollback`, { method: "POST" });
+  }
+
+  createStandardizationBatchJob(jobId: string): Promise<StandardizationBatchJob> {
+    return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/standardization-jobs`, { method: "POST" });
+  }
+
+  getStandardizationBatchJob(jobId: string, batchJobId: string): Promise<StandardizationBatchJob> {
+    return this.getJson(`/api/import-tasks/${encodeURIComponent(jobId)}/standardization-jobs/${encodeURIComponent(batchJobId)}`);
+  }
+
+  cancelStandardizationBatchJob(jobId: string, batchJobId: string): Promise<StandardizationBatchJob> {
+    return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/standardization-jobs/${encodeURIComponent(batchJobId)}/cancel`, { method: "POST" });
+  }
+
+  resumeStandardizationBatchJob(jobId: string, batchJobId: string): Promise<StandardizationBatchJob> {
+    return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/standardization-jobs/${encodeURIComponent(batchJobId)}/resume`, { method: "POST" });
+  }
+
+  retryFailedStandardizationBatchItems(jobId: string, batchJobId: string): Promise<StandardizationBatchJob> {
+    return this.requestJson(`/api/import-tasks/${encodeURIComponent(jobId)}/standardization-jobs/${encodeURIComponent(batchJobId)}/retry-failed`, { method: "POST" });
   }
 
   getImportTaskImageLibrary(jobId: string): Promise<QuestionImageLibrary> {

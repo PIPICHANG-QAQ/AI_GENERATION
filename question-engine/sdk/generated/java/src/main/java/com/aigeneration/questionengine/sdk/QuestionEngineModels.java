@@ -8,6 +8,21 @@ public final class QuestionEngineModels {
     private QuestionEngineModels() {
     }
 
+    public record CanonicalizationApplyRequest(String applyToken) {}
+    public record CanonicalizationPreview(
+            String applyToken, Map<String, Object> summary, List<Map<String, Object>> questions,
+            List<String> blockingIssues, Map<String, Object> canonicalization, Map<String, Object> paperLayout
+    ) {}
+    public record StandardizationBatchItem(
+            String id, String questionId, String status, Integer attemptCount,
+            Integer totalItems, Integer completedItems, Integer successItems, Integer failedItems
+    ) {}
+    public record StandardizationBatchJob(
+            String id, String taskId, String status, Integer totalQuestions, Integer totalItems,
+            Integer completedQuestions, Integer completedItems, Integer successItems, Integer failedItems,
+            Integer maxConcurrency, List<StandardizationBatchItem> items
+    ) {}
+
     public record CapabilitySummary(String code, String name, String boundary, Map<String, Object> raw) {
     }
 

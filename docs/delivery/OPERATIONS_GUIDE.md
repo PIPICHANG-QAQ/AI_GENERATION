@@ -533,3 +533,13 @@ python scripts/acceptance_question_engine_plugin.py \
 - 生产不得依赖人工进入服务器手动删除目录作为常规策略。
 
 当前项目尚未内置生产级定时清理器。平台交付时应由平台任务调度、对象存储生命周期策略或后续 Java 定时任务承接。
+
+## 15. 题目结构整理与全局标准化
+
+- 现有任务先调用 canonicalization `preview`；预览只读。确认题数变化、自动合并项和阻断项后，携带 `applyToken` 调用 `apply`。令牌过期返回 409，应重新预览。
+- `apply` 会在 `java_import_task_snapshots` 保存任务与题目快照；误操作可调用 `rollback` 恢复最近快照。
+- 全局标准化由 `java_standardization_batch_jobs/items` 持久化，浏览器只创建一个 job 并轮询，不再逐字段发起 AI 请求。
+- 并发单位是整道 canonical 题，当前版本硬上限为 2；同题题干、选项、图片归属、答案、解析和小问一次保存。
+- 默认配置：`AI_STANDARDIZATION_MAX_CONCURRENCY=2`、`LLM_STANDARDIZE_MAX_CONCURRENCY=2`、`LLM_EXTERNAL_MAX_CONCURRENCY=2`。
+- 进程重启会把遗留 `running` item 重新排队；可重试错误最多 3 次。取消只停止领取新题，正在处理的题完成 checkpoint 后结束。
+- 排障时同时查看 job 的题目进度与内容项进度；内容项用于解释“36 道题为何包含更多题干/答案/解析工作量”，不代表发起同等数量的并发请求。
