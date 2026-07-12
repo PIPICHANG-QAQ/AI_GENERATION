@@ -117,6 +117,14 @@ type StandardizationJob = {
   successItems: number;
   failedItems: number;
   maxConcurrency: number;
+  rulesCount?: number;
+  ocrFallbackCount?: number;
+  cacheHitCount?: number;
+  llmQuestionCount?: number;
+  reviewRequiredCount?: number;
+  failedCount?: number;
+  currentLlmConcurrency?: number;
+  maximumLlmConcurrency?: number;
 };
 
 const FLOW_STATUS_LABELS: Record<string, string> = {
@@ -1044,7 +1052,8 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
               {formatStandardizationProgress(standardizationJob)}
             </div>
             <div className="text-xs text-muted-foreground mt-1">
-              状态：{standardizationJob.status} · 成功 {standardizationJob.successItems || 0} · 失败 {standardizationJob.failedItems || 0}
+              状态：{standardizationJob.status}
+              {standardizationJob.status === "partial_review" ? " · 存在需要人工复核的候选，原题未被覆盖" : ""}
             </div>
           </div>
           <div className="flex gap-2">
