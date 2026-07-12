@@ -96,6 +96,114 @@ def question_image_ref_groups_by_layout(output_dir: Path, limit: int) -> list[di
     return _question_image_ref_groups_by_layout(output_dir, limit)
 
 
+def merge_canonical_regions(
+    regions: list[dict[str, Any]],
+    id_map: dict[str, str] | None,
+    anchor_regions: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Map duplicate question IDs and union only adjacent/overlapping same-page boxes."""
+    canonical_ids = id_map if isinstance(id_map, dict) else {}
+    anchors = anchor_regions if isinstance(anchor_regions, list) else []
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    group_order: list[tuple[str, int]] = []
+
+    for raw in [*(regions or []), *anchors]:
+        if not isinstance(raw, dict):
+            continue
+        original_id = str(raw.get("questionId") or "").strip()
+        if not original_id:
+            continue
+        canonical_id = str(canonical_ids.get(original_id) or original_id).strip()
+        page_index = parse_int(raw.get("pageIndex"), 0)
+        key = (canonical_id, page_index)
+        if key not in grouped:
+            grouped[key] = []
+            group_order.append(key)
+        region = dict(raw)
+        region["_originalQuestionId"] = original_id
+        region["questionId"] = canonical_id
+        grouped[key].append(region)
+
+    output: list[dict[str, Any]] = []
+    for key in group_order:
+        pending = sorted(grouped[key], key=lambda item: (float(item.get("y") or 0), float(item.get("x") or 0)))
+        components: list[list[dict[str, Any]]] = []
+        for region in pending:
+            touching = [index for index, component in enumerate(components) if any(regions_should_union(region, item) for item in component)]
+            if not touching:
+                components.append([region])
+                continue
+            target = touching[0]
+            components[target].append(region)
+            for component_index in reversed(touching[1:]):
+                components[target].extend(components.pop(component_index))
+        output.extend(union_region_component(component) for component in components)
+
+    return sorted(
+        output,
+        key=lambda item: (
+            parse_int(item.get("pageIndex"), 0),
+            float(item.get("y") or 0),
+            float(item.get("x") or 0),
+        ),
+    )
+
+
+def regions_should_union(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if parse_int(left.get("pageIndex"), 0) != parse_int(right.get("pageIndex"), 0):
+        return False
+    left_x, left_y, left_w, left_h = normalized_region_rect(left)
+    right_x, right_y, right_w, right_h = normalized_region_rect(right)
+    horizontal_overlap = max(0.0, min(left_x + left_w, right_x + right_w) - max(left_x, right_x))
+    horizontal_ratio = horizontal_overlap / max(min(left_w, right_w), 1e-9)
+    vertical_overlap = min(left_y + left_h, right_y + right_h) - max(left_y, right_y)
+    vertical_gap = max(0.0, -vertical_overlap)
+    return horizontal_ratio >= 0.25 and (vertical_overlap >= 0.0 or vertical_gap <= 0.02)
+
+
+def normalized_region_rect(region: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        float(region.get("x") or 0),
+        float(region.get("y") or 0),
+        max(0.0, float(region.get("w") or 0)),
+        max(0.0, float(region.get("h") or 0)),
+    )
+
+
+def union_region_component(component: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(component) == 1:
+        single = dict(component[0])
+        single.pop("_originalQuestionId", None)
+        return single
+    x1 = min(normalized_region_rect(item)[0] for item in component)
+    y1 = min(normalized_region_rect(item)[1] for item in component)
+    x2 = max(normalized_region_rect(item)[0] + normalized_region_rect(item)[2] for item in component)
+    y2 = max(normalized_region_rect(item)[1] + normalized_region_rect(item)[3] for item in component)
+    merged = dict(component[0])
+    merged.update(
+        {
+            "x": x1,
+            "y": y1,
+            "w": x2 - x1,
+            "h": y2 - y1,
+            "confidence": min(float(item.get("confidence") or 0.0) for item in component),
+            "mergedFromRegions": [
+                {
+                    "questionId": str(item.get("_originalQuestionId") or item.get("questionId") or ""),
+                    "pageIndex": parse_int(item.get("pageIndex"), 0),
+                    "x": float(item.get("x") or 0),
+                    "y": float(item.get("y") or 0),
+                    "w": float(item.get("w") or 0),
+                    "h": float(item.get("h") or 0),
+                }
+                for item in component
+            ],
+        }
+    )
+    merged.pop("_originalQuestionId", None)
+    return merged
+
+
 def paper_layout_enabled() -> bool:
     """返回布局解析框是否启用。"""
     return str(os.getenv("OCR_PAPER_LAYOUT_ENABLED", "true")).strip().lower() not in DISABLED_VALUES
@@ -204,6 +312,9 @@ def _build_paper_layout(task: dict[str, Any], job: dict[str, Any]) -> dict[str, 
         warnings.append("OCR 题目 bbox 超出页面范围，未显示布局解析框")
     elif matched_count < len(import_questions):
         warnings.append(f"布局解析框仅匹配到 {matched_count}/{len(import_questions)} 道题，请人工复核未定位题目")
+
+    canonicalization = task.get("canonicalization") if isinstance(task.get("canonicalization"), dict) else {}
+    regions = merge_canonical_regions(regions, canonicalization.get("idMap") or {})
 
     return {
         **pages_layout,

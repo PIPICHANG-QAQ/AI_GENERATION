@@ -10,12 +10,66 @@ from app.question_layout import (
     build_paper_layout,
     load_image_placement_evidence,
     load_layout_items,
+    merge_canonical_regions,
     regions_for_items,
 )
 from app.worker_base import IMPORT_UPLOAD_ROOT, OUTPUT_ROOT
 
 
 class QuestionLayoutTest(unittest.TestCase):
+    def test_overlapping_regions_for_same_canonical_question_are_unioned(self):
+        regions = [
+            {
+                "questionId": "q_2",
+                "index": 2,
+                "pageIndex": 0,
+                "x": 0.14,
+                "y": 0.27,
+                "w": 0.59,
+                "h": 0.13,
+                "confidence": 0.96,
+            },
+            {
+                "questionId": "q_2_2",
+                "index": 2,
+                "pageIndex": 0,
+                "x": 0.16,
+                "y": 0.38,
+                "w": 0.69,
+                "h": 0.15,
+                "confidence": 0.96,
+            },
+        ]
+
+        merged = merge_canonical_regions(regions, {"q_2": "q_2", "q_2_2": "q_2"})
+
+        self.assertEqual(1, len(merged))
+        self.assertEqual("q_2", merged[0]["questionId"])
+        self.assertEqual(0.14, merged[0]["x"])
+        self.assertEqual(0.27, merged[0]["y"])
+        self.assertEqual(0.71, round(merged[0]["w"], 2))
+        self.assertEqual(0.26, round(merged[0]["h"], 2))
+        self.assertEqual(2, len(merged[0]["mergedFromRegions"]))
+
+    def test_cross_page_regions_remain_separate(self):
+        regions = [
+            {"questionId": "q_7", "index": 7, "pageIndex": 0, "x": 0.1, "y": 0.8, "w": 0.8, "h": 0.15},
+            {"questionId": "q_7", "index": 7, "pageIndex": 1, "x": 0.1, "y": 0.0, "w": 0.8, "h": 0.2},
+        ]
+
+        merged = merge_canonical_regions(regions, {"q_7": "q_7"})
+
+        self.assertEqual(2, len(merged))
+        self.assertEqual([0, 1], [region["pageIndex"] for region in merged])
+
+    def test_separate_regions_for_same_question_are_not_unioned(self):
+        regions = [
+            {"questionId": "q_9", "index": 9, "pageIndex": 0, "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.1},
+            {"questionId": "q_9", "index": 9, "pageIndex": 0, "x": 0.7, "y": 0.5, "w": 0.2, "h": 0.1},
+        ]
+
+        self.assertEqual(2, len(merge_canonical_regions(regions, {"q_9": "q_9"})))
+
     def test_image_placement_evidence_exposes_sanitized_read_only_nodes(self):
         content_list = [
             {"type": "text", "text": "A.", "bbox": [100, 100, 140, 130], "page_idx": 0},
