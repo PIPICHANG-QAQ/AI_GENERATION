@@ -20,6 +20,7 @@ from app.question_markdown import (
     refine_question_type_from_markdown,
     split_choice_options,
 )
+from app.image_placement import build_image_placements, validate_image_placements
 
 
 VALID_QUESTION_TYPES = {"choice", "fill_blank", "solution", "unknown"}
@@ -921,6 +922,7 @@ def build_question(source: str, raw_question: dict[str, Any], assets: list[dict[
         "sourceEvidence": {"start": start, "end": stem_end},
         "numberingReset": bool(raw_question.get("numberingReset")),
     }
+    question["imagePlacements"] = build_image_placements(raw_question, raw_question.get("images") or [])
 
     if child_boundaries:
         question["answer"] = ""
@@ -1011,6 +1013,7 @@ def build_sub_question(
         "subQuestions": [],
         "sourceEvidence": {"start": start, "end": stem_end},
     }
+    child["imagePlacements"] = build_image_placements(raw_child, raw_child.get("images") or [])
     return child
 
 
@@ -1172,6 +1175,11 @@ def validate_structure(
             if question.get("type") == "choice" and len(question.get("options") or []) < 2:
                 warnings.append(f"{question.get('id')} 被判为选择题但选项少于 2 个")
             validate_images(question, asset_paths, errors)
+            placement_assets = list(question.get("images") or [])
+            for child in children:
+                if isinstance(child, dict):
+                    placement_assets.extend(child.get("images") or [])
+            validate_question_placements(question, placement_assets, errors, warnings)
             for child in children:
                 if not isinstance(child, dict):
                     continue
@@ -1185,6 +1193,7 @@ def validate_structure(
                 if child.get("type") == "choice" and len(child.get("options") or []) < 2:
                     warnings.append(f"{question.get('id')} 小问 {label} 被判为选择题但选项少于 2 个")
                 validate_images(child, asset_paths, errors)
+                validate_question_placements(child, child.get("images") or [], errors, warnings)
 
     if question_count == 0:
         errors.append("未生成题目结构")
@@ -1282,8 +1291,68 @@ def validate_images(question: dict[str, Any], asset_paths: set[str], errors: lis
             errors.append(f"{question.get('id')} 引用了未知题图 {path}")
 
 
+def validate_question_placements(
+    question: dict[str, Any],
+    images: list[dict[str, Any]],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    placements = question.get("imagePlacements")
+    if not isinstance(placements, list):
+        return
+    result = validate_image_placements(
+        images,
+        placements,
+        question_type=str(question.get("type") or "unknown"),
+        option_count=len(question.get("options") or []),
+    )
+    question["imagePlacementValidation"] = result
+    question_id = str(question.get("id") or "question")
+    errors.extend(f"{question_id} {message}" for message in result["errors"])
+    warnings.extend(f"{question_id} {message}" for message in result["warnings"])
+
+
 def merge_legacy_images(structured: dict[str, Any], legacy: dict[str, Any]) -> None:
     """Preserve image assignments from the legacy content_list parser when present."""
+    def image_key(image: dict[str, Any]) -> str:
+        return normalize_asset_path(str(image.get("path") or image.get("name") or image.get("url") or ""))
+
+    def walk_questions(root: dict[str, Any]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen_objects: set[int] = set()
+
+        def append_question(question: dict[str, Any]) -> None:
+            object_id = id(question)
+            if object_id in seen_objects:
+                return
+            seen_objects.add(object_id)
+            result.append(question)
+            for field in ("subQuestions", "children"):
+                for child in question.get(field) or []:
+                    if isinstance(child, dict):
+                        append_question(child)
+
+        for section in root.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            for question in section.get("questions") or []:
+                if isinstance(question, dict):
+                    append_question(question)
+        for question in root.get("questions") or []:
+            if isinstance(question, dict):
+                append_question(question)
+        return result
+
+    primary_owners: dict[str, set[str]] = {}
+    for question in walk_questions(structured):
+        owner_id = str(question.get("id") or f"question-object-{id(question)}")
+        for image in question.get("images") or []:
+            if not isinstance(image, dict):
+                continue
+            key = image_key(image)
+            if key:
+                primary_owners.setdefault(key, set()).add(owner_id)
+
     legacy_by_number: dict[int, list[dict[str, Any]]] = {}
     for section in legacy.get("sections") or []:
         if not isinstance(section, dict):
@@ -1308,7 +1377,22 @@ def merge_legacy_images(structured: dict[str, Any], legacy: dict[str, Any]) -> N
             legacy_candidates = legacy_by_number.get(number) or []
             legacy_question = legacy_candidates[occurrence] if occurrence < len(legacy_candidates) else None
             if legacy_question and legacy_question.get("images"):
-                question["images"] = legacy_question["images"]
+                owner_id = str(question.get("id") or f"question-object-{id(question)}")
+                accepted_images: list[dict[str, Any]] = []
+                warnings = question.setdefault("imageWarnings", [])
+                for image in legacy_question.get("images") or []:
+                    if not isinstance(image, dict):
+                        continue
+                    key = image_key(image)
+                    conflicting_owners = primary_owners.get(key, set()) - {owner_id}
+                    if conflicting_owners:
+                        warnings.append(f"旧版候选题图 {key} 已由另一道题持有，未自动合并")
+                        continue
+                    accepted_images.append(image)
+                    if key:
+                        primary_owners.setdefault(key, set()).add(owner_id)
+                if accepted_images:
+                    question["images"] = accepted_images
 
 
 def section_for_question(sections: list[dict[str, Any]], question: dict[str, Any]) -> dict[str, Any]:
@@ -1330,6 +1414,15 @@ def images_for_range(raw_images: list[dict[str, Any]], assets: list[dict[str, An
         if not path:
             continue
         image = image_from_path(path, assets)
+        image["imageId"] = normalize_asset_path(str(image.get("path") or image.get("name") or ""))
+        source_evidence = {
+            "markdownStart": raw_image.get("start") if isinstance(raw_image.get("start"), int) else None,
+            "markdownEnd": raw_image.get("end") if isinstance(raw_image.get("end"), int) else None,
+            "pageIndex": raw_image.get("pageIndex"),
+            "bbox": raw_image.get("bbox") if isinstance(raw_image.get("bbox"), list) else None,
+        }
+        if any(value is not None for value in source_evidence.values()):
+            image["sourceEvidence"] = source_evidence
         key = str(image.get("path") or image.get("name") or "")
         if not key or key in seen:
             continue

@@ -333,6 +333,42 @@ def load_question_layout_items(output_dir: Path) -> list[dict[str, Any]]:
     return load_layout_items(output_dir)
 
 
+def load_image_placement_evidence(output_dir: Path, markdown: str = "") -> list[dict[str, Any]]:
+    """Return sanitized, read-only layout nodes for image placement reconciliation."""
+    items = load_question_layout_items(output_dir)
+    if markdown:
+        items = index_layout_items(items, markdown)
+    nodes: list[dict[str, Any]] = []
+    for item in items:
+        block_seed = json.dumps(
+            {
+                "pageIndex": item.get("pageIndex"),
+                "sourceOrder": item.get("sourceOrder"),
+                "type": item.get("type"),
+                "text": item.get("text"),
+                "imageRef": item.get("imageRef"),
+                "bbox": item.get("bbox"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        node = {
+            "blockId": f"layout-{hashlib.sha1(block_seed.encode('utf-8')).hexdigest()[:12]}",
+            "type": str(item.get("type") or "unknown"),
+            "text": str(item.get("text") or ""),
+            "imageRef": str(item.get("imageRef") or ""),
+            "pageIndex": parse_int(item.get("pageIndex"), 0),
+            "bbox": list(item.get("bbox") or []),
+        }
+        if markdown:
+            node["order"] = parse_int(item.get("order"), 0)
+            if isinstance(item.get("start"), int):
+                node["markdownStart"] = item["start"]
+                node["markdownEnd"] = item.get("end")
+        nodes.append(node)
+    return nodes
+
+
 def sorted_layout_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """按页面几何阅读顺序排序并重写 order。"""
     sorted_items = sorted(items, key=layout_item_sort_key)

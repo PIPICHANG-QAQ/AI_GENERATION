@@ -5,6 +5,7 @@ from app.question_boundary import (
     detect_local_boundaries,
     evaluate_boundary_confidence,
     extract_paper_structure_contract,
+    merge_legacy_images,
     plan_boundary_chunks,
     validate_structure,
 )
@@ -12,6 +13,68 @@ from app.question_markdown import question_to_edit_markdown
 
 
 class QuestionBoundaryTest(unittest.TestCase):
+    def test_build_structure_preserves_explicit_option_image_placements(self):
+        markdown = """一、选择题
+1. 请选择正确图形
+A.
+![](images/a.png)
+B.
+![](images/b.png)
+"""
+        assets = [
+            {"name": "a.png", "path": "images/a.png", "url": "/a.png"},
+            {"name": "b.png", "path": "images/b.png", "url": "/b.png"},
+        ]
+
+        boundaries = detect_local_boundaries(markdown, assets)
+        structured = build_structure_from_boundaries(markdown, boundaries, assets)
+        question = structured["questions"][0]
+
+        self.assertEqual(["A", "B"], [item["target"]["optionLabel"] for item in question["imagePlacements"]])
+        self.assertTrue(all(item["inference"]["method"] == "explicit-offset" for item in question["imagePlacements"]))
+
+    def test_structure_validation_rejects_duplicate_high_confidence_placements(self):
+        markdown = "1. 如图，求角度。\n\n![](images/a.png)"
+        assets = [{"name": "a.png", "path": "images/a.png", "url": "/a.png"}]
+        boundaries = detect_local_boundaries(markdown, assets)
+        structured = build_structure_from_boundaries(markdown, boundaries, assets)
+        question = structured["questions"][0]
+        duplicate = {**question["imagePlacements"][0], "placementId": "duplicate", "target": {"kind": "option", "optionLabel": "A"}}
+        question["imagePlacements"].append(duplicate)
+
+        validation = validate_structure(structured, markdown, assets)
+
+        self.assertFalse(validation["valid"])
+        self.assertTrue(any("多个高置信归属" in error for error in validation["errors"]))
+
+    def test_legacy_images_do_not_cross_question_owners(self):
+        images = [
+            {"name": f"option-{index}.png", "path": f"images/option-{index}.png"}
+            for index in range(1, 5)
+        ]
+        primary_questions = [
+            {"id": "q1", "number": 1, "images": images.copy()},
+            {"id": "q2", "number": 2, "images": []},
+        ]
+        structured = {
+            "sections": [{"questions": primary_questions}],
+            "questions": primary_questions,
+        }
+        legacy_questions = [
+            {"id": "legacy-q1", "number": 1, "images": []},
+            {"id": "legacy-q2", "number": 2, "images": images.copy()},
+        ]
+        legacy = {
+            "sections": [{"questions": legacy_questions}],
+            "questions": legacy_questions,
+        }
+
+        merge_legacy_images(structured, legacy)
+
+        self.assertEqual([], primary_questions[1]["images"])
+        self.assertEqual(4, len(primary_questions[1]["imageWarnings"]))
+        self.assertTrue(all("另一道题" in warning for warning in primary_questions[1]["imageWarnings"]))
+
     def test_high_confidence_choice_boundaries_can_skip_llm(self):
         markdown = """一、选择题
 1. 下列说法正确的是（ ）

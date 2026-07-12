@@ -8,6 +8,7 @@ from PIL import Image
 from app.question_layout import (
     attach_paper_layout,
     build_paper_layout,
+    load_image_placement_evidence,
     load_layout_items,
     regions_for_items,
 )
@@ -15,6 +16,25 @@ from app.worker_base import IMPORT_UPLOAD_ROOT, OUTPUT_ROOT
 
 
 class QuestionLayoutTest(unittest.TestCase):
+    def test_image_placement_evidence_exposes_sanitized_read_only_nodes(self):
+        content_list = [
+            {"type": "text", "text": "A.", "bbox": [100, 100, 140, 130], "page_idx": 0},
+            {"type": "image", "img_path": "images/a.png", "bbox": [120, 140, 300, 260], "page_idx": 0},
+        ]
+        (self.output_dir / "paper_content_list.json").write_text(
+            json.dumps(content_list, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        nodes = load_image_placement_evidence(self.output_dir)
+
+        self.assertEqual(2, len(nodes))
+        self.assertEqual(
+            {"blockId", "type", "text", "imageRef", "pageIndex", "bbox"},
+            set(nodes[0]),
+        )
+        self.assertTrue(all(node["blockId"] for node in nodes))
+
     def setUp(self):
         self.job_id = "layout_test_job"
         self.task_id = "import_task_layout_test"

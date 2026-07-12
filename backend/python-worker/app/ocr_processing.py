@@ -22,7 +22,63 @@ from app.question_boundary import (
     plan_boundary_chunks,
     validate_structure,
 )
+from app.image_placement import reconcile_structure_image_placements
+from app.question_layout import load_image_placement_evidence
 from app.visual_repair import apply_visual_repairs, prepare_visual_repair_context
+
+
+def structure_candidate_quality(structured: dict[str, Any]) -> tuple[int, int, int, int]:
+    """Return deterministic evidence coverage used only to compare invalid candidates."""
+    questions = [question for question in structured.get("questions") or [] if isinstance(question, dict)]
+    evidence_count = sum(
+        1
+        for question in questions
+        if isinstance(question.get("sourceEvidence"), dict)
+        and isinstance(question["sourceEvidence"].get("start"), int)
+        and isinstance(question["sourceEvidence"].get("end"), int)
+    )
+    complete_choice_count = sum(
+        1
+        for question in questions
+        if str(question.get("type") or "") != "choice" or len(question.get("options") or []) >= 2
+    )
+    option_count = sum(len(question.get("options") or []) for question in questions)
+    image_count = sum(len(question.get("images") or []) for question in questions)
+    return (evidence_count, complete_choice_count, option_count, image_count)
+
+
+def select_structure_candidate(
+    primary: dict[str, Any],
+    primary_validation: dict[str, Any],
+    fallback: dict[str, Any],
+    fallback_validation: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Select a structure without allowing an invalid lower-quality fallback to replace primary evidence."""
+    primary_valid = bool(primary_validation.get("valid"))
+    fallback_valid = bool(fallback_validation.get("valid"))
+    use_fallback = False
+    if not primary_valid and fallback_valid:
+        use_fallback = True
+    elif not primary_valid and not fallback_valid:
+        use_fallback = structure_candidate_quality(fallback) > structure_candidate_quality(primary)
+
+    if use_fallback:
+        validation = {
+            **fallback_validation,
+            "fallback": True,
+            "requiresReview": not fallback_valid,
+            "primaryValidation": primary_validation,
+            "fallbackValidation": fallback_validation,
+        }
+        return fallback, validation
+
+    validation = {
+        **primary_validation,
+        "fallback": False,
+        "requiresReview": not primary_valid,
+        "fallbackValidation": fallback_validation,
+    }
+    return primary, validation
 
 def parse_structured_questions_from_v2(content_v2: Any, assets: list[dict[str, Any]]) -> dict[str, Any]:
     """从 MinerU v2 JSON 内容解析结构化题目和资源引用。"""
@@ -336,7 +392,21 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
 
         structured = build_structure_from_boundaries(markdown, boundary_source, assets)
         merge_legacy_images(structured, legacy_structured)
-        layout_image_realign = {"applied": False, "reason": "layout-read-only", "changed": 0}
+        try:
+            placement_layout_items = load_image_placement_evidence(output_dir, markdown)
+            layout_image_realign = reconcile_structure_image_placements(structured, placement_layout_items)
+            layout_image_realign["reason"] = "layout-read-only-reconciliation"
+        except Exception as exc:
+            layout_image_realign = {
+                "applied": False,
+                "reason": "layout-read-only-reconciliation-failed",
+                "placementCount": 0,
+                "assignedCounts": {},
+                "methodCounts": {},
+                "conflictCount": 0,
+                "unassignedCount": 0,
+                "warnings": [str(exc)],
+            }
         if not structured.get("questions"):
             structured = legacy_structured
             previous_llm_calls = splitter.get("llmCalls") if isinstance(splitter, dict) else []
@@ -387,20 +457,28 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         mark_ocr_flow_step(job, current_step, "running", "正在校验结构证据和题图引用")
         write_job(job)
 
-        structure_validation = validate_structure(structured, markdown, assets, local_boundaries.get("structureContract"))
-        if not structure_validation.get("valid"):
-            structured = legacy_structured
-            fallback_validation = validate_structure(structured, markdown, assets, local_boundaries.get("structureContract"))
-            structure_validation = {
-                **structure_validation,
-                "fallback": True,
-                "fallbackValidation": fallback_validation,
-            }
+        primary_structured = structured
+        primary_validation = validate_structure(primary_structured, markdown, assets, local_boundaries.get("structureContract"))
+        if not primary_validation.get("valid"):
+            fallback_validation = validate_structure(legacy_structured, markdown, assets, local_boundaries.get("structureContract"))
+            structured, structure_validation = select_structure_candidate(
+                primary_structured,
+                primary_validation,
+                legacy_structured,
+                fallback_validation,
+            )
             previous_llm_calls = splitter.get("llmCalls") if isinstance(splitter, dict) else []
-            splitter = rule_splitter_metadata("结构校验失败，已回滚旧版规则拆题")
-            splitter["llmCalls"] = previous_llm_calls
+            if structure_validation.get("fallback"):
+                splitter = rule_splitter_metadata("主结构校验失败，已选择质量更高的旧版规则候选")
+                splitter["llmCalls"] = previous_llm_calls
+            else:
+                splitter.setdefault("warnings", []).append("主结构与旧版候选均未通过校验，已保留证据质量更高的主结构并标记复核")
         else:
-            structure_validation["fallback"] = False
+            structure_validation = {
+                **primary_validation,
+                "fallback": False,
+                "requiresReview": False,
+            }
         structured["structureValidation"] = structure_validation
         structured["layoutImageRealign"] = layout_image_realign
         question_count = len(structured.get("questions") or [])
@@ -408,7 +486,7 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         validation_message = (
             f"结构校验完成，父题 {question_count} 道，小问 {structure_validation.get('subQuestionCount', 0)} 个"
             if structure_validation.get("valid")
-            else "结构校验失败，已回滚旧版规则拆题"
+            else "结构校验未通过，已保留较高质量候选并标记复核"
         )
         mark_ocr_flow_step(job, current_step, "success" if structure_validation.get("valid") else "skipped", validation_message)
         current_step = "math-normalize"

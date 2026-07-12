@@ -4,10 +4,53 @@ import unittest
 from unittest.mock import patch
 
 from app import ocr_processing, question_boundary
-from app.ocr_processing import apply_auto_semantic_repairs, build_llm_metrics
+from app.ocr_processing import apply_auto_semantic_repairs, build_llm_metrics, select_structure_candidate
 
 
 class OcrProcessingTest(unittest.TestCase):
+    def test_invalid_fallback_does_not_replace_better_primary_candidate(self):
+        primary = {
+            "questions": [
+                {"id": "q24", "number": 24, "options": [{"label": "A"}, {"label": "B"}], "images": [{"path": "q24.png"}]},
+                {"id": "q25", "number": 25, "options": [{"label": "A"}, {"label": "B"}], "images": [{"path": "q25.png"}]},
+            ]
+        }
+        fallback = {
+            "questions": [
+                {"id": "q24", "number": 24, "options": [], "images": []},
+                {"id": "q25", "number": 25, "options": [], "images": [{"path": "q24.png"}, {"path": "q25.png"}]},
+            ]
+        }
+        primary_validation = {"valid": False, "errors": ["答案区题号重复"]}
+        fallback_validation = {"valid": False, "errors": ["答案区题号重复", "题图归属冲突"]}
+
+        selected, validation = select_structure_candidate(
+            primary,
+            primary_validation,
+            fallback,
+            fallback_validation,
+        )
+
+        self.assertIs(primary, selected)
+        self.assertFalse(validation["fallback"])
+        self.assertTrue(validation["requiresReview"])
+        self.assertEqual(fallback_validation, validation["fallbackValidation"])
+
+    def test_valid_fallback_replaces_invalid_primary_candidate(self):
+        primary = {"questions": [{"id": "q1", "number": 1}]}
+        fallback = {"questions": [{"id": "q1", "number": 1}]}
+
+        selected, validation = select_structure_candidate(
+            primary,
+            {"valid": False, "errors": ["bad boundary"]},
+            fallback,
+            {"valid": True, "errors": []},
+        )
+
+        self.assertIs(fallback, selected)
+        self.assertTrue(validation["fallback"])
+        self.assertFalse(validation["requiresReview"])
+
     def test_auto_semantic_repair_skip_mode_does_not_call_llm(self):
         structured = {"sections": [{"questions": [{"id": "q1", "stemMarkdown": '若 5"=4，则求值'}]}], "questions": []}
         with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "key", "OCR_AUTO_SEMANTIC_REPAIR_MODE": "skip", "ENABLE_LLM_SPLIT": "true"}):
@@ -83,6 +126,7 @@ class OcrProcessingTest(unittest.TestCase):
         self.assertNotIn("layout_items", detect_boundaries_source)
         self.assertNotIn("layoutItem", detect_boundaries_source)
         self.assertIn("layout-read-only", collect_outputs_source)
+        self.assertIn("reconcile_structure_image_placements", collect_outputs_source)
 
 
 if __name__ == "__main__":
