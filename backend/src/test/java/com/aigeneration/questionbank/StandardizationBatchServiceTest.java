@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -112,7 +113,7 @@ class StandardizationBatchServiceTest {
     }
 
     @Test
-    void executesAtMostTwoQuestionsConcurrentlyAndSavesEachOnce() throws Exception {
+    void dispatchesIndependentQuestionsConcurrentlyAndSavesEachOnce() throws Exception {
         StandardizationBatchJobEntity job = job("job-1", "queued");
         job.setTotalQuestions(3);
         job.setTotalItems(3);
@@ -123,22 +124,25 @@ class StandardizationBatchServiceTest {
         when(jobMapper.selectById("job-1")).thenReturn(job);
         when(itemMapper.selectByJobId("job-1")).thenReturn(items);
         when(questionService.getQuestion(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation -> question(invocation.getArgument(0)));
-        CountDownLatch started = new CountDownLatch(2);
+        CountDownLatch started = new CountDownLatch(3);
         CountDownLatch release = new CountDownLatch(1);
         AtomicInteger active = new AtomicInteger();
         AtomicInteger peak = new AtomicInteger();
+        AtomicReference<Map<String, Object>> requestPayload = new AtomicReference<>();
         when(ai.standardizeImportQuestion(any(), any(), any())).thenAnswer(invocation -> {
+            requestPayload.set(invocation.getArgument(2));
             int current = active.incrementAndGet();
             peak.accumulateAndGet(current, Math::max);
             started.countDown();
             release.await(2, TimeUnit.SECONDS);
             active.decrementAndGet();
-            return Map.of("writeResult", true);
+            return Map.of("writeResult", true, "writeDecision", "applied", "executionPath", "rules");
         });
 
         service.start("job-1");
         org.junit.jupiter.api.Assertions.assertTrue(started.await(2, TimeUnit.SECONDS));
-        assertEquals(2, peak.get());
+        assertEquals(3, peak.get());
+        assertEquals("global", requestPayload.get().get("requestSource"));
         release.countDown();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
         while (!"completed".equals(job.getStatus()) && System.nanoTime() < deadline) Thread.sleep(10);
@@ -146,6 +150,7 @@ class StandardizationBatchServiceTest {
         assertEquals("completed", job.getStatus());
         verify(ai, org.mockito.Mockito.times(3)).standardizeImportQuestion(any(), any(), any());
         assertEquals(List.of("success", "success", "success"), items.stream().map(StandardizationBatchItemEntity::getStatus).toList());
+        assertEquals(List.of("rules", "rules", "rules"), items.stream().map(StandardizationBatchItemEntity::getExecutionPath).toList());
     }
 
     @Test
@@ -155,8 +160,9 @@ class StandardizationBatchServiceTest {
         Map<String, Object> created = service.create("task-1");
 
         assertEquals(2, created.get("totalQuestions"));
+        assertEquals(2, created.get("totalItems"));
         verify(jobMapper).insert(any(StandardizationBatchJobEntity.class));
-        verify(itemMapper, org.mockito.Mockito.times(2)).insert(any(StandardizationBatchItemEntity.class));
+        verify(itemMapper, org.mockito.Mockito.times(2)).insert(org.mockito.ArgumentMatchers.argThat(item -> item.getTotalItems() == 1));
 
         StandardizationBatchJobEntity active = new StandardizationBatchJobEntity();
         active.setId("active-job");
@@ -164,6 +170,35 @@ class StandardizationBatchServiceTest {
         active.setStatus("running");
         when(jobMapper.selectActiveByTaskId("task-1")).thenReturn(active);
         assertThrows(ResponseStatusException.class, () -> service.create("task-1"));
+    }
+
+    @Test
+    void reviewRequiredIsCompletedWithoutTechnicalFailure() throws Exception {
+        StandardizationBatchJobEntity job = job("job-1", "queued");
+        job.setTotalQuestions(1);
+        job.setTotalItems(1);
+        StandardizationBatchItemEntity item = item("item-1", "queued");
+        item.setTotalItems(1);
+        when(jobMapper.selectById("job-1")).thenReturn(job);
+        when(itemMapper.selectByJobId("job-1")).thenReturn(List.of(item));
+        when(questionService.getQuestion("q1")).thenReturn(question("q1"));
+        when(ai.standardizeImportQuestion(any(), any(), any())).thenReturn(Map.of(
+                "writeResult", false,
+                "writeDecision", "review_required",
+                "executionPath", "llm",
+                "modelInvoked", true,
+                "reviewReasons", List.of("option_image_reference_removed"),
+                "providerCallAttempts", 1
+        ));
+
+        service.start("job-1");
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!"partial_review".equals(job.getStatus()) && System.nanoTime() < deadline) Thread.sleep(10);
+
+        assertEquals("partial_review", job.getStatus());
+        assertEquals("review_required", item.getStatus());
+        assertEquals("llm", item.getExecutionPath());
+        assertEquals(0, job.getFailedItems());
     }
 
     @Test

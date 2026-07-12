@@ -75,7 +75,7 @@ public class StandardizationBatchService {
         job.setTaskId(taskId);
         job.setStatus("queued");
         job.setTotalQuestions(questions.size());
-        job.setTotalItems(questions.stream().mapToInt(this::editableItemCount).sum());
+        job.setTotalItems(questions.size());
         job.setCompletedQuestions(0);
         job.setCompletedItems(0);
         job.setSuccessItems(0);
@@ -92,7 +92,7 @@ public class StandardizationBatchService {
             item.setStatus("queued");
             item.setInputHash(inputHash(question));
             item.setAttemptCount(0);
-            item.setTotalItems(editableItemCount(question));
+            item.setTotalItems(1);
             item.setCompletedItems(0);
             item.setSuccessItems(0);
             item.setFailedItems(0);
@@ -113,7 +113,7 @@ public class StandardizationBatchService {
     @Transactional
     public Map<String, Object> cancel(String taskId, String jobId) {
         StandardizationBatchJobEntity job = requireJob(taskId, jobId);
-        if (List.of("completed", "cancelled", "failed", "partial_failed").contains(job.getStatus())) {
+        if (List.of("completed", "cancelled", "failed", "partial_failed", "partial_review").contains(job.getStatus())) {
             return toMap(job, itemMapper.selectByJobId(jobId));
         }
         job.setStatus("cancelling");
@@ -193,6 +193,11 @@ public class StandardizationBatchService {
         }
         StandardizationBatchItemEntity reused = itemMapper.selectSuccessfulByInputHash(item.getInputHash());
         if (reused != null && !item.getId().equals(reused.getId())) {
+            item.setExecutionPath("cache");
+            item.setWriteDecision("unchanged");
+            item.setModelInvoked(false);
+            item.setCacheHit(true);
+            item.setProviderCallAttempts(0);
             succeedItem(item);
             return;
         }
@@ -206,8 +211,13 @@ public class StandardizationBatchService {
                 Map<String, Object> response = ai.standardizeImportQuestion(
                         job.getTaskId(),
                         item.getQuestionId(),
-                        Map.of("markdown", editableMarkdown(question), "writeResult", true)
+                        Map.of("markdown", editableMarkdown(question), "writeResult", true, "requestSource", "global")
                 );
+                persistExecutionMetadata(item, response);
+                if ("review_required".equals(text(response.get("writeDecision")))) {
+                    reviewItem(item);
+                    return;
+                }
                 if (!Boolean.TRUE.equals(response.get("writeResult"))) {
                     throw new IllegalStateException("Standardizer did not save the question");
                 }
@@ -234,6 +244,28 @@ public class StandardizationBatchService {
         itemMapper.updateById(item);
     }
 
+    private void reviewItem(StandardizationBatchItemEntity item) {
+        item.setStatus("review_required");
+        item.setCompletedItems(1);
+        item.setSuccessItems(0);
+        item.setFailedItems(0);
+        item.setErrorMessage(null);
+        item.setFinishedAt(LocalDateTime.now());
+        item.setUpdatedAt(LocalDateTime.now());
+        itemMapper.updateById(item);
+    }
+
+    private void persistExecutionMetadata(StandardizationBatchItemEntity item, Map<String, Object> response) {
+        item.setExecutionPath(text(response.get("executionPath")));
+        item.setWriteDecision(text(response.get("writeDecision")));
+        item.setModelInvoked(Boolean.TRUE.equals(response.get("modelInvoked")));
+        item.setCacheHit(Boolean.TRUE.equals(response.get("cacheHit")));
+        item.setProviderCallAttempts(integer(response.get("providerCallAttempts")));
+        item.setReviewReasonsJson(json.write(response.get("reviewReasons")));
+        Map<String, Object> standardizer = mapValue(response.get("standardizer"));
+        item.setAdaptiveConcurrencyJson(json.write(standardizer.get("adaptiveConcurrency")));
+    }
+
     private void failItem(StandardizationBatchItemEntity item, String message) {
         item.setStatus("failed");
         item.setCompletedItems(number(item.getTotalItems()));
@@ -255,13 +287,15 @@ public class StandardizationBatchService {
         if (job == null) return;
         List<StandardizationBatchItemEntity> items = itemMapper.selectByJobId(jobId);
         int succeeded = items.stream().filter(item -> "success".equals(item.getStatus())).mapToInt(item -> number(item.getTotalItems())).sum();
+        int review = (int) items.stream().filter(item -> "review_required".equals(item.getStatus())).count();
         int failed = items.stream().filter(item -> "failed".equals(item.getStatus())).mapToInt(item -> number(item.getTotalItems())).sum();
-        int completedQuestions = (int) items.stream().filter(item -> List.of("success", "failed").contains(item.getStatus())).count();
+        int completedQuestions = (int) items.stream().filter(item -> List.of("success", "review_required", "failed").contains(item.getStatus())).count();
         job.setCompletedQuestions(completedQuestions);
-        job.setCompletedItems(succeeded + failed);
+        job.setCompletedItems(succeeded + review + failed);
         job.setSuccessItems(succeeded);
         job.setFailedItems(failed);
         if ("cancelling".equals(job.getStatus())) job.setStatus("cancelled");
+        else if (failed == 0 && review > 0) job.setStatus("partial_review");
         else if (failed == 0) job.setStatus("completed");
         else if (succeeded == 0) job.setStatus("failed");
         else job.setStatus("partial_failed");
@@ -340,6 +374,13 @@ public class StandardizationBatchService {
             item.setSuccessItems(0);
             item.setFailedItems(0);
             item.setErrorMessage(null);
+            item.setExecutionPath(null);
+            item.setWriteDecision(null);
+            item.setModelInvoked(null);
+            item.setCacheHit(null);
+            item.setProviderCallAttempts(0);
+            item.setReviewReasonsJson(null);
+            item.setAdaptiveConcurrencyJson(null);
             item.setStartedAt(null);
             item.setFinishedAt(null);
             item.setUpdatedAt(LocalDateTime.now());
@@ -353,19 +394,6 @@ public class StandardizationBatchService {
         return job;
     }
 
-    private int editableItemCount(ImportQuestionEntity question) {
-        int count = nonBlank(question.getManualMarkdown(), question.getStemMarkdown()) ? 1 : 0;
-        if (nonBlank(question.getAnswer())) count++;
-        if (nonBlank(question.getAnalysis())) count++;
-        for (Object raw : json.readList(question.getChildrenJson())) {
-            if (!(raw instanceof Map<?, ?> child)) continue;
-            if (nonBlank(child.get("manualMarkdown"), child.get("stemMarkdown"), child.get("stem"))) count++;
-            if (nonBlank(child.get("answer"))) count++;
-            if (nonBlank(child.get("analysis"))) count++;
-        }
-        return Math.max(1, count);
-    }
-
     private String inputHash(ImportQuestionEntity question) {
         String value = String.join("|",
                 "standardizer-v1",
@@ -374,7 +402,10 @@ public class StandardizationBatchService {
                 text(question.getStemMarkdown()),
                 text(question.getAnswer()),
                 text(question.getAnalysis()),
-                text(question.getChildrenJson())
+                text(question.getChildrenJson()),
+                text(question.getOptionsJson()),
+                text(question.getImagesJson()),
+                text(question.getImagePlacementsJson())
         );
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
@@ -391,26 +422,49 @@ public class StandardizationBatchService {
         value.put("completedQuestions", job.getCompletedQuestions()); value.put("completedItems", job.getCompletedItems());
         value.put("successItems", job.getSuccessItems()); value.put("failedItems", job.getFailedItems());
         value.put("maxConcurrency", job.getMaxConcurrency()); value.put("createdAt", job.getCreatedAt());
+        value.put("rulesCount", countPath(items, "rules"));
+        value.put("ocrFallbackCount", countPath(items, "ocr-fallback"));
+        value.put("cacheHitCount", (int) items.stream().filter(item -> Boolean.TRUE.equals(item.getCacheHit()) || "cache".equals(item.getExecutionPath())).count());
+        value.put("llmQuestionCount", (int) items.stream().filter(item -> Boolean.TRUE.equals(item.getModelInvoked())).count());
+        value.put("reviewRequiredCount", (int) items.stream().filter(item -> "review_required".equals(item.getStatus())).count());
+        value.put("failedCount", (int) items.stream().filter(item -> "failed".equals(item.getStatus())).count());
+        value.put("providerCallAttempts", items.stream().mapToInt(item -> number(item.getProviderCallAttempts())).sum());
+        Map<String, Object> adaptive = latestAdaptiveConcurrency(items);
+        value.put("currentLlmConcurrency", integer(adaptive.get("limit")));
+        value.put("maximumLlmConcurrency", integer(adaptive.getOrDefault("maximum", 8)));
         List<Map<String, Object>> mappedItems = new ArrayList<>();
         for (StandardizationBatchItemEntity item : items) {
-            mappedItems.add(Map.ofEntries(
-                    Map.entry("id", item.getId()), Map.entry("questionId", item.getQuestionId()),
-                    Map.entry("status", item.getStatus()), Map.entry("attemptCount", number(item.getAttemptCount())),
-                    Map.entry("totalItems", number(item.getTotalItems())), Map.entry("completedItems", number(item.getCompletedItems())),
-                    Map.entry("successItems", number(item.getSuccessItems())), Map.entry("failedItems", number(item.getFailedItems()))
-            ));
+            Map<String, Object> mapped = new LinkedHashMap<>();
+            mapped.put("id", item.getId()); mapped.put("questionId", item.getQuestionId()); mapped.put("status", item.getStatus());
+            mapped.put("attemptCount", number(item.getAttemptCount())); mapped.put("totalItems", number(item.getTotalItems()));
+            mapped.put("completedItems", number(item.getCompletedItems())); mapped.put("successItems", number(item.getSuccessItems()));
+            mapped.put("failedItems", number(item.getFailedItems())); mapped.put("executionPath", text(item.getExecutionPath()));
+            mapped.put("writeDecision", text(item.getWriteDecision())); mapped.put("modelInvoked", Boolean.TRUE.equals(item.getModelInvoked()));
+            mapped.put("cacheHit", Boolean.TRUE.equals(item.getCacheHit())); mapped.put("providerCallAttempts", number(item.getProviderCallAttempts()));
+            mapped.put("reviewReasons", json.readList(item.getReviewReasonsJson()));
+            mappedItems.add(mapped);
         }
         value.put("items", mappedItems);
         return value;
     }
 
     private int number(Integer value) { return value == null ? 0 : value; }
+    private int integer(Object value) { try { return value == null ? 0 : Integer.parseInt(String.valueOf(value)); } catch (NumberFormatException ignored) { return 0; } }
+    @SuppressWarnings("unchecked") private Map<String, Object> mapValue(Object value) { return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of(); }
+    private int countPath(List<StandardizationBatchItemEntity> items, String path) { return (int) items.stream().filter(item -> path.equals(item.getExecutionPath())).count(); }
+    private Map<String, Object> latestAdaptiveConcurrency(List<StandardizationBatchItemEntity> items) {
+        for (int index = items.size() - 1; index >= 0; index--) {
+            Map<String, Object> value = json.readMap(items.get(index).getAdaptiveConcurrencyJson());
+            if (!value.isEmpty()) return value;
+        }
+        return Map.of("limit", 0, "maximum", 8);
+    }
     private boolean nonBlank(Object... values) { for (Object value : values) if (!text(value).isBlank()) return true; return false; }
     private String text(Object value) { return value == null ? "" : String.valueOf(value).trim(); }
     private static Thread daemonThread(Runnable runnable, String name) { Thread thread = new Thread(runnable, name); thread.setDaemon(true); return thread; }
     private static int configuredConcurrency() {
         String value = System.getProperty("AI_STANDARDIZATION_MAX_CONCURRENCY", System.getenv("AI_STANDARDIZATION_MAX_CONCURRENCY"));
-        try { return Math.max(1, Math.min(2, Integer.parseInt(value == null ? "2" : value))); }
-        catch (NumberFormatException ignored) { return 2; }
+        try { return Math.max(1, Math.min(12, Integer.parseInt(value == null ? "12" : value))); }
+        catch (NumberFormatException ignored) { return 12; }
     }
 }

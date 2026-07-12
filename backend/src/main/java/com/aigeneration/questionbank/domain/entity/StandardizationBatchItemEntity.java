@@ -18,6 +18,13 @@ public class StandardizationBatchItemEntity {
     private Integer successItems;
     private Integer failedItems;
     private String errorMessage;
+    private String executionPath;
+    private String writeDecision;
+    private Boolean modelInvoked;
+    private Boolean cacheHit;
+    private Integer providerCallAttempts;
+    private String reviewReasonsJson;
+    private String adaptiveConcurrencyJson;
     private LocalDateTime createdAt;
     private LocalDateTime startedAt;
     private LocalDateTime finishedAt;
@@ -34,6 +41,13 @@ public class StandardizationBatchItemEntity {
     public Integer getSuccessItems() { return successItems; } public void setSuccessItems(Integer value) { successItems = value; }
     public Integer getFailedItems() { return failedItems; } public void setFailedItems(Integer value) { failedItems = value; }
     public String getErrorMessage() { return errorMessage; } public void setErrorMessage(String value) { errorMessage = value; }
+    public String getExecutionPath() { return executionPath; } public void setExecutionPath(String value) { executionPath = value; }
+    public String getWriteDecision() { return writeDecision; } public void setWriteDecision(String value) { writeDecision = value; }
+    public Boolean getModelInvoked() { return modelInvoked; } public void setModelInvoked(Boolean value) { modelInvoked = value; }
+    public Boolean getCacheHit() { return cacheHit; } public void setCacheHit(Boolean value) { cacheHit = value; }
+    public Integer getProviderCallAttempts() { return providerCallAttempts; } public void setProviderCallAttempts(Integer value) { providerCallAttempts = value; }
+    public String getReviewReasonsJson() { return reviewReasonsJson; } public void setReviewReasonsJson(String value) { reviewReasonsJson = value; }
+    public String getAdaptiveConcurrencyJson() { return adaptiveConcurrencyJson; } public void setAdaptiveConcurrencyJson(String value) { adaptiveConcurrencyJson = value; }
     public LocalDateTime getCreatedAt() { return createdAt; } public void setCreatedAt(LocalDateTime value) { createdAt = value; }
     public LocalDateTime getStartedAt() { return startedAt; } public void setStartedAt(LocalDateTime value) { startedAt = value; }
     public LocalDateTime getFinishedAt() { return finishedAt; } public void setFinishedAt(LocalDateTime value) { finishedAt = value; }

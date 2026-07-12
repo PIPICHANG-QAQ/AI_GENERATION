@@ -59,6 +59,13 @@ public class SchemaMigrator {
         addColumnIfMissing("java_papers", "sub_selections_json", "TEXT");
         addColumnIfMissing("java_import_questions", "image_placements_json", "TEXT");
         addColumnIfMissing("java_bank_questions", "image_placements_json", "TEXT");
+        addColumnIfMissing("java_standardization_batch_items", "execution_path", "VARCHAR(40)");
+        addColumnIfMissing("java_standardization_batch_items", "write_decision", "VARCHAR(40)");
+        addColumnIfMissing("java_standardization_batch_items", "model_invoked", "BOOLEAN");
+        addColumnIfMissing("java_standardization_batch_items", "cache_hit", "BOOLEAN");
+        addColumnIfMissing("java_standardization_batch_items", "provider_call_attempts", "INT");
+        addColumnIfMissing("java_standardization_batch_items", "review_reasons_json", "TEXT");
+        addColumnIfMissing("java_standardization_batch_items", "adaptive_concurrency_json", "TEXT");
     }
 
     /** Create durable global standardization jobs and question-atomic items. */
