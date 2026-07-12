@@ -1031,16 +1031,93 @@ class DomainControllerTest {
         }
     }
 
+    @Test
+    void aiStandardizeDoesNotWriteWorkerReviewCandidate() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/worker/ai/standardize", exchange ->
+                writeJson(exchange, Map.of(
+                        "markdown", "不安全候选",
+                        "applyRecommendation", "review_required",
+                        "reviewReasons", List.of("option_image_reference_removed"),
+                        "standardizer", Map.of("source", "ai")
+                ))
+        );
+        server.start();
+        String oldBaseUrl = pythonWorkerProperties.getBaseUrl();
+        boolean oldProxyEnabled = pythonWorkerProperties.isApiProxyEnabled();
+        try {
+            pythonWorkerProperties.setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
+            pythonWorkerProperties.setApiProxyEnabled(true);
+            importTaskMetadataService.syncMap(importTaskPayload("ai_standardize_review_1", "待校验", 1, "待复核标准化任务"));
+
+            mockMvc.perform(postJson(
+                            "/api/import-tasks/ai_standardize_review_1/questions/ai_standardize_review_1_question_1/standardize/ai",
+                            Map.of("markdown", "原始题干", "writeResult", true)
+                    ))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.writeResult").value(false))
+                    .andExpect(jsonPath("$.writeDecision").value("review_required"))
+                    .andExpect(jsonPath("$.question.manualMarkdown").value(""));
+        } finally {
+            pythonWorkerProperties.setBaseUrl(oldBaseUrl);
+            pythonWorkerProperties.setApiProxyEnabled(oldProxyEnabled);
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void aiStandardizeDoesNotOverwriteConcurrentManualEdit() throws Exception {
+        String taskId = "ai_standardize_stale_1";
+        String questionId = taskId + "_question_1";
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/worker/ai/standardize", exchange -> {
+            importQuestionSyncService.updateQuestionFromPayload(
+                    taskId,
+                    questionId,
+                    Map.of("manualMarkdown", "人工并发修改")
+            );
+            writeJson(exchange, Map.of(
+                    "markdown", "模型候选",
+                    "applyRecommendation", "safe_to_apply",
+                    "standardizer", Map.of("source", "ai")
+            ));
+        });
+        server.start();
+        String oldBaseUrl = pythonWorkerProperties.getBaseUrl();
+        boolean oldProxyEnabled = pythonWorkerProperties.isApiProxyEnabled();
+        try {
+            pythonWorkerProperties.setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
+            pythonWorkerProperties.setApiProxyEnabled(true);
+            importTaskMetadataService.syncMap(importTaskPayload(taskId, "待校验", 1, "并发编辑保护任务"));
+
+            mockMvc.perform(postJson(
+                            "/api/import-tasks/" + taskId + "/questions/" + questionId + "/standardize/ai",
+                            Map.of("markdown", "原始题干", "writeResult", true)
+                    ))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.writeResult").value(false))
+                    .andExpect(jsonPath("$.writeDecision").value("review_required"))
+                    .andExpect(jsonPath("$.reviewReasons[0]").value("stale_input"))
+                    .andExpect(jsonPath("$.question.manualMarkdown").value("人工并发修改"));
+        } finally {
+            pythonWorkerProperties.setBaseUrl(oldBaseUrl);
+            pythonWorkerProperties.setApiProxyEnabled(oldProxyEnabled);
+            server.stop(0);
+        }
+    }
+
     /** Text-only standardization must not erase structured option image references. */
     @Test
     void aiStandardizePreservesOptionImagesWhenResponseHasNoVisualFields() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/worker/ai/standardize", exchange ->
-                writeJson(exchange, Map.of(
-                        "markdown", "清理后的题干",
-                        "standardizer", Map.of("source", "test")
-                ))
-        );
+        AtomicReference<String> standardizeRequest = new AtomicReference<>("");
+        server.createContext("/worker/ai/standardize", exchange -> {
+            standardizeRequest.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            writeJson(exchange, Map.of(
+                    "markdown", "清理后的题干",
+                    "standardizer", Map.of("source", "test")
+            ));
+        });
         server.start();
         String oldBaseUrl = pythonWorkerProperties.getBaseUrl();
         boolean oldProxyEnabled = pythonWorkerProperties.isApiProxyEnabled();
@@ -1053,11 +1130,10 @@ class DomainControllerTest {
             @SuppressWarnings("unchecked")
             Map<String, Object> question = new LinkedHashMap<>(((List<Map<String, Object>>) payload.get("questions")).get(0));
             question.put("images", List.of(Map.of("imageId", "img-1", "label", "图1", "url", "/api/a.jpg")));
-            question.put("options", List.of(Map.of(
-                    "label", "A",
-                    "content", "![](图1) 食品夹",
-                    "contentMarkdown", "![](图1) 食品夹"
-            )));
+            question.put("options", List.of(
+                    Map.of("label", "A", "content", "![](图1) 食品夹", "contentMarkdown", "![](图1) 食品夹"),
+                    Map.of("label", "B", "content", "船桨", "contentMarkdown", "船桨")
+            ));
             question.put("imagePlacements", List.of(Map.of(
                     "imageId", "img-1",
                     "target", Map.of("kind", "option", "optionLabel", "A")
@@ -1071,6 +1147,16 @@ class DomainControllerTest {
                     ))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.question.options[0].contentMarkdown").value("![](图1) 食品夹"));
+
+            JsonNode workerRequest = objectMapper.readTree(standardizeRequest.get());
+            org.assertj.core.api.Assertions.assertThat(workerRequest.path("markdown").asText())
+                    .contains("\\begin{tasks}(2)", "\\task ![](图1) 食品夹", "\\task 船桨");
+            org.assertj.core.api.Assertions.assertThat(workerRequest.path("structuredHints").path("options").size())
+                    .isEqualTo(2);
+            org.assertj.core.api.Assertions.assertThat(workerRequest.path("structuredHints").path("imagePlacements").size())
+                    .isEqualTo(1);
+            org.assertj.core.api.Assertions.assertThat(workerRequest.path("pipelineVersion").asText())
+                    .isEqualTo("standardization.v2");
 
             var saved = importQuestionSyncService.getQuestion("ai_visual_task_1_question_1");
             org.assertj.core.api.Assertions.assertThat(saved.getOptionsJson()).contains("图1");

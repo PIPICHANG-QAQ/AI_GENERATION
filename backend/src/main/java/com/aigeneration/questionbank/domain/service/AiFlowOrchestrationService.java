@@ -78,6 +78,9 @@ public class AiFlowOrchestrationService {
      */
     private final JsonSupport json;
 
+    /** 单题和全局共享的标准化请求构造器。 */
+    private final StandardizationRequestFactory standardizationRequests;
+
     /**
      * 注入 AI 编排所需的 job、worker、题目、文件和 JSON 依赖。
      *
@@ -95,7 +98,8 @@ public class AiFlowOrchestrationService {
             BankQuestionService bankQuestionService,
             ImportTaskMetadataService importTaskMetadataService,
             JavaFileStorageService fileStorageService,
-            JsonSupport json
+            JsonSupport json,
+            StandardizationRequestFactory standardizationRequests
     ) {
         this.mapper = mapper;
         this.pythonWorkerClient = pythonWorkerClient;
@@ -104,6 +108,7 @@ public class AiFlowOrchestrationService {
         this.importTaskMetadataService = importTaskMetadataService;
         this.fileStorageService = fileStorageService;
         this.json = json;
+        this.standardizationRequests = standardizationRequests;
     }
 
     /**
@@ -116,10 +121,37 @@ public class AiFlowOrchestrationService {
      */
     public Map<String, Object> standardizeImportQuestion(String taskId, String questionId, Map<String, Object> payload) {
         ImportQuestionEntity question = requireImportQuestion(taskId, questionId);
-        Map<String, Object> request = standardizeRequest(payload, importRawContext(question), importHints(question));
+        String requestSource = "global".equals(text(payload.get("requestSource"))) ? "global" : "single";
+        String rawOcrContext = importRawContext(question);
+        String persistedInputHash = standardizationRequests.inputHash(
+                question,
+                firstText(question.getManualMarkdown(), question.getStemMarkdown()),
+                rawOcrContext
+        );
+        Map<String, Object> request = standardizationRequests.build(
+                question,
+                text(payload.get("markdown")),
+                rawOcrContext,
+                requestSource
+        );
         boolean writeRequested = standardizeWriteRequested(payload);
         Map<String, Object> response = executeAiJob("import-question", questionId, "standardize", "/worker/ai/standardize", request, false);
-        if (writeRequested && standardizeWriteAllowed(response)) {
+        String recommendation = value(response.get("applyRecommendation"));
+        ImportQuestionEntity latest = requireImportQuestion(taskId, questionId);
+        boolean staleInput = writeRequested && !persistedInputHash.equals(standardizationRequests.inputHash(
+                latest,
+                firstText(latest.getManualMarkdown(), latest.getStemMarkdown()),
+                importRawContext(latest)
+        ));
+        if (staleInput) {
+            List<Object> reasons = new ArrayList<>(listValue(response.get("reviewReasons")));
+            if (!reasons.contains("stale_input")) reasons.add("stale_input");
+            response.put("reviewReasons", reasons);
+            markStandardizeWriteSkipped(response);
+        } else if (writeRequested && "unchanged".equals(recommendation)) {
+            response.put("writeResult", true);
+            response.put("writeDecision", "unchanged");
+        } else if (writeRequested && standardizeWriteAllowed(response)) {
             importQuestionService.updateStandardizedResult(
                     taskId,
                     questionId,
@@ -129,6 +161,7 @@ public class AiFlowOrchestrationService {
                     response
             );
             response.put("writeResult", true);
+            response.put("writeDecision", "applied");
         } else if (writeRequested) {
             markStandardizeWriteSkipped(response);
         } else {
@@ -726,10 +759,12 @@ public class AiFlowOrchestrationService {
      */
     private boolean standardizeWriteAllowed(Map<String, Object> response) {
         Map<String, Object> standardizer = mapValue(response.get("standardizer"));
+        String recommendation = value(response.get("applyRecommendation"));
         String confidence = value(standardizer.get("confidence")).toLowerCase(java.util.Locale.ROOT);
         Map<String, Object> renderValidation = mapValue(standardizer.get("renderValidation"));
         boolean renderInvalid = renderValidation.containsKey("valid") && !booleanValue(renderValidation.get("valid"));
-        return !"low".equals(confidence)
+        return (recommendation.isBlank() || "safe_to_apply".equals(recommendation))
+                && !"low".equals(confidence)
                 && listValue(standardizer.get("candidateSevereIssues")).isEmpty()
                 && !Boolean.TRUE.equals(standardizer.get("writeBlocked"))
                 && !Boolean.TRUE.equals(standardizer.get("applyBlocked"))
@@ -743,6 +778,7 @@ public class AiFlowOrchestrationService {
      */
     private void markStandardizeCandidateOnly(Map<String, Object> response) {
         response.put("writeResult", false);
+        response.put("writeDecision", "candidate");
         response.put("writeSkippedReason", "AI 标准化结果已作为候选返回，等待人工预览后应用保存");
     }
 
@@ -753,6 +789,7 @@ public class AiFlowOrchestrationService {
      */
     private void markStandardizeWriteSkipped(Map<String, Object> response) {
         response.put("writeResult", false);
+        response.put("writeDecision", "review_required");
         response.put("writeSkippedReason", "AI 标准化结果低置信、仍存在严重 LaTeX 风险或渲染安全校验失败，已保留原题干");
     }
 
