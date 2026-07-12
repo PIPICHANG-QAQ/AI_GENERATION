@@ -65,6 +65,16 @@ CREATE TABLE IF NOT EXISTS java_import_tasks (
   updated_at TIMESTAMP
 );
 
+-- 导入任务结构快照：在 canonicalization 应用前保存任务和题目，支持审计与回滚。
+CREATE TABLE IF NOT EXISTS java_import_task_snapshots (
+  id VARCHAR(80) PRIMARY KEY,
+  task_id VARCHAR(80) NOT NULL,
+  snapshot_type VARCHAR(40) NOT NULL,
+  version BIGINT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  created_at TIMESTAMP
+);
+
 -- 导入题表：保存导入任务拆出的题目快照、人工 Markdown、AI 回写和公式校验结果。
 CREATE TABLE IF NOT EXISTS java_import_questions (
   id VARCHAR(80) PRIMARY KEY,

@@ -45,6 +45,7 @@ public class SchemaMigrator {
     @jakarta.annotation.PostConstruct
     public void migrate() throws SQLException {
         createImportQuestionTables();
+        createImportTaskSnapshotTable();
         createStorageFileTable();
         addColumnIfMissing("java_import_tasks", "paper_ocr_job_json", "TEXT");
         addColumnIfMissing("java_import_tasks", "answer_ocr_job_json", "TEXT");
@@ -57,6 +58,20 @@ public class SchemaMigrator {
         addColumnIfMissing("java_papers", "sub_selections_json", "TEXT");
         addColumnIfMissing("java_import_questions", "image_placements_json", "TEXT");
         addColumnIfMissing("java_bank_questions", "image_placements_json", "TEXT");
+    }
+
+    /** Create the pre-canonicalization snapshot table used by rollback. */
+    private void createImportTaskSnapshotTable() {
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS java_import_task_snapshots (
+                  id VARCHAR(80) PRIMARY KEY,
+                  task_id VARCHAR(80) NOT NULL,
+                  snapshot_type VARCHAR(40) NOT NULL,
+                  version BIGINT NOT NULL,
+                  snapshot_json TEXT NOT NULL,
+                  created_at TIMESTAMP
+                )
+                """);
     }
 
     /**

@@ -99,6 +99,18 @@ class DomainControllerTest {
     @Autowired
     private PythonWorkerProperties pythonWorkerProperties;
 
+    /** Canonicalization endpoints are Java-owned and reject unknown tasks before calling the worker. */
+    @Test
+    void canonicalizationEndpointsRejectUnknownTask() throws Exception {
+        String base = "/api/import-tasks/missing-canonical-task/canonicalization";
+        mockMvc.perform(post(base + "/preview"))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(postJson(base + "/apply", Map.of("applyToken", "stale")))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(post(base + "/rollback"))
+                .andExpect(status().isNotFound());
+    }
+
     /**
      * 验证知识点、题库题和试卷 CRUD 在不依赖 Python worker 时可用。
      *

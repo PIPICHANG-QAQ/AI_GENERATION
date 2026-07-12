@@ -511,7 +511,7 @@ public class ImportQuestionSyncService {
      * @return 题目响应 Map
      */
     public Map<String, Object> toMap(ImportQuestionEntity question) {
-        Map<String, Object> item = new LinkedHashMap<>();
+        Map<String, Object> item = json.readMap(question.getRawJson());
         item.put("id", question.getId());
         item.put("taskId", question.getTaskId());
         item.put("sourceQuestionId", question.getSourceQuestionId());
