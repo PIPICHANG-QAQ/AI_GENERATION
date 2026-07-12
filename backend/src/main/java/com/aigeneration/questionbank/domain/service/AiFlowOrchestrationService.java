@@ -121,7 +121,8 @@ public class AiFlowOrchestrationService {
      */
     public Map<String, Object> standardizeImportQuestion(String taskId, String questionId, Map<String, Object> payload) {
         ImportQuestionEntity question = requireImportQuestion(taskId, questionId);
-        String requestSource = "global".equals(text(payload.get("requestSource"))) ? "global" : "single";
+        String requestedSource = text(payload.get("requestSource"));
+        String requestSource = List.of("global", "retry", "automatic").contains(requestedSource) ? requestedSource : "single";
         String rawOcrContext = importRawContext(question);
         String persistedInputHash = standardizationRequests.inputHash(
                 question,

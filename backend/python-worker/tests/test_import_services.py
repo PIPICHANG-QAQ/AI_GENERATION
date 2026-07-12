@@ -260,6 +260,33 @@ class ImportServicesTest(unittest.TestCase):
         self.assertIn("AI 标准化暂时不可用", standardizer["warnings"][0])
         self.assertEqual(markdown, result["markdown"])
 
+    def test_standardize_router_cache_is_not_counted_as_provider_invocation(self):
+        with patch("app.import_services.standardize_markdown_with_llm") as standardize:
+            standardize.return_value = (
+                "题干 $x+1=2$",
+                {
+                    "source": "ai",
+                    "provider": "mock",
+                    "model": "mock-model",
+                    "error": None,
+                    "corrections": [],
+                    "warnings": [],
+                    "confidence": "high",
+                    "answer": "",
+                    "analysis": "",
+                    "llmCall": {"status": "success", "cacheHit": True},
+                    "llmCalls": [{"status": "success", "cacheHit": True}],
+                },
+            )
+
+            result = standardize_markdown_ai_response("题干 $x+1=2$")
+
+        self.assertEqual("cache", result["executionPath"])
+        self.assertEqual("llm", result["cachedExecutionPath"])
+        self.assertFalse(result["modelInvoked"])
+        self.assertTrue(result["cacheHit"])
+        self.assertEqual(0, result["providerCallAttempts"])
+
     def test_standardize_preserves_original_choice_image_options_when_llm_drops_them(self):
         markdown = r"""如图所示的几何体是由 6 个小正方体搭成，它的左视图是（ ）
 
@@ -831,7 +858,10 @@ class ImportServicesTest(unittest.TestCase):
             ],
         }
 
-        def standardize(markdown, **_kwargs):
+        request_priorities = []
+
+        def standardize(markdown, **kwargs):
+            request_priorities.append((kwargs.get("structured_hints") or {}).get("requestPriority"))
             if "第一题" in markdown:
                 return (
                     "第一题（ ）\n\n\\begin{tasks}(2)\n\\task 甲\n\\task 乙\n\\end{tasks}",
@@ -855,6 +885,7 @@ class ImportServicesTest(unittest.TestCase):
                 questions = build_import_questions(task, outputs, "")
 
         self.assertEqual(2, standardize_llm.call_count)
+        self.assertEqual(["automatic", "automatic"], request_priorities)
         self.assertEqual(2, task["autoStandardize"]["appliedCount"])
         self.assertEqual(["A", "B"], [option["label"] for option in questions[0]["options"]])
         self.assertEqual(["甲", "乙"], [option["content"] for option in questions[0]["options"]])

@@ -211,7 +211,11 @@ public class StandardizationBatchService {
                 Map<String, Object> response = ai.standardizeImportQuestion(
                         job.getTaskId(),
                         item.getQuestionId(),
-                        Map.of("markdown", editableMarkdown(question), "writeResult", true, "requestSource", "global")
+                        Map.of(
+                                "markdown", editableMarkdown(question),
+                                "writeResult", true,
+                                "requestSource", attempt == 1 ? "global" : "retry"
+                        )
                 );
                 persistExecutionMetadata(item, response);
                 if ("review_required".equals(text(response.get("writeDecision")))) {

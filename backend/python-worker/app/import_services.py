@@ -798,7 +798,11 @@ def finalize_standardize_response(
     result["originalStructure"] = standardize_structure_summary(hints)
     result["resultStructure"] = standardize_structure_summary(result)
     calls = standardizer.get("llmCalls") or []
-    result["providerCallAttempts"] = len(calls) if isinstance(calls, list) else 0
+    result["providerCallAttempts"] = (
+        sum(1 for call in calls if isinstance(call, dict) and call.get("cacheHit") is not True)
+        if isinstance(calls, list)
+        else 0
+    )
     standardizer["cacheHit"] = bool(cache_hit)
     return result
 
@@ -1192,11 +1196,14 @@ def standardize_markdown_ai_response(
             "cacheHit": False,
         },
     }
+    router_cache_hit = bool((metadata.get("llmCall") or {}).get("cacheHit"))
     response = finalize_standardize_response(
         response,
         structured_hints,
-        "llm",
-        model_invoked=True,
+        "cache" if router_cache_hit else "llm",
+        model_invoked=not router_cache_hit,
+        cache_hit=router_cache_hit,
+        cached_execution_path="llm" if router_cache_hit else None,
         pipeline_version=pipeline_version,
         input_hash=input_hash,
     )
@@ -1501,10 +1508,12 @@ def auto_standardize_import_questions(
         started = time.time()
         try:
             before_markdown = question_to_edit_markdown(question)
+            hints = standardize_question_hints(question)
+            hints["requestPriority"] = "automatic"
             response = standardize_markdown_ai_response(
                 before_markdown,
                 raw_ocr_context=extract_raw_ocr_context(raw_markdown, question),
-                structured_hints=standardize_question_hints(question),
+                structured_hints=hints,
             )
             result = apply_auto_standardize_result(question, response, before_markdown, mode, reasons)
         except Exception as exc:

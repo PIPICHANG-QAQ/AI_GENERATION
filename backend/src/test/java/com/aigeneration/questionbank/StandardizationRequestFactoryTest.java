@@ -55,6 +55,14 @@ class StandardizationRequestFactoryTest {
         assertThat(factory.inputHash(question, "题干", "原始 OCR")).isNotEqualTo(before);
     }
 
+    @Test
+    void retrySourceUsesRetryPriority() {
+        Map<String, Object> request = factory.build(choiceQuestion(), "题干", "", "retry");
+
+        assertThat(request.get("requestSource")).isEqualTo("retry");
+        assertThat(((Map<?, ?>) request.get("structuredHints")).get("requestPriority")).isEqualTo("retry");
+    }
+
     private ImportQuestionEntity choiceQuestion() {
         ImportQuestionEntity question = new ImportQuestionEntity();
         question.setId("q-2");

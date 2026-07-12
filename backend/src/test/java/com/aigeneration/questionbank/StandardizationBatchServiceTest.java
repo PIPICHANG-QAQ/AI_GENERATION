@@ -69,8 +69,12 @@ class StandardizationBatchServiceTest {
         when(jobMapper.selectById("job-1")).thenReturn(job);
         when(itemMapper.selectByJobId("job-1")).thenReturn(List.of(item));
         when(questionService.getQuestion("q1")).thenReturn(question("q1"));
-        when(ai.standardizeImportQuestion(any(), any(), any()))
-                .thenThrow(new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY));
+        List<String> requestSources = new java.util.concurrent.CopyOnWriteArrayList<>();
+        when(ai.standardizeImportQuestion(any(), any(), any())).thenAnswer(invocation -> {
+            Map<String, Object> payload = invocation.getArgument(2);
+            requestSources.add(String.valueOf(payload.get("requestSource")));
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_GATEWAY);
+        });
 
         service.start("job-1");
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
@@ -78,6 +82,7 @@ class StandardizationBatchServiceTest {
 
         assertEquals("failed", item.getStatus());
         assertEquals(3, item.getAttemptCount());
+        assertEquals(List.of("global", "retry", "retry"), requestSources);
         verify(ai, org.mockito.Mockito.times(3)).standardizeImportQuestion(any(), any(), any());
     }
 

@@ -38,7 +38,8 @@ public class StandardizationRequestFactory {
                 question.getType(),
                 options
         );
-        String source = "global".equals(text(requestSource)) ? "global" : "single";
+        String requestedSource = text(requestSource);
+        String source = List.of("global", "retry", "automatic").contains(requestedSource) ? requestedSource : "single";
 
         Map<String, Object> hints = new LinkedHashMap<>();
         hints.put("questionId", text(question.getId()));
@@ -51,7 +52,12 @@ public class StandardizationRequestFactory {
         hints.put("images", images);
         hints.put("imagePlacements", placements);
         hints.put("subQuestions", subQuestions);
-        hints.put("requestPriority", "single".equals(source) ? "interactive" : "batch");
+        hints.put("requestPriority", switch (source) {
+            case "retry" -> "retry";
+            case "automatic" -> "automatic";
+            case "global" -> "batch";
+            default -> "interactive";
+        });
 
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("pipelineVersion", PIPELINE_VERSION);
