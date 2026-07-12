@@ -105,6 +105,36 @@ public final class QuestionEngineModels {
     ) {
     }
 
+    public record ImagePlacementTarget(String kind, String optionLabel, String subQuestionId) {
+    }
+
+    public record ImagePlacementEvidence(
+            Integer markdownStart,
+            Integer markdownEnd,
+            Integer pageIndex,
+            List<Double> bbox
+    ) {
+    }
+
+    public record ImagePlacementInference(
+            String method,
+            Double confidence,
+            List<String> reasons,
+            List<Map<String, Object>> alternatives
+    ) {
+    }
+
+    public record QuestionImagePlacement(
+            String placementId,
+            String imageId,
+            ImagePlacementTarget target,
+            Integer order,
+            ImagePlacementEvidence sourceEvidence,
+            ImagePlacementInference inference,
+            String reviewStatus
+    ) {
+    }
+
     public record QuestionImageLibrary(List<QuestionImage> items) {
     }
 
@@ -185,6 +215,7 @@ public final class QuestionEngineModels {
             String analysis,
             List<QuestionOption> options,
             List<QuestionImage> images,
+            List<QuestionImagePlacement> imagePlacements,
             Map<String, Object> raw
     ) {
     }
@@ -221,6 +252,7 @@ public final class QuestionEngineModels {
             List<QuestionOption> options,
             List<QuestionChild> children,
             List<QuestionImage> images,
+            List<QuestionImagePlacement> imagePlacements,
             List<String> knowledgePointIdCandidates,
             List<String> knowledgePointCandidates,
             String difficultyCandidate,

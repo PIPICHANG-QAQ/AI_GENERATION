@@ -34,6 +34,13 @@ CHECKS = {
         "writeResult",
         "AiAnalysisRequest",
         "AiAnalysisResult",
+        "imagePlacements",
+        "QuestionImagePlacement",
+        "ImagePlacementTarget",
+        "ImagePlacementEvidence",
+        "ImagePlacementInference",
+        "unassigned",
+        "explicit-offset",
     ],
     "question-engine/sdk/generated/typescript/QuestionEngineClient.ts": [
         "rescanImportTask",
@@ -55,6 +62,8 @@ CHECKS = {
         "writeSkippedReason",
         "AiAnalysisInput",
         "AiAnalysisResult",
+        "QuestionImagePlacement",
+        "imagePlacements",
     ],
     "question-engine/sdk/generated/java/src/main/java/com/aigeneration/questionengine/sdk/QuestionEngineClient.java": [
         "rescanImportTask",
@@ -73,6 +82,8 @@ CHECKS = {
         "AiStandardizeResult",
         "AiAnalysisRequest",
         "AiAnalysisResult",
+        "QuestionImagePlacement",
+        "imagePlacements",
     ],
     "docs/delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md": [
         "/api/import-tasks/{jobId}/image-library",

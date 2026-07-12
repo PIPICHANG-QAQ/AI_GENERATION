@@ -146,6 +146,7 @@ public final class QuestionProcessingCapabilityModels {
      * @param options 选择题选项
      * @param children 子题
      * @param images 题图
+     * @param imagePlacements 题图显式归属
      * @param knowledgePointIdCandidates 知识点 ID 候选
      * @param knowledgePointCandidates 知识点名称候选
      * @param difficultyCandidate 难度候选
@@ -168,6 +169,7 @@ public final class QuestionProcessingCapabilityModels {
             List<QuestionOption> options,
             List<QuestionChild> children,
             List<QuestionImage> images,
+            List<Map<String, Object>> imagePlacements,
             List<String> knowledgePointIdCandidates,
             List<String> knowledgePointCandidates,
             String difficultyCandidate,
@@ -204,6 +206,7 @@ public final class QuestionProcessingCapabilityModels {
      * @param analysis 子题解析
      * @param options 子题选项
      * @param images 子题题图
+     * @param imagePlacements 子题题图显式归属
      * @param raw 原始扩展字段
      */
     public record QuestionChild(
@@ -215,6 +218,7 @@ public final class QuestionProcessingCapabilityModels {
             String analysis,
             List<QuestionOption> options,
             List<QuestionImage> images,
+            List<Map<String, Object>> imagePlacements,
             Map<String, Object> raw
     ) {
     }

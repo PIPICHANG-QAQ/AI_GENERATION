@@ -18,33 +18,33 @@
 - Modify: `backend/python-worker/app/ocr_processing.py`
 - Modify: `backend/python-worker/app/question_boundary.py`
 
-- [ ] **Step 1: Write failing tests for legacy cross-question merge**
+- [x] **Step 1: Write failing tests for legacy cross-question merge**
 
 Add a test that creates q1 with four image refs, q2 without images, and a legacy result that places the same four images on q2. Assert `merge_legacy_images` does not duplicate assets already owned by q1.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `pytest tests/test_question_boundary.py -k legacy_images -v`
 Expected: FAIL because q2 receives q1 images.
 
-- [ ] **Step 3: Implement evidence-aware legacy merge**
+- [x] **Step 3: Implement evidence-aware legacy merge**
 
 Track image keys already assigned in the primary structure. Copy legacy images only when they are unique to that legacy question and do not conflict with another primary owner. Record `imageWarnings` for rejected candidates.
 
-- [ ] **Step 4: Write failing test for invalid whole-document fallback**
+- [x] **Step 4: Write failing test for invalid whole-document fallback**
 
 Patch `validate_structure` to return invalid for both primary and legacy candidates and assert `collect_outputs` keeps the primary candidate with `fallback=false`, `requiresReview=true`, and both validation reports.
 
-- [ ] **Step 5: Run the test and verify RED**
+- [x] **Step 5: Run the test and verify RED**
 
 Run: `pytest tests/test_ocr_processing.py -k invalid_fallback -v`
 Expected: FAIL because legacy replaces primary unconditionally.
 
-- [ ] **Step 6: Implement candidate quality selection**
+- [x] **Step 6: Implement candidate quality selection**
 
 Add a small pure helper that compares validity, question evidence coverage, option completeness, and image-reference coverage. Never replace a primary candidate with an invalid lower-quality fallback.
 
-- [ ] **Step 7: Run focused and full Python tests**
+- [x] **Step 7: Run focused and full Python tests**
 
 Run: `pytest tests/test_ocr_processing.py tests/test_question_boundary.py -q`
 Expected: PASS.
@@ -58,7 +58,7 @@ Expected: PASS.
 - Modify: `backend/python-worker/app/question_markdown.py`
 - Modify: `backend/python-worker/app/ocr_processing.py`
 
-- [ ] **Step 1: Write failing tests for explicit option spans**
+- [x] **Step 1: Write failing tests for explicit option spans**
 
 Define the wished-for API:
 
@@ -70,24 +70,24 @@ assert placements[0]["inference"]["method"] == "explicit-offset"
 
 Cover stem, A-D option, subquestion and unassigned targets.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run: `pytest tests/test_image_placement.py -v`
 Expected: ERROR/FAIL because `app.image_placement` does not exist.
 
-- [ ] **Step 3: Implement the minimal placement module**
+- [x] **Step 3: Implement the minimal placement module**
 
 Implement pure helpers for image keys, interval containment, stable placement IDs, explicit target inference, confidence, reasons and warnings. Preserve `markdownStart/end/pageIndex/bbox` when available.
 
-- [ ] **Step 4: Integrate placements into question construction**
+- [x] **Step 4: Integrate placements into question construction**
 
 Use normalized option/subquestion spans before their offsets are discarded. Attach `imagePlacements` to parent and child questions, and keep `images[]` unchanged for compatibility.
 
-- [ ] **Step 5: Add consistency validation**
+- [x] **Step 5: Add consistency validation**
 
 Reject dangling image IDs and duplicate non-shared high-confidence owners. Warn for choice questions with zero options, unassigned images, and image refs that point to another target.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
 Run: `pytest tests/test_image_placement.py tests/test_question_boundary.py -q`
 Expected: PASS.
@@ -101,28 +101,28 @@ Expected: PASS.
 - Modify: `backend/python-worker/tests/test_image_placement.py`
 - Modify: `backend/python-worker/tests/test_question_layout.py`
 
-- [ ] **Step 1: Write failing tests for two-column option grids**
+- [x] **Step 1: Write failing tests for two-column option grids**
 
 Build A/B/C/D label bboxes and four image bboxes whose serialized order differs from visual option order. Assert geometry assigns one image to each option label.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pytest tests/test_image_placement.py -k geometry -v`
 Expected: FAIL because geometry reconciliation is absent.
 
-- [ ] **Step 3: Expose read-only layout evidence**
+- [x] **Step 3: Expose read-only layout evidence**
 
 Return normalized `blockId/type/text/imageRef/pageIndex/bbox` nodes from `question_layout` without mutating question boundaries.
 
-- [ ] **Step 4: Implement geometry scoring**
+- [x] **Step 4: Implement geometry scoring**
 
 Score same-page containment, option-cell proximity, row/column agreement and question-region containment. Use geometry only when explicit offset is absent or to lower confidence on conflict. Keep `unassigned` when the best/second-best margin is insufficient.
 
-- [ ] **Step 5: Integrate as `image-reconcile` output**
+- [x] **Step 5: Integrate as `image-reconcile` output**
 
 Add sanitized summary fields: assigned counts by target, conflicts, unassigned count and method counts. Do not expose image bytes.
 
-- [ ] **Step 6: Verify GREEN and layout isolation**
+- [x] **Step 6: Verify GREEN and layout isolation**
 
 Run: `pytest tests/test_image_placement.py tests/test_question_layout.py tests/test_ocr_processing.py -q`
 Expected: PASS, with existing PaperLayout behavior unchanged.
@@ -141,24 +141,24 @@ Expected: PASS, with existing PaperLayout behavior unchanged.
 - Modify: `backend/src/test/java/com/aigeneration/questionbank/DomainControllerTest.java`
 - Modify: `question-engine/openapi/question-engine.v1.yaml`
 
-- [ ] **Step 1: Write failing Java persistence/API tests**
+- [x] **Step 1: Write failing Java persistence/API tests**
 
 Save a question with stem and option placements, reload it, and assert the placement list remains byte-for-byte equivalent through import snapshot, bank question and question-package output.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `mvn -q -Dtest=DomainControllerTest test`
 Expected: FAIL because placements are not persisted or serialized.
 
-- [ ] **Step 3: Add JSON persistence fields**
+- [x] **Step 3: Add JSON persistence fields**
 
 Add `image_placements_json` columns and entity accessors. Map `imagePlacements` in sync, update, bank import and capability serialization paths.
 
-- [ ] **Step 4: Extend Python payloads and OpenAPI**
+- [x] **Step 4: Extend Python payloads and OpenAPI**
 
 Allow optional `imagePlacements` on import/bank payloads. Define `QuestionImagePlacement`, `ImagePlacementTarget`, evidence and inference schemas while keeping fields optional for old clients.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run: `mvn -q test`
 Expected: PASS.
@@ -173,28 +173,28 @@ Expected: PASS.
 - Modify: `local-platform/package.json`
 - Create: `local-platform/src/lib/question.test.ts`
 
-- [ ] **Step 1: Add frontend test runner and failing label tests**
+- [x] **Step 1: Add frontend test runner and failing label tests**
 
 Add Vitest and tests proving that adding/removing an image preserves labels for retained image keys and that frontend no longer auto-zips unassigned images to A-D.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `npm test -- --run src/lib/question.test.ts`
 Expected: FAIL because retained images are renumbered and no test runner exists before dependency setup.
 
-- [ ] **Step 3: Fix stable label allocation**
+- [x] **Step 3: Fix stable label allocation**
 
 Reserve labels only for images not present in the next set, then allocate retained keys first and new labels afterward.
 
-- [ ] **Step 4: Add placement-aware review controls**
+- [x] **Step 4: Add placement-aware review controls**
 
 Show a target selector per image: 未归属、题干、A-H、各小问. Update `imagePlacements` and the corresponding Markdown token atomically. Preserve the user-side removal of automatic option zip.
 
-- [ ] **Step 5: Block silent verification**
+- [x] **Step 5: Block silent verification**
 
 Display placement warnings and require explicit confirmation before marking a question verified when unassigned/conflicting placements remain.
 
-- [ ] **Step 6: Verify GREEN**
+- [x] **Step 6: Verify GREEN**
 
 Run: `npm test -- --run && npm run build`
 Expected: tests and TypeScript/Vite build pass.
@@ -205,20 +205,20 @@ Expected: tests and TypeScript/Vite build pass.
 - Modify: `backend/python-worker/app/export_service.py`
 - Modify: `backend/python-worker/tests/test_export_service.py`
 
-- [ ] **Step 1: Write failing export tests**
+- [x] **Step 1: Write failing export tests**
 
 Build a choice question with stem image and distinct A-D images. Assert generated Markdown keeps each image inside the corresponding option rather than emitting a single pre-option image block.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `pytest tests/test_export_service.py -k image_placement -v`
 Expected: FAIL because exporter flattens all images.
 
-- [ ] **Step 3: Implement placement-aware rendering**
+- [x] **Step 3: Implement placement-aware rendering**
 
 Resolve images by stable label/imageId and render stem, option and subquestion placements at their targets. Warn and omit unassigned images from formal export unless the caller explicitly chooses an appendix.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `pytest tests/test_export_service.py -q`
 Expected: PASS.
@@ -233,11 +233,11 @@ Expected: PASS.
 - Modify: `docs/architecture/TECHNICAL_DESIGN.md`
 - Modify: `scripts/check_question_engine_contract.py`
 
-- [ ] **Step 1: Add contract checks**
+- [x] **Step 1: Add contract checks**
 
 Assert OpenAPI publishes optional `imagePlacements`, owner target enums and evidence fields.
 
-- [ ] **Step 2: Run all verification commands**
+- [x] **Step 2: Run all verification commands**
 
 Run:
 
@@ -252,11 +252,11 @@ git diff --check
 
 Expected: all commands exit 0.
 
-- [ ] **Step 3: Update docs with behavior and rollback rules**
+- [x] **Step 3: Update docs with behavior and rollback rules**
 
 Document placement ownership, confidence, fallback selection, unassigned behavior, review blocking, export rules and shadow/canary metrics.
 
-- [ ] **Step 4: Self-review scope and generated artifacts**
+- [x] **Step 4: Self-review scope and generated artifacts**
 
 Confirm no `.env`, storage data, OCR outputs, build outputs, node_modules or virtual environments are staged.
 

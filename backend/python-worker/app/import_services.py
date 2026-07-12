@@ -1002,6 +1002,7 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
             answer=answer,
             analysis=analysis,
         )
+        image_placements = normalize_image_placements(source_question.get("imagePlacements"), images)
         source_options = attach_choice_images_to_text_options(
             source_question.get("stemMarkdown") or "",
             source_question.get("options", []),
@@ -1039,6 +1040,7 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
                 "difficulty": difficulty,
                 "score": float(metadata.get("score", 0) or 0),
                 "images": images,
+                "imagePlacements": image_placements,
                 "options": source_options,
                 "children": sub_questions,
                 "subQuestions": sub_questions,
@@ -1067,6 +1069,14 @@ def build_import_questions(task: dict[str, Any], outputs: dict[str, Any], answer
         )
     task["autoStandardize"] = auto_standardize_import_questions(import_questions, task, outputs)
     return import_questions
+
+
+def normalize_image_placements(value: Any, images: Any = None) -> list[dict[str, Any]]:
+    """Preserve valid placement objects without re-inferring or reordering ownership."""
+    del images  # Asset consistency is validated by the placement validator, not silently repaired here.
+    if not isinstance(value, list):
+        return []
+    return [copy.deepcopy(item) for item in value if isinstance(item, dict)]
 
 
 def top_level_ocr_questions(outputs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1492,6 +1502,7 @@ def normalize_sub_questions(value: Any, enriched_value: Any = None) -> list[dict
                 else [],
                 "knowledgePoints": normalize_string_values(enriched.get("knowledgePoints") or item.get("knowledgePoints")),
                 "images": images,
+                "imagePlacements": normalize_image_placements(item.get("imagePlacements"), images),
                 "options": normalize_question_options_image_refs(
                     enriched.get("options", item.get("options", [])),
                     images,
@@ -1630,6 +1641,8 @@ def update_import_question_from_payload(question: dict[str, Any], payload: Impor
     """将更新载荷写回导入题并刷新 Markdown/图片字段。"""
     if payload.images is not None:
         question["images"] = normalize_question_images(payload.images)
+    if payload.imagePlacements is not None:
+        question["imagePlacements"] = normalize_image_placements(payload.imagePlacements, question.get("images"))
     if payload.subQuestions is not None:
         sub_questions = normalize_sub_questions(payload.subQuestions)
         question["subQuestions"] = sub_questions
@@ -1715,6 +1728,7 @@ def bank_question_from_import(
         "difficulty": normalize_difficulty(question.get("difficulty")),
         "score": float(question.get("score", 0) or 0),
         "images": images,
+        "imagePlacements": normalize_image_placements(question.get("imagePlacements"), images),
         "options": question.get("options", []),
         "children": sub_questions,
         "subQuestions": sub_questions,
@@ -1752,6 +1766,7 @@ def bank_question_from_payload(payload: BankQuestionPayload) -> dict[str, Any]:
         "difficulty": normalize_difficulty(payload.difficulty),
         "score": payload.score,
         "images": images,
+        "imagePlacements": normalize_image_placements(payload.imagePlacements, images),
         "options": payload.options,
         "children": sub_questions,
         "subQuestions": sub_questions,

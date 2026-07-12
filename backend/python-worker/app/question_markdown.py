@@ -694,6 +694,9 @@ def normalize_question_images(images: Any) -> list[dict[str, Any]]:
             "data_url",
             "aiImageIncluded",
             "aiImageSkipReason",
+            "sourceEvidence",
+            "pageIndex",
+            "bbox",
         ):
             if key in image:
                 normalized_image[key] = image[key]

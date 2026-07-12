@@ -292,6 +292,9 @@ public class ImportQuestionSyncService {
             question.setImagesJson(json.write(payload.get("images")));
             imagesChanged = true;
         }
+        if (payload.containsKey("imagePlacements")) {
+            question.setImagePlacementsJson(json.write(payload.get("imagePlacements")));
+        }
         if (payload.containsKey("options")) {
             question.setOptionsJson(json.write(payload.get("options")));
         }
@@ -366,6 +369,7 @@ public class ImportQuestionSyncService {
         entity.setDifficulty(text(raw.get("difficulty")));
         entity.setScore(decimal(raw.get("score")));
         entity.setImagesJson(json.write(raw.get("images")));
+        entity.setImagePlacementsJson(json.write(raw.get("imagePlacements")));
         entity.setOptionsJson(json.write(raw.get("options")));
         entity.setChildrenJson(json.write(children));
         entity.setMathValidationJson(json.write(raw.get("mathValidation")));
@@ -453,6 +457,7 @@ public class ImportQuestionSyncService {
         raw.put("difficulty", question.getDifficulty());
         raw.put("score", question.getScore());
         raw.put("images", json.readList(question.getImagesJson()));
+        raw.put("imagePlacements", json.readList(question.getImagePlacementsJson()));
         raw.put("options", json.readList(question.getOptionsJson()));
         List<Object> children = json.readList(question.getChildrenJson());
         raw.put("children", children);
@@ -522,6 +527,7 @@ public class ImportQuestionSyncService {
         item.put("difficulty", question.getDifficulty());
         item.put("score", question.getScore());
         item.put("images", json.readList(question.getImagesJson()));
+        item.put("imagePlacements", json.readList(question.getImagePlacementsJson()));
         item.put("options", json.readList(question.getOptionsJson()));
         List<Object> children = json.readList(question.getChildrenJson());
         item.put("children", children);

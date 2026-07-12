@@ -26,21 +26,25 @@ import {
 import {
   addSubQuestionForm,
   appendMissingImageRefs,
-  appendNewImageRefs,
+  ensureImagePlacements,
   ensureQuestionImageLabels,
   filterRemovedQuestionImages,
   getRemovedQuestionImages,
   getQuestionImages,
   getQuestionMarkdown,
   getQuestionMarkdownParts,
+  getImageKey,
   getSubQuestions,
+  imagePlacementIssues,
   mergeSubQuestionSuggestions,
+  moveQuestionImageReference,
   normalizeQuestionOptions,
   removeQuestionImageRefsFromOptions,
   removeQuestionImageRefsFromMarkdown,
   serializeQuestionOptions,
   removeSubQuestionForm,
   subQuestionEditorForm,
+  updateImagePlacementTarget,
   type QuestionImage,
 } from "@/lib/question";
 import {
@@ -95,6 +99,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   );
 
   const [images, setImages] = useState<QuestionImage[]>(initialImages);
+  const [imagePlacements, setImagePlacements] = useState(() => ensureImagePlacements(initialImages, question.imagePlacements || []));
   const [standardizeCandidate, setStandardizeCandidate] = useState<StandardizeCandidate | null>(null);
   const [subStandardizeCandidate, setSubStandardizeCandidate] = useState<{
     subIndex: number;
@@ -142,30 +147,38 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     }));
     setFormData((f) => ({
       ...f,
-      markdown: appendNewImageRefs(
-        removeQuestionImageRefsFromMarkdown(f.markdown, removedImages),
-        previousImages,
-        nextImages,
-        [
-          removeQuestionImageRefsFromMarkdown(f.answer, removedImages),
-          removeQuestionImageRefsFromMarkdown(f.analysis, removedImages),
-          ...removeQuestionImageRefsFromOptions(f.options, removedImages).map((option) => option.content),
-          ...cleanedSubForms.flatMap((sub) => [
-            sub.markdown,
-            sub.answer,
-            sub.analysis,
-            ...normalizeQuestionOptions(sub.options, sub.images).map((option) => option.content),
-          ]),
-        ],
-      ),
+      markdown: removeQuestionImageRefsFromMarkdown(f.markdown, removedImages),
       answer: removeQuestionImageRefsFromMarkdown(f.answer, removedImages),
       analysis: removeQuestionImageRefsFromMarkdown(f.analysis, removedImages),
       options: removeQuestionImageRefsFromOptions(f.options, removedImages),
     }));
     setSubForms(cleanedSubForms);
     setImages(nextImages);
+    setImagePlacements((current) => ensureImagePlacements(nextImages, current));
     setStandardizeCandidate(null);
     setSubStandardizeCandidate(null);
+    setDirty(true);
+  };
+
+  const handlePlacementTargetChange = (imageId: string, target: Parameters<typeof updateImagePlacementTarget>[2]) => {
+    const image = images.find((item) => [item.imageId, item.path, getImageKey(item)].map(String).includes(imageId));
+    if (!image) return;
+    const moved = moveQuestionImageReference(image, target, {
+      markdown: formData.markdown,
+      answer: formData.answer,
+      analysis: formData.analysis,
+      options: formData.options,
+      subQuestions: subForms,
+    });
+    setFormData((current) => ({
+      ...current,
+      markdown: moved.markdown,
+      answer: moved.answer,
+      analysis: moved.analysis,
+      options: moved.options,
+    }));
+    setSubForms(moved.subQuestions);
+    setImagePlacements((current) => updateImagePlacementTarget(current, imageId, target));
     setDirty(true);
   };
 
@@ -401,6 +414,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
       knowledgePoints: draftFormData.knowledgePoints.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
       options: serializeQuestionOptions(questionParts.options, images),
       images,
+      imagePlacements,
       subQuestions,
       children: subQuestions,
     };
@@ -444,6 +458,11 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   };
 
   const handleVerified = () => {
+    const issues = imagePlacementIssues(imagePlacements);
+    if (issues.length > 0) {
+      toast({ title: "题图归属尚未确认", description: issues.join("；"), variant: "destructive" });
+      return;
+    }
     updateMutation.mutate({ ...prepareData(), status: "已校验" }, {
       onSuccess: () => {
         setDirty(false);
@@ -628,6 +647,9 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
             <QuestionImageUploader
               images={images}
               onChange={handleImagesChange}
+              placements={imagePlacements}
+              subQuestionTargets={subForms.map((sub) => ({ id: String(sub.id), label: String(sub.label) }))}
+              onPlacementTargetChange={handlePlacementTargetChange}
               readOnly={readOnly}
               libraryImages={taskImageLibrary}
               onSelectLibraryImages={async (selected) => {
@@ -644,6 +666,9 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
                 return res.images || [];
               }}
             />
+            {imagePlacementIssues(imagePlacements).map((issue) => (
+              <p key={issue} className="text-xs text-destructive">{issue}</p>
+            ))}
           </div>
 
           {/* Metadata row */}

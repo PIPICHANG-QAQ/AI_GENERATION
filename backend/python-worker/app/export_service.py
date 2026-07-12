@@ -314,14 +314,58 @@ def resolve_export_image_path(image: dict[str, Any]) -> Path | None:
     return None
 
 
-def export_question_image_paths(question: dict[str, Any], include_sub_questions: bool = True) -> list[Path]:
-    """收集题目导出需要插入的图片路径。"""
+def export_question_image_paths(
+    question: dict[str, Any],
+    include_sub_questions: bool = True,
+    *,
+    target_kinds: set[str] | None = None,
+    option_label: str = "",
+    sub_question_id: str = "",
+) -> list[Path]:
+    """按显式 placement 收集图片；旧数据无 placement 时保持题干图兼容行为。"""
     paths: list[Path] = []
     seen: set[str] = set()
     images = [*normalize_question_images(question.get("images", []))]
     if include_sub_questions:
         for sub_question in question_sub_questions(question):
             images.extend(normalize_question_images(sub_question.get("images", [])))
+    placements = [item for item in question.get("imagePlacements") or [] if isinstance(item, dict)]
+    if placements:
+        requested_kinds = target_kinds or {"stem", "shared"}
+        placement_order: dict[str, int] = {}
+        allowed_ids: set[str] = set()
+        for placement in placements:
+            target = placement.get("target") if isinstance(placement.get("target"), dict) else {}
+            if str(target.get("kind") or "unassigned") not in requested_kinds:
+                continue
+            if option_label and str(target.get("optionLabel") or "") != option_label:
+                continue
+            if sub_question_id and str(target.get("subQuestionId") or "") != sub_question_id:
+                continue
+            image_id = normalize_asset_path(str(placement.get("imageId") or ""))
+            if image_id:
+                allowed_ids.add(image_id)
+                placement_order[image_id] = int(placement.get("order") or 0)
+
+        def matches_allowed(image: dict[str, Any]) -> bool:
+            candidates = {
+                normalize_asset_path(str(image.get(key) or ""))
+                for key in ("imageId", "path", "name", "url")
+            }
+            return bool(candidates & allowed_ids)
+
+        images = [image for image in images if matches_allowed(image)]
+        images.sort(
+            key=lambda image: min(
+                [placement_order[candidate] for candidate in {
+                    normalize_asset_path(str(image.get(key) or "")) for key in ("imageId", "path", "name", "url")
+                } if candidate in placement_order]
+                or [0]
+            )
+        )
+    elif target_kinds is not None and not ({"stem", "shared"} & target_kinds):
+        images = []
+
     for image in images:
         path = resolve_export_image_path(image)
         if not path:
@@ -332,6 +376,15 @@ def export_question_image_paths(question: dict[str, Any], include_sub_questions:
         seen.add(key)
         paths.append(path)
     return paths
+
+
+def option_image_paths(question: dict[str, Any], label: str) -> list[Path]:
+    return export_question_image_paths(
+        question,
+        include_sub_questions=False,
+        target_kinds={"option"},
+        option_label=str(label or "").strip(),
+    )
 
 
 def export_paper_docx_legacy(paper: dict[str, Any], questions: list[dict[str, Any]], include_answer: bool) -> Path:
@@ -380,12 +433,27 @@ def export_paper_docx_legacy(paper: dict[str, Any], questions: list[dict[str, An
         add_text_paragraph(line, alignment=alignment)
     add_text_paragraph("", space_after=2)
     for index, question in enumerate(questions, start=1):
-        image_paths = export_question_image_paths(question)
+        sub_questions = question_sub_questions(question)
         for line_index, line in enumerate(render_question_lines(question, index, include_answer)):
             add_text_paragraph(line, space_before=6 if line_index == 0 else 0)
             if line_index == 0:
-                for image_path in image_paths:
+                for image_path in export_question_image_paths(question, False, target_kinds={"stem", "shared"}):
                     add_image_paragraph(image_path)
+            for option in question.get("options") or []:
+                label = str(option.get("label") or "").strip()
+                if label and line.startswith(f"{label}."):
+                    for image_path in option_image_paths(question, label):
+                        add_image_paragraph(image_path)
+            for sub_index, sub_question in enumerate(sub_questions, start=1):
+                sub_label = str(sub_question.get("label") or f"({sub_index})").strip()
+                if line.startswith(f"{sub_label} "):
+                    for image_path in export_question_image_paths(sub_question, False, target_kinds={"stem", "shared"}):
+                        add_image_paragraph(image_path)
+                for option in sub_question.get("options") or []:
+                    label = str(option.get("label") or "").strip()
+                    if label and line.startswith(f"  {label}."):
+                        for image_path in option_image_paths(sub_question, label):
+                            add_image_paragraph(image_path)
         add_text_paragraph("", space_after=2)
     document.save(export_path)
     return export_path
@@ -526,11 +594,27 @@ def export_paper_pdf_legacy(paper: dict[str, Any], questions: list[dict[str, Any
                 result.append((label, content))
         return result
 
-    def draw_options(options: list[dict[str, Any]]) -> None:
+    def draw_options(options: list[dict[str, Any]], owner: dict[str, Any] | None = None) -> None:
         """按预览样式两列绘制选择题选项。"""
         nonlocal y
         items = option_lines(options)
         if not items:
+            return
+        has_option_images = bool(owner) and any(option_image_paths(owner or {}, label) for label, _content in items)
+        if has_option_images:
+            for label, content in items:
+                ensure_space(38)
+                box_h = 26
+                row_y = y - box_h
+                pdf.setFillColor(colors.white)
+                pdf.setStrokeColor(border)
+                pdf.roundRect(margin_x, row_y, max_width, box_h, 8, stroke=1, fill=1)
+                pdf.setFillColor(ink)
+                pdf.setFont(font_name, body_size)
+                pdf.drawString(margin_x + 10, row_y + 8, f"{label}. {content}".strip())
+                y = row_y - 6
+                for image_path in option_image_paths(owner or {}, label):
+                    draw_question_image(image_path)
             return
         gap = 8
         col_w = (max_width - gap) / 2
@@ -699,7 +783,7 @@ def export_paper_pdf_legacy(paper: dict[str, Any], questions: list[dict[str, Any
             draw_question_image(image_path)
         options = question.get("options") or task_options
         if options:
-            draw_options(options)
+            draw_options(options, question)
 
         for sub_index, sub_question in enumerate(sub_questions, start=1):
             label, sub_stem_markdown, sub_options = sub_question_markdown(sub_question, sub_index)
@@ -716,7 +800,7 @@ def export_paper_pdf_legacy(paper: dict[str, Any], questions: list[dict[str, Any
             for image_path in export_question_image_paths(sub_question, include_sub_questions=False):
                 draw_question_image(image_path)
             if sub_options:
-                draw_options(sub_options)
+                draw_options(sub_options, sub_question)
 
         if not sub_questions:
             draw_writing_area(
@@ -922,8 +1006,18 @@ def latex_image_block(image_path: Path, *, width_ratio: float = 0.42) -> str:
     return rf"\par\vspace{{0.35em}}\includegraphics[width={width_ratio:.2f}\linewidth]{{{path}}}\par\vspace{{0.4em}}"
 
 
-def latex_options_block(options: list[dict[str, Any]]) -> str:
+def latex_options_block(options: list[dict[str, Any]], owner: dict[str, Any] | None = None) -> str:
     """生成两列选项。"""
+    if owner and any(option_image_paths(owner, str(option.get("label") or "")) for option in options if isinstance(option, dict)):
+        blocks: list[str] = []
+        for index, option in enumerate(options):
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("label") or chr(65 + index)).strip()
+            content = latex_markdown_text(option.get("contentMarkdown") or option.get("content") or "")
+            blocks.append(rf"\par\noindent\textbf{{{latex_escape_text(label)}.}} {content}")
+            blocks.extend(latex_image_block(path, width_ratio=0.28) for path in option_image_paths(owner, label))
+        return "\n".join(blocks)
     items: list[str] = []
     for index, option in enumerate(options):
         if not isinstance(option, dict):
@@ -973,7 +1067,7 @@ def latex_question_block(question: dict[str, Any], number: int, include_answer: 
         parts.append(latex_image_block(image_path))
     options = question.get("options") or task_options
     if options:
-        parts.append(latex_options_block(options))
+        parts.append(latex_options_block(options, question))
 
     for sub_index, sub_question in enumerate(sub_questions, start=1):
         label, sub_stem_markdown, sub_options = sub_question_markdown(sub_question, sub_index)
@@ -990,7 +1084,7 @@ def latex_question_block(question: dict[str, Any], number: int, include_answer: 
         for image_path in export_question_image_paths(sub_question, include_sub_questions=False):
             parts.append(latex_image_block(image_path, width_ratio=0.52))
         if sub_options:
-            parts.append(latex_options_block(sub_options))
+            parts.append(latex_options_block(sub_options, sub_question))
         writing_lines = latex_answer_lines(answer_space_height(sub_question, fallback_type=question.get("type"), is_sub_question=True))
         if writing_lines:
             parts.append(writing_lines)
@@ -1112,7 +1206,7 @@ def export_question_markdown(question: dict[str, Any], number: int, include_answ
     lines: list[str] = [f"## {number}. （{float(question.get('score', 0) or 0):g} 分）", ""]
     if stem_markdown.strip():
         lines.extend([pandoc_markdown_text(stem_markdown), ""])
-    for image_path in export_question_image_paths(question, include_sub_questions=False):
+    for image_path in export_question_image_paths(question, include_sub_questions=False, target_kinds={"stem", "shared"}):
         lines.extend([pandoc_image_markdown(image_path), ""])
 
     options = question.get("options") or task_options
@@ -1122,6 +1216,8 @@ def export_question_markdown(question: dict[str, Any], number: int, include_answ
             content = pandoc_markdown_text(option.get("content") or "")
             prefix = f"- **{label}.** " if label else "- "
             lines.append(f"{prefix}{content}".rstrip())
+            for image_path in option_image_paths(question, label):
+                lines.append(f"  {pandoc_image_markdown(image_path)}")
         lines.append("")
 
     sub_questions = question_sub_questions(question)
@@ -1132,13 +1228,15 @@ def export_question_markdown(question: dict[str, Any], number: int, include_answ
             lines.extend([f"**{label}**", "", sub_stem, ""])
         else:
             lines.extend([f"**{label}** {sub_stem}".rstrip(), ""])
-        for image_path in export_question_image_paths(sub_question, include_sub_questions=False):
+        for image_path in export_question_image_paths(sub_question, include_sub_questions=False, target_kinds={"stem", "shared"}):
             lines.extend([pandoc_image_markdown(image_path), ""])
         for option in sub_options:
             option_label = str(option.get("label") or "").strip()
             content = pandoc_markdown_text(option.get("content") or "")
             prefix = f"  - **{option_label}.** " if option_label else "  - "
             lines.append(f"{prefix}{content}".rstrip())
+            for image_path in option_image_paths(sub_question, option_label):
+                lines.append(f"    {pandoc_image_markdown(image_path)}")
         if sub_options:
             lines.append("")
         if include_answer:
@@ -1150,8 +1248,12 @@ def export_question_markdown(question: dict[str, Any], number: int, include_answ
     if include_answer:
         if not sub_questions and question.get("answer"):
             lines.extend(["**答案：**", "", pandoc_markdown_text(question.get("answer")), ""])
+            for image_path in export_question_image_paths(question, False, target_kinds={"answer"}):
+                lines.extend([pandoc_image_markdown(image_path), ""])
         if not sub_questions and question.get("analysis"):
             lines.extend(["**解析：**", "", pandoc_markdown_text(question.get("analysis")), ""])
+            for image_path in export_question_image_paths(question, False, target_kinds={"analysis"}):
+                lines.extend([pandoc_image_markdown(image_path), ""])
     return "\n".join(lines).strip()
 
 

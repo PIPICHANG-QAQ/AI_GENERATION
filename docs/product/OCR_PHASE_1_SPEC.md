@@ -119,6 +119,7 @@ OCR 成功后必须形成以下结构：
 - `subQuestions`
 - `children`：兼容旧字段，内容与 `subQuestions` 保持一致。
 - `images`
+- `imagePlacements`：可选的显式题图归属，目标可为题干、A-H 选项、小问、答案、解析、共享材料、装饰图或未归属。
 - `knowledgePoints`
 - `difficulty`
 - `score`
@@ -127,7 +128,7 @@ OCR 成功后必须形成以下结构：
 - `autoStandardize`
 - `aiMetadata`
 
-题图必须同时保留 `images` 结构化字段和题干 Markdown 图片引用。`images` 提供图片元数据、访问地址和 AI 解析可用性，Markdown 引用决定题图在题干预览、题库查看、组卷预览和导出中的位置；用户手动删除某个图片引用后，预览不得继续渲染该图，也不得自动补回引用。
+题图必须同时保留 `images` 资产池、`imagePlacements` 显式归属和对应 Markdown 图片引用。Markdown offset 是第一证据，MinerU page/bbox 是第二证据；几何证据不得覆盖明确 offset。无法可靠判断时目标必须为 `unassigned`，不得按图片数量或数组顺序自动塞入 A-D。用户修改归属时必须原子更新 placement 与 Markdown 引用。
 
 空位题、补全题、横线题和证明过程填空题必须在 `stemMarkdown` / `manualMarkdown` 中保留可编辑占位，统一使用 `____` 或 `(____)`。占位只是题干结构，不等价于答案；答案仍进入 `answer` 或小问 `answer` 字段。
 

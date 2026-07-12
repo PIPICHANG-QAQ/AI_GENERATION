@@ -705,6 +705,46 @@ class DomainControllerTest {
     }
 
     /**
+     * 验证题图归属经过导入快照、题库快照和标准题目包后保持不变。
+     *
+     * @throws Exception 测试请求失败时抛出
+     */
+    @Test
+    void imagePlacementsRoundTripThroughImportBankAndQuestionPackage() throws Exception {
+        List<Map<String, Object>> placements = List.of(Map.ofEntries(
+                entry("placementId", "placement-a"),
+                entry("imageId", "images/a.png"),
+                entry("target", Map.of("kind", "option", "optionLabel", "A")),
+                entry("order", 0),
+                entry("sourceEvidence", Map.of("markdownStart", 42, "markdownEnd", 58, "pageIndex", 0)),
+                entry("inference", Map.of("method", "explicit-offset", "confidence", 0.99, "reasons", List.of("inside-option-span"))),
+                entry("reviewStatus", "auto")
+        ));
+        Map<String, Object> payload = new LinkedHashMap<>(importTaskPayload("placement_job_1", "待校验", 1, "题图归属任务"));
+        List<Map<String, Object>> questions = new ArrayList<>((List<Map<String, Object>>) payload.get("questions"));
+        questions.set(0, new LinkedHashMap<>(questions.get(0)));
+        questions.get(0).put("imagePlacements", placements);
+        payload.put("questions", questions);
+        importTaskMetadataService.syncMap(payload);
+
+        Map<String, Object> imported = importQuestionSyncService.listByTask("placement_job_1").stream()
+                .map(importQuestionSyncService::toMap)
+                .findFirst()
+                .orElseThrow();
+        org.assertj.core.api.Assertions.assertThat(imported.get("imagePlacements")).isEqualTo(placements);
+
+        Map<String, Object> bankPayload = new LinkedHashMap<>(questions.get(0));
+        bankPayload.put("id", "placement_bank_1");
+        Map<String, Object> banked = bankQuestionService.upsertFromPayload(bankPayload);
+        org.assertj.core.api.Assertions.assertThat(banked.get("imagePlacements")).isEqualTo(placements);
+
+        mockMvc.perform(get("/api/capabilities/question-processing/jobs/placement_job_1/question-package"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.questions[0].imagePlacements[0].placementId").value("placement-a"))
+                .andExpect(jsonPath("$.questions[0].imagePlacements[0].target.optionLabel").value("A"));
+    }
+
+    /**
      * 验证导入任务同步会提取 OCR 失败原因，并区分可重试和最终失败状态。
      */
     @Test

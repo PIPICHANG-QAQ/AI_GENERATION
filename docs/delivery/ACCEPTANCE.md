@@ -48,7 +48,7 @@
 - `GET /api/capabilities/question-processing` 必须返回能力编码、包版本 `question-package.v1`、输入输出边界、worker 入口和平台自有职责。
 - `POST /api/capabilities/question-processing/jobs` 必须能创建加工任务并返回 `ProcessingJob`。
 - `GET /api/capabilities/question-processing/jobs/{jobId}` 必须返回任务视图，包括中文业务状态和稳定英文 `processingStatus`。
-- `GET /api/capabilities/question-processing/jobs/{jobId}/question-package` 必须返回 `question-package.v1`，包含任务、原文件、题目、题图、答案、解析、知识点候选、难度候选、分值候选和 source evidence。
+- `GET /api/capabilities/question-processing/jobs/{jobId}/question-package` 必须返回 `question-package.v1`，包含任务、原文件、题目、题图、可选 `imagePlacements`、答案、解析、知识点候选、难度候选、分值候选和 source evidence。
 - `question-engine/openapi/question-engine.v1.yaml` 必须存在，并作为平台契约和 SDK 的源头。
 - `question-engine/sdk/generated/typescript` 和 `question-engine/sdk/generated/java` 必须存在，并至少覆盖能力目录、engine 目录、加工任务创建/查询和题目包获取。
 - `question-engine/sdk/examples` 只能作为旧手写 SDK 示例，不得作为平台正式集成主入口。
@@ -66,6 +66,9 @@
 - Java 导入任务详情在 worker 兼容 store 缺失任务时必须回退 `java_import_tasks` 持久快照；当 OCR job 已成功且题目未同步时，应通过内部恢复接口按 OCR job 重建题目。
 - 大题必须包含标题、题型和其下题目列表。
 - 每道题必须包含题号、题型、题干、题图数组、选项数组和小问字段；新字段为 `subQuestions`，兼容字段 `children` 必须同步返回。
+- 带图题必须保留题图资产和显式归属证据；同一图片不得出现多个非共享高置信 owner，无法确定的图片必须标记未归属并阻止“已校验”。
+- 双栏 A-D 图片选项不得依赖 JSON/数组序列；回归样本必须按 bbox 单元格匹配，并保证 offset 与 bbox 冲突时不覆盖 offset。
+- 导出必须把题干图、选项图和小问图放在对应位置，未归属图不得静默混入试卷。
 - 含小问的大题必须把答案、解析、题型、难度、分值和知识点落在各小问上，父题 `answer` / `analysis` 保持为空。
 - 选择题的 `stemMarkdown` 不应包含 A/B/C/D 选项正文；`- A.`、`A．`、`A、`、`(A)`、标准 `tasks`、误识别 `ttasks` 和裸 `\task` 行必须拆入 `options` 并在人工校验、题库和组卷预览中独立渲染。
 - 选择题选项中的题图必须保留在对应 `options` / `tasks` 内容里；`![](images/xxx.jpg)` 和被 OCR 换行成 `![]` + `(images/xxx.jpg)` 的图片语法都必须规范为 `![](图N)`，不得被追加到题干顶部或丢失。

@@ -859,6 +859,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/QuestionImage"
+        imagePlacements:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImagePlacement"
         writeResult:
           type: boolean
           description: 显式请求写回开关；默认 false，仅返回候选。
@@ -921,6 +925,10 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/QuestionImage"
+        imagePlacements:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuestionImagePlacement"
         raw:
           type: object
           additionalProperties: true
@@ -955,6 +963,72 @@ components:
         raw:
           type: object
           additionalProperties: true
+    QuestionImagePlacement:
+      type: object
+      required: [placementId, imageId, target, order, sourceEvidence, inference, reviewStatus]
+      properties:
+        placementId:
+          type: string
+        imageId:
+          type: string
+        target:
+          $ref: "#/components/schemas/ImagePlacementTarget"
+        order:
+          type: integer
+        sourceEvidence:
+          $ref: "#/components/schemas/ImagePlacementEvidence"
+        inference:
+          $ref: "#/components/schemas/ImagePlacementInference"
+        reviewStatus:
+          type: string
+          enum: [auto, needs_review, confirmed, overridden]
+    ImagePlacementTarget:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [stem, option, subquestion, shared, answer, analysis, unassigned, decoration]
+        optionLabel:
+          type: string
+          pattern: "^[A-H]$"
+        subQuestionId:
+          type: string
+    ImagePlacementEvidence:
+      type: object
+      properties:
+        markdownStart:
+          type: integer
+        markdownEnd:
+          type: integer
+        pageIndex:
+          type: integer
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            type: number
+    ImagePlacementInference:
+      type: object
+      required: [method, confidence, reasons]
+      properties:
+        method:
+          type: string
+          enum: [explicit-offset, geometry, rule, multimodal, human]
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        reasons:
+          type: array
+          items:
+            type: string
+        alternatives:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
     QuestionImageLibrary:
       type: object
       required: [items]

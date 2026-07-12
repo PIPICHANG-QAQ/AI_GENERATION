@@ -9,7 +9,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { QUESTION_IMAGE_REF_MIME, getImageKey, getQuestionImageLabel, questionImageSrc, type QuestionImage } from "@/lib/question";
+import {
+  QUESTION_IMAGE_REF_MIME,
+  getImageKey,
+  getQuestionImageLabel,
+  questionImageSrc,
+  type QuestionImage,
+  type QuestionImagePlacement,
+} from "@/lib/question";
 
 const MAX_SIZE = 5 * 1024 * 1024;
 
@@ -29,6 +36,9 @@ export function QuestionImageUploader({
   uploadFiles,
   libraryImages = [],
   onSelectLibraryImages,
+  placements = [],
+  subQuestionTargets = [],
+  onPlacementTargetChange,
 }: {
   images: QuestionImage[];
   onChange: (images: QuestionImage[]) => void;
@@ -36,6 +46,9 @@ export function QuestionImageUploader({
   uploadFiles?: (files: File[]) => Promise<QuestionImage[]>;
   libraryImages?: QuestionImage[];
   onSelectLibraryImages?: (images: QuestionImage[]) => Promise<QuestionImage[]> | QuestionImage[];
+  placements?: QuestionImagePlacement[];
+  subQuestionTargets?: Array<{ id: string; label: string }>;
+  onPlacementTargetChange?: (imageId: string, target: QuestionImagePlacement["target"]) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -160,35 +173,61 @@ export function QuestionImageUploader({
     }
   };
 
+  const placementFor = (img: QuestionImage) => {
+    const ids = [img.imageId, img.path, getImageKey(img)].map((value) => String(value || ""));
+    return placements.find((placement) => ids.includes(placement.imageId));
+  };
+
+  const placementValue = (img: QuestionImage) => {
+    const target = placementFor(img)?.target;
+    if (!target) return "unassigned";
+    if (target.kind === "option") return `option:${target.optionLabel || "A"}`;
+    if (target.kind === "subquestion") return `subquestion:${target.subQuestionId || ""}`;
+    return target.kind;
+  };
+
+  const changePlacement = (img: QuestionImage, value: string) => {
+    if (!onPlacementTargetChange) return;
+    const imageId = placementFor(img)?.imageId || String(img.imageId || img.path || getImageKey(img));
+    const [kind, detail] = value.split(":", 2);
+    const target: QuestionImagePlacement["target"] =
+      kind === "option"
+        ? { kind: "option", optionLabel: detail }
+        : kind === "subquestion"
+          ? { kind: "subquestion", subQuestionId: detail }
+          : { kind: kind as QuestionImagePlacement["target"]["kind"] };
+    onPlacementTargetChange(imageId, target);
+  };
+
   return (
     <div className="space-y-2">
       {images.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {images.map((img, i) => (
-            <div
-              key={getImageKey(img) || i}
-              className="relative group w-24 h-24 rounded-md border border-border bg-card overflow-hidden flex items-center justify-center"
-              title={img.name || imageLabel(img, i)}
-              draggable={!readOnly}
-              onDragStart={handleRefDragStart(img, i)}
-            >
-              <span className="absolute left-1 top-1 z-10 rounded bg-background/90 px-1.5 py-0.5 text-[10px] font-medium text-foreground shadow-sm">
-                {imageLabel(img, i)}
-              </span>
-              {srcOf(img) ? (
-                <img
-                  src={srcOf(img)}
-                  alt={img.name || imageLabel(img, i)}
-                  className="max-w-full max-h-full object-contain cursor-pointer"
-                  onClick={() => window.open(srcOf(img), "_blank")}
-                />
-              ) : (
-                <span className="text-xs text-muted-foreground px-1 text-center">
-                  {img.name || "无预览"}
+            <div key={getImageKey(img) || i} className="w-28 space-y-1">
+              <div
+                className="relative group w-24 h-24 rounded-md border border-border bg-card overflow-hidden flex items-center justify-center"
+                title={img.name || imageLabel(img, i)}
+                draggable={!readOnly}
+                onDragStart={handleRefDragStart(img, i)}
+              >
+                <span className="absolute left-1 top-1 z-10 rounded bg-background/90 px-1.5 py-0.5 text-[10px] font-medium text-foreground shadow-sm">
+                  {imageLabel(img, i)}
                 </span>
-              )}
-              {!readOnly && (
-                <div className="absolute right-1 top-1 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                {srcOf(img) ? (
+                  <img
+                    src={srcOf(img)}
+                    alt={img.name || imageLabel(img, i)}
+                    className="max-w-full max-h-full object-contain cursor-pointer"
+                    onClick={() => window.open(srcOf(img), "_blank")}
+                  />
+                ) : (
+                  <span className="text-xs text-muted-foreground px-1 text-center">
+                    {img.name || "无预览"}
+                  </span>
+                )}
+                {!readOnly && (
+                  <div className="absolute right-1 top-1 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                   <button
                     type="button"
                     onClick={(event) => {
@@ -211,7 +250,30 @@ export function QuestionImageUploader({
                   >
                     <X className="w-3 h-3" />
                   </button>
-                </div>
+                  </div>
+                )}
+              </div>
+              {onPlacementTargetChange && (
+                <select
+                  value={placementValue(img)}
+                  onChange={(event) => changePlacement(img, event.target.value)}
+                  disabled={readOnly}
+                  className="h-7 w-full rounded border border-input bg-card px-1 text-[11px]"
+                  aria-label={`${imageLabel(img, i)}归属`}
+                >
+                  <option value="unassigned">未归属</option>
+                  <option value="stem">题干</option>
+                  {Array.from({ length: 8 }, (_, index) => String.fromCharCode(65 + index)).map((label) => (
+                    <option key={label} value={`option:${label}`}>选项 {label}</option>
+                  ))}
+                  {subQuestionTargets.map((sub) => (
+                    <option key={sub.id} value={`subquestion:${sub.id}`}>小问 {sub.label}</option>
+                  ))}
+                  <option value="answer">答案</option>
+                  <option value="analysis">解析</option>
+                  <option value="shared">共享材料</option>
+                  <option value="decoration">装饰图</option>
+                </select>
               )}
             </div>
           ))}

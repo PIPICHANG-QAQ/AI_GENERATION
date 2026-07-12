@@ -2,6 +2,9 @@
 
 ## 2026-07-12
 
+- 题图归属升级为显式 `imagePlacements`：按 Markdown offset 确认题干/选项/小问 owner，以 bbox 几何处理双栏顺序，只在无显式证据时补充，冲突时保留主证据并标记复核。
+- 修复 legacy 跨题补图和无效整卷 fallback 覆盖主结构；主候选与 fallback 都不合法时保留证据质量更高的候选并返回 `requiresReview`。
+- Java 导入题、题库题、`question-package.v1`、OpenAPI 和 SDK 均保留题图归属；前端支持人工修改 owner，未归属/冲突阻止“已校验”，导出按题干、选项和小问位置渲染。
 - OCR 视觉修复改为节点内有界并发：`visual-repair` 仍排在 AI 边界确认和结构构建之后，内部按题目并发执行 crop、横线检测和可选 Pix2Text，结果按原始题目顺序统一合并，避免视觉修复影响题目边界识别。
 - 新增视觉修复只读预处理：进入 `llm-boundary-refine` 前异步加载 content_list/middle.json、题号 bbox 索引和有限页图像缓存，真正写回题目仍等待边界确认完成后执行。
 - 新增配置 `OCR_VISUAL_REPAIR_MAX_CONCURRENCY`、`OCR_VISUAL_REPAIR_PRELOAD_ENABLED`、`OCR_VISUAL_REPAIR_PRELOAD_MAX_PAGES`；同步更新 README、运维指南、技术设计和 OCR-Flow 流程图。

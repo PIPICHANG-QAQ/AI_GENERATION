@@ -29,6 +29,8 @@ REQUIRED_OPENAPI_ITEMS = [
     "ImportTaskRescanResult:",
     "QuestionPackage:",
     "QuestionImageLibrary:",
+    "QuestionImagePlacement:",
+    "ImagePlacementTarget:",
     "AiAnalysisRequest:",
     "AiAnalysisResult:",
     "CallbackEvent:",

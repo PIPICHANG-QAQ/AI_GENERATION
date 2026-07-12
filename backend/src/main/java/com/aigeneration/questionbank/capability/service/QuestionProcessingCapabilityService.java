@@ -301,6 +301,7 @@ public class QuestionProcessingCapabilityService {
                 questionOptions(json.readList(question.getOptionsJson())),
                 questionChildren(json.readList(question.getChildrenJson())),
                 questionImages(question.getId()),
+                mapList(json.readList(question.getImagePlacementsJson())),
                 json.stringList(json.readList(question.getKnowledgePointIdsJson())),
                 json.stringList(json.readList(question.getKnowledgePointsJson())),
                 text(question.getDifficulty()),
@@ -350,10 +351,28 @@ public class QuestionProcessingCapabilityService {
                     text(raw.get("analysis")),
                     questionOptions(listValue(raw.get("options"))),
                     rawImages(listValue(raw.get("images"))),
+                    mapList(listValue(raw.get("imagePlacements"))),
                     raw
             ));
         }
         return children;
+    }
+
+    /**
+     * 将通用 JSON 数组转换为 Map 列表，保留题图归属扩展字段。
+     *
+     * @param values 通用 JSON 数组
+     * @return Map 列表
+     */
+    private List<Map<String, Object>> mapList(List<Object> values) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Object value : values) {
+            Map<String, Object> mapped = mapValue(value);
+            if (!mapped.isEmpty()) {
+                result.add(mapped);
+            }
+        }
+        return result;
     }
 
     /**

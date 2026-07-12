@@ -18,6 +18,40 @@ export interface QuestionImage {
   raw?: Record<string, unknown>;
 }
 
+export type ImagePlacementKind =
+  | "stem"
+  | "option"
+  | "subquestion"
+  | "shared"
+  | "answer"
+  | "analysis"
+  | "unassigned"
+  | "decoration";
+
+export interface QuestionImagePlacement {
+  placementId: string;
+  imageId: string;
+  target: {
+    kind: ImagePlacementKind;
+    optionLabel?: string;
+    subQuestionId?: string;
+  };
+  order: number;
+  sourceEvidence?: {
+    markdownStart?: number;
+    markdownEnd?: number;
+    pageIndex?: number;
+    bbox?: number[];
+  };
+  inference: {
+    method: "explicit-offset" | "geometry" | "rule" | "multimodal" | "human";
+    confidence: number;
+    reasons: string[];
+    alternatives?: unknown[];
+  };
+  reviewStatus: "auto" | "needs_review" | "confirmed" | "overridden";
+}
+
 export const QUESTION_IMAGE_REF_MIME = "application/x-question-image-ref";
 
 export interface QuestionOption {
@@ -116,7 +150,8 @@ function labelNumber(label: string): number {
 
 export function ensureQuestionImageLabels(images: QuestionImage[] = [], previousImages: QuestionImage[] = []): QuestionImage[] {
   const previousByKey = new Map<string, string>();
-  const used = new Set<string>();
+  const nextKeys = new Set(images.map(getImageKey).filter(Boolean));
+  const reserved = new Set<string>();
   let maxLabel = 0;
 
   previousImages.forEach((img, index) => {
@@ -124,25 +159,143 @@ export function ensureQuestionImageLabels(images: QuestionImage[] = [], previous
     const key = getImageKey(img);
     if (key && label) previousByKey.set(key, label);
     if (label) {
-      used.add(label);
+      if (!key || !nextKeys.has(key)) reserved.add(label);
       maxLabel = Math.max(maxLabel, labelNumber(label));
     }
   });
 
-  return images.map((img, index) => {
+  const assigned = new Map<number, string>();
+  const used = new Set(reserved);
+  images.forEach((img, index) => {
     const key = getImageKey(img);
-    let label = explicitQuestionImageLabel(img);
-    if (key && previousByKey.has(key)) {
-      label = previousByKey.get(key) || label;
+    const retainedLabel = key ? previousByKey.get(key) : "";
+    if (retainedLabel && !used.has(retainedLabel)) {
+      assigned.set(index, retainedLabel);
+      used.add(retainedLabel);
     }
+  });
+  images.forEach((img, index) => {
+    if (assigned.has(index)) return;
+    let label = explicitQuestionImageLabel(img);
     if (!label || used.has(label)) {
       maxLabel += 1;
+      while (used.has(`图${maxLabel}`)) maxLabel += 1;
       label = `图${maxLabel}`;
     }
+    assigned.set(index, label);
     used.add(label);
     maxLabel = Math.max(maxLabel, labelNumber(label));
+  });
+  return images.map((img, index) => {
+    const label = assigned.get(index) || `图${index + 1}`;
     return { ...img, label, refLabel: label };
   });
+}
+
+export function ensureImagePlacements(
+  images: QuestionImage[] = [],
+  placements: QuestionImagePlacement[] = [],
+): QuestionImagePlacement[] {
+  const byImageId = new Map(placements.map((placement) => [String(placement.imageId || ""), placement]));
+  return images.map((image, order) => {
+    const imageId = String(image.imageId || image.path || getImageKey(image));
+    const existing = byImageId.get(imageId) || placements.find((placement) => placement.imageId === getImageKey(image));
+    if (existing) return { ...existing, order };
+    const safeId = imageId.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-|-$/g, "") || String(order + 1);
+    return {
+      placementId: `placement-${safeId}-${order}`,
+      imageId,
+      target: { kind: "unassigned" },
+      order,
+      sourceEvidence: {},
+      inference: { method: "rule", confidence: 0, reasons: ["new-image-needs-owner"], alternatives: [] },
+      reviewStatus: "needs_review",
+    };
+  });
+}
+
+export function updateImagePlacementTarget(
+  placements: QuestionImagePlacement[],
+  imageId: string,
+  target: QuestionImagePlacement["target"],
+): QuestionImagePlacement[] {
+  return placements.map((placement) =>
+    placement.imageId === imageId
+      ? {
+          ...placement,
+          target,
+          inference: { ...placement.inference, method: "human", confidence: 1, reasons: ["human-selection"] },
+          reviewStatus: "confirmed",
+        }
+      : placement,
+  );
+}
+
+export function imagePlacementIssues(placements: QuestionImagePlacement[] = []): string[] {
+  const issues: string[] = [];
+  const unassigned = placements.filter((placement) => placement.target.kind === "unassigned").length;
+  if (unassigned > 0) issues.push(`存在 ${unassigned} 张未归属题图`);
+  const needsReview = placements.filter(
+    (placement) => placement.reviewStatus === "needs_review" && placement.target.kind !== "unassigned",
+  ).length;
+  if (needsReview > 0) issues.push(`存在 ${needsReview} 张题图归属需复核`);
+  const highConfidenceOwners = new Map<string, number>();
+  placements.forEach((placement) => {
+    if (["shared", "unassigned", "decoration"].includes(placement.target.kind)) return;
+    if (Number(placement.inference?.confidence || 0) < 0.9) return;
+    highConfidenceOwners.set(placement.imageId, (highConfidenceOwners.get(placement.imageId) || 0) + 1);
+  });
+  const conflicts = Array.from(highConfidenceOwners.values()).filter((count) => count > 1).length;
+  if (conflicts > 0) issues.push(`存在 ${conflicts} 张题图归属冲突`);
+  return issues;
+}
+
+export function moveQuestionImageReference(
+  image: QuestionImage,
+  target: QuestionImagePlacement["target"],
+  value: {
+    markdown: string;
+    answer?: string;
+    analysis?: string;
+    options?: unknown;
+    subQuestions?: any[];
+  },
+): {
+  markdown: string;
+  answer: string;
+  analysis: string;
+  options: QuestionOption[];
+  subQuestions: any[];
+} {
+  const token = `![](${getQuestionImageLabel(image)})`;
+  let markdown = removeQuestionImageRefsFromMarkdown(value.markdown, [image]);
+  let answer = removeQuestionImageRefsFromMarkdown(value.answer || "", [image]);
+  let analysis = removeQuestionImageRefsFromMarkdown(value.analysis || "", [image]);
+  let options = removeQuestionImageRefsFromOptions(value.options, [image]);
+  let subQuestions = (value.subQuestions || []).map((sub) => ({
+    ...sub,
+    markdown: removeQuestionImageRefsFromMarkdown(sub.markdown || sub.manualMarkdown || sub.stemMarkdown || "", [image]),
+    answer: removeQuestionImageRefsFromMarkdown(sub.answer || "", [image]),
+    analysis: removeQuestionImageRefsFromMarkdown(sub.analysis || "", [image]),
+    options: removeQuestionImageRefsFromOptions(sub.options, [image]),
+  }));
+  const append = (text: string) => appendImageRefTokens(text, [{ token }]);
+  if (target.kind === "stem" || target.kind === "shared") markdown = append(markdown);
+  if (target.kind === "answer") answer = append(answer);
+  if (target.kind === "analysis") analysis = append(analysis);
+  if (target.kind === "option" && target.optionLabel) {
+    options = options.map((option) =>
+      option.label === target.optionLabel
+        ? { ...option, content: append(option.content), contentMarkdown: append(option.contentMarkdown || option.content) }
+        : option,
+    );
+  }
+  if (target.kind === "subquestion" && target.subQuestionId) {
+    subQuestions = subQuestions.map((sub) =>
+      String(sub.id) === target.subQuestionId ? { ...sub, markdown: append(sub.markdown) } : sub,
+    );
+  }
+  return { markdown, answer, analysis, options, subQuestions };
 }
 
 function stripMarkdownImageSrc(value?: string | null): string {
@@ -572,47 +725,6 @@ export function normalizeQuestionOptions(value: unknown, images: QuestionImage[]
   return options;
 }
 
-function optionContainsImageRef(option: QuestionOption): boolean {
-  return /!\[[^\]]*]\s*\([^)]+\)/.test(option.contentMarkdown || option.content || "");
-}
-
-function optionsContainImageRefs(options: QuestionOption[]): boolean {
-  return options.some(optionContainsImageRef);
-}
-
-function questionTextSuggestsOptionImages(markdown: string): boolean {
-  const text = String(markdown || "").replace(/!\[[^\]]*]\s*\([^)]+\)/g, "");
-  return /如图|下图|图中|图示|示意图|图形|标志|图[①②③④⑤⑥⑦⑧⑨⑩一二三四五六七八九十1-9]/.test(text);
-}
-
-function attachChoiceImagesToTextOptions(
-  markdown: string,
-  rawOptions: unknown,
-  images: QuestionImage[] = [],
-  questionType: string = "",
-): QuestionOption[] {
-  const options = normalizeQuestionOptions(rawOptions, images);
-  const labeledImages = ensureQuestionImageLabels(images);
-  if (
-    questionType !== "choice" ||
-    options.length < 2 ||
-    labeledImages.length !== options.length ||
-    optionsContainImageRefs(options) ||
-    !questionTextSuggestsOptionImages(markdown)
-  ) {
-    return options;
-  }
-  return options.map((option, index) => {
-    const imageMarkdown = `![](${getQuestionImageLabel(labeledImages[index], index)})`;
-    const content = [imageMarkdown, option.contentMarkdown || option.content].filter(Boolean).join("\n\n");
-    return {
-      ...option,
-      content,
-      contentMarkdown: content,
-    };
-  });
-}
-
 export function serializeQuestionOptions(value: unknown, images: QuestionImage[] = []): QuestionOption[] {
   return normalizeQuestionOptions(value, images).map((option) => ({
     label: option.label,
@@ -796,16 +908,13 @@ export function getQuestionMarkdownParts(
   const parsed = splitChoiceOptionsFromMarkdown(normalizedMarkdown, questionType);
   const normalizedFallbackOptions =
     questionType === "choice"
-      ? attachChoiceImagesToTextOptions(parsed.stemMarkdown || normalizedMarkdown, fallbackOptions, images, questionType)
+      ? normalizeQuestionOptions(fallbackOptions, images)
       : [];
   if (parsed.options.length > 0) {
     const parsedOptions = normalizeQuestionOptions(parsed.options, images);
     return {
       stemMarkdown: parsed.stemMarkdown,
-      options:
-        optionsContainImageRefs(normalizedFallbackOptions) && !optionsContainImageRefs(parsedOptions)
-          ? normalizedFallbackOptions
-          : parsedOptions,
+      options: parsedOptions,
     };
   }
   return {

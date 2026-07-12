@@ -154,6 +154,7 @@ class ImportQuestionPayload(BaseModel):
     status: str | None = None
     options: list[dict[str, Any]] | None = None
     images: list[dict[str, Any]] | None = None
+    imagePlacements: list[dict[str, Any]] | None = None
     subQuestions: list[dict[str, Any]] | None = None
 
 
@@ -195,6 +196,7 @@ class BankQuestionPayload(BaseModel):
     source: str = ""
     options: list[dict[str, str]] = []
     images: list[dict[str, Any]] = []
+    imagePlacements: list[dict[str, Any]] = []
     subQuestions: list[dict[str, Any]] = []
 
 

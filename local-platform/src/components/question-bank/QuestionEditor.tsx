@@ -25,21 +25,25 @@ import {
 import {
   addSubQuestionForm,
   appendMissingImageRefs,
-  appendNewImageRefs,
+  ensureImagePlacements,
   ensureQuestionImageLabels,
   filterRemovedQuestionImages,
   getRemovedQuestionImages,
   getQuestionImages,
   getQuestionMarkdown,
   getQuestionMarkdownParts,
+  getImageKey,
   getSubQuestions,
+  imagePlacementIssues,
   mergeSubQuestionSuggestions,
+  moveQuestionImageReference,
   normalizeQuestionOptions,
   removeQuestionImageRefsFromOptions,
   removeQuestionImageRefsFromMarkdown,
   serializeQuestionOptions,
   removeSubQuestionForm,
   subQuestionEditorForm,
+  updateImagePlacementTarget,
   type QuestionImage,
 } from "@/lib/question";
 import {
@@ -112,6 +116,7 @@ export function QuestionEditor({
 }) {
   const { toast } = useToast();
   const initialImages = ensureQuestionImageLabels(getQuestionImages(question));
+  const initialPlacements = ensureImagePlacements(initialImages, question.imagePlacements || []);
   const initialMarkdown = getQuestionMarkdown(question);
   const [formData, setFormData] = useState({
     markdown: appendMissingImageRefs(initialMarkdown, initialImages, [question.answer || "", question.analysis || ""]),
@@ -127,6 +132,7 @@ export function QuestionEditor({
     year: question.year || "",
     source: question.source || "",
     images: initialImages,
+    imagePlacements: initialPlacements,
     options: normalizeQuestionOptions(question.options, initialImages),
   });
   const [subForms, setSubForms] = useState(() =>
@@ -198,27 +204,36 @@ export function QuestionEditor({
     setFormData((f) => ({
       ...f,
       images: labeledNextImages,
-      markdown: appendNewImageRefs(
-        removeQuestionImageRefsFromMarkdown(f.markdown, removedImages),
-        previousImages,
-        labeledNextImages,
-        [
-          removeQuestionImageRefsFromMarkdown(f.answer, removedImages),
-          removeQuestionImageRefsFromMarkdown(f.analysis, removedImages),
-          ...removeQuestionImageRefsFromOptions(f.options, removedImages).map((option) => option.content),
-          ...cleanedSubForms.flatMap((sub) => [
-            sub.markdown,
-            sub.answer,
-            sub.analysis,
-            ...normalizeQuestionOptions(sub.options, sub.images).map((option) => option.content),
-          ]),
-        ],
-      ),
+      imagePlacements: ensureImagePlacements(labeledNextImages, f.imagePlacements),
+      markdown: removeQuestionImageRefsFromMarkdown(f.markdown, removedImages),
       answer: removeQuestionImageRefsFromMarkdown(f.answer, removedImages),
       analysis: removeQuestionImageRefsFromMarkdown(f.analysis, removedImages),
       options: removeQuestionImageRefsFromOptions(f.options, removedImages),
     }));
     setSubForms(cleanedSubForms);
+    setStandardizeCandidate(null);
+    setSubStandardizeCandidate(null);
+  };
+
+  const handlePlacementTargetChange = (imageId: string, target: Parameters<typeof updateImagePlacementTarget>[2]) => {
+    const image = formData.images.find((item) => [item.imageId, item.path, getImageKey(item)].map(String).includes(imageId));
+    if (!image) return;
+    const moved = moveQuestionImageReference(image, target, {
+      markdown: formData.markdown,
+      answer: formData.answer,
+      analysis: formData.analysis,
+      options: formData.options,
+      subQuestions: subForms,
+    });
+    setFormData((current) => ({
+      ...current,
+      markdown: moved.markdown,
+      answer: moved.answer,
+      analysis: moved.analysis,
+      options: moved.options,
+      imagePlacements: updateImagePlacementTarget(current.imagePlacements, imageId, target),
+    }));
+    setSubForms(moved.subQuestions);
     setStandardizeCandidate(null);
     setSubStandardizeCandidate(null);
   };
@@ -435,6 +450,11 @@ export function QuestionEditor({
   };
 
   const handleVerifiedSubmit = () => {
+    const issues = imagePlacementIssues(formData.imagePlacements);
+    if (issues.length > 0) {
+      toast({ title: "题图归属尚未确认", description: issues.join("；"), variant: "destructive" });
+      return;
+    }
     if (onVerified) onVerified(prepareData());
   };
 
@@ -563,12 +583,18 @@ export function QuestionEditor({
             <QuestionImageUploader
               images={formData.images}
               onChange={handleImagesChange}
+              placements={formData.imagePlacements}
+              subQuestionTargets={subForms.map((sub) => ({ id: String(sub.id), label: String(sub.label) }))}
+              onPlacementTargetChange={handlePlacementTargetChange}
               libraryImages={taskImageLibrary}
               uploadFiles={question.id ? async (files) => {
                 const res = await api.uploadQuestionImages(question.id, files);
                 return res.images || [];
               } : undefined}
             />
+            {imagePlacementIssues(formData.imagePlacements).map((issue) => (
+              <p key={issue} className="text-xs text-destructive">{issue}</p>
+            ))}
           </div>
 
           <div className="space-y-3 rounded-md border border-border bg-card p-3">

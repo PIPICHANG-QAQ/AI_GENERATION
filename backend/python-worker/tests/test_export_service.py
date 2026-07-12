@@ -3,7 +3,36 @@ from pathlib import Path
 
 import pytest
 
-from app.export_service import answer_space_height, export_paper_markdown, export_paper_pdf, export_paper_pdf_xelatex, latex_markdown_text, pandoc_markdown_text, render_latex_inline, render_question_lines
+from app.export_service import answer_space_height, export_paper_markdown, export_paper_pdf, export_paper_pdf_xelatex, export_question_markdown, latex_markdown_text, pandoc_markdown_text, render_latex_inline, render_question_lines
+
+
+def test_image_placement_keeps_stem_and_option_images_at_their_targets(monkeypatch):
+    question = {
+        "id": "q-images",
+        "score": 4,
+        "stemMarkdown": "选择正确图片",
+        "images": [
+            {"imageId": "stem.png", "path": "stem.png"},
+            {"imageId": "a.png", "path": "a.png"},
+            {"imageId": "b.png", "path": "b.png"},
+            {"imageId": "orphan.png", "path": "orphan.png"},
+        ],
+        "imagePlacements": [
+            {"imageId": "stem.png", "target": {"kind": "stem"}, "order": 0},
+            {"imageId": "a.png", "target": {"kind": "option", "optionLabel": "A"}, "order": 1},
+            {"imageId": "b.png", "target": {"kind": "option", "optionLabel": "B"}, "order": 2},
+            {"imageId": "orphan.png", "target": {"kind": "unassigned"}, "order": 3},
+        ],
+        "options": [{"label": "A", "content": "甲"}, {"label": "B", "content": "乙"}],
+    }
+    monkeypatch.setattr("app.export_service.resolve_export_image_path", lambda image: Path("/tmp") / str(image["path"]))
+
+    content = export_question_markdown(question, 1, include_answer=False)
+
+    assert content.index("stem.png") < content.index("**A.**")
+    assert content.index("**A.**") < content.index("a.png") < content.index("**B.**")
+    assert content.index("**B.**") < content.index("b.png")
+    assert "orphan.png" not in content
 
 
 def compound_question() -> dict:

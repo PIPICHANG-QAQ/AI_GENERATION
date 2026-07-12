@@ -381,6 +381,40 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual([1, 2], [item["number"] for item in questions])
         self.assertEqual(["q_1", "q_1__occurrence_2"], [item["sourceQuestionId"] for item in questions])
 
+    def test_image_placements_round_trip_from_ocr_to_import_and_bank_payload(self):
+        task = {"id": "task-1", "stage": "初中", "subject": "数学", "grade": "七年级", "title": "测试卷"}
+        placements = [
+            {
+                "placementId": "placement-a",
+                "imageId": "images/a.png",
+                "target": {"kind": "option", "optionLabel": "A"},
+                "order": 0,
+                "sourceEvidence": {"markdownStart": 42, "markdownEnd": 58},
+                "inference": {"method": "explicit-offset", "confidence": 0.99, "reasons": ["inside-option-span"]},
+                "reviewStatus": "auto",
+            }
+        ]
+        outputs = {
+            "questions": [
+                {
+                    "id": "q1",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": "选择正确图片",
+                    "images": [{"name": "a.png", "path": "images/a.png", "url": "/a.png"}],
+                    "options": [{"label": "A", "content": "![](images/a.png)"}, {"label": "B", "content": "文字"}],
+                    "imagePlacements": placements,
+                }
+            ]
+        }
+
+        with patch.dict("os.environ", {"ENABLE_IMPORT_SYNC_AI_ENRICH": "false"}):
+            imported = build_import_questions(task, outputs, "")[0]
+        banked = bank_question_from_import(task, imported)
+
+        self.assertEqual(placements, imported["imagePlacements"])
+        self.assertEqual(placements, banked["imagePlacements"])
+
     def test_build_import_questions_keeps_choice_option_images_out_of_stem(self):
         task = {"stage": "初中", "subject": "数学", "grade": "七年级", "title": "测试卷"}
         images = [

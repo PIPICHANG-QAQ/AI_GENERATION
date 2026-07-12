@@ -130,6 +130,40 @@ export type QuestionImage = {
   raw?: JsonObject;
 };
 
+export type ImagePlacementKind =
+  | "stem"
+  | "option"
+  | "subquestion"
+  | "shared"
+  | "answer"
+  | "analysis"
+  | "unassigned"
+  | "decoration";
+
+export type QuestionImagePlacement = {
+  placementId: string;
+  imageId: string;
+  target: {
+    kind: ImagePlacementKind;
+    optionLabel?: string;
+    subQuestionId?: string;
+  };
+  order: number;
+  sourceEvidence: {
+    markdownStart?: number;
+    markdownEnd?: number;
+    pageIndex?: number;
+    bbox?: number[];
+  };
+  inference: {
+    method: "explicit-offset" | "geometry" | "rule" | "multimodal" | "human";
+    confidence: number;
+    reasons: string[];
+    alternatives?: JsonObject[];
+  };
+  reviewStatus: "auto" | "needs_review" | "confirmed" | "overridden";
+};
+
 export type QuestionImageLibrary = {
   items: QuestionImage[];
 };
@@ -197,6 +231,7 @@ export type QuestionChild = {
   analysis?: string;
   options?: QuestionOption[];
   images?: QuestionImage[];
+  imagePlacements?: QuestionImagePlacement[];
   raw?: JsonObject;
 };
 
@@ -242,6 +277,7 @@ export type ProcessedQuestion = {
   options: QuestionOption[];
   children: QuestionChild[];
   images: QuestionImage[];
+  imagePlacements?: QuestionImagePlacement[];
   knowledgePointIdCandidates?: string[];
   knowledgePointCandidates?: string[];
   difficultyCandidate?: string;

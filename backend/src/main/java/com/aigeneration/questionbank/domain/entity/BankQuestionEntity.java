@@ -36,6 +36,7 @@ public class BankQuestionEntity {
     private String difficulty;
     private Double score;
     private String imagesJson;
+    private String imagePlacementsJson;
     private String optionsJson;
     private String childrenJson;
     private LocalDateTime createdAt;
@@ -305,6 +306,10 @@ public class BankQuestionEntity {
      * @param imagesJson imagesJson 字段值
      */
     public void setImagesJson(String imagesJson) { this.imagesJson = imagesJson; }
+    /** @return 显式题图归属 JSON。 */
+    public String getImagePlacementsJson() { return imagePlacementsJson; }
+    /** @param imagePlacementsJson 显式题图归属 JSON。 */
+    public void setImagePlacementsJson(String imagePlacementsJson) { this.imagePlacementsJson = imagePlacementsJson; }
     /**
      * 获取 optionsJson 字段值。
      *

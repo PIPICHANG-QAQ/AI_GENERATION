@@ -114,15 +114,15 @@ def reconcile_image_placements(
     """Corroborate placements with bbox geometry without overriding explicit offsets."""
     reconciled = deepcopy(placements)
     labels = option_label_nodes(layout_items)
-    images_by_ref = {
-        normalize_asset_path(str(item.get("imageRef") or "")): item
+    image_nodes = [
+        item
         for item in layout_items
         if isinstance(item, dict) and str(item.get("imageRef") or "").strip()
-    }
+    ]
     conflict_count = 0
     for placement in reconciled:
         image_id = normalize_asset_path(str(placement.get("imageId") or ""))
-        image_node = images_by_ref.get(image_id)
+        image_node = unique_layout_image_node(image_id, image_nodes)
         candidate = geometry_option_candidate(image_node, labels)
         if candidate is None:
             continue
@@ -180,6 +180,24 @@ def reconcile_image_placements(
         "conflictCount": conflict_count,
         "unassignedCount": unassigned_count,
     }
+
+
+def unique_layout_image_node(image_id: str, image_nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Match full vs provider-relative paths only when the suffix result is unique."""
+    normalized_id = normalize_asset_path(image_id)
+    exact = [
+        item
+        for item in image_nodes
+        if normalize_asset_path(str(item.get("imageRef") or "")) == normalized_id
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    suffix = []
+    for item in image_nodes:
+        ref = normalize_asset_path(str(item.get("imageRef") or ""))
+        if ref and (normalized_id.endswith(f"/{ref}") or ref.endswith(f"/{normalized_id}")):
+            suffix.append(item)
+    return suffix[0] if len(suffix) == 1 else None
 
 
 def reconcile_structure_image_placements(
@@ -346,6 +364,8 @@ def validate_image_placements(
             errors.append(f"题图放置引用的资源不存在：{image_id or '<empty>'}")
         if kind == "unassigned":
             warnings.append(f"题图尚未归属：{image_id}")
+        elif placement.get("reviewStatus") == "needs_review":
+            warnings.append(f"题图归属需要人工复核：{image_id}")
         if kind not in NON_EXCLUSIVE_TARGET_KINDS and confidence >= 0.9:
             exclusive_owners.setdefault(image_id, []).append(str(placement.get("placementId") or kind))
 

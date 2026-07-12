@@ -70,7 +70,7 @@ class ImagePlacementTest(unittest.TestCase):
         self.assertEqual(0, summary["unassignedCount"])
 
     def test_geometry_conflict_does_not_override_explicit_offset(self):
-        placements = [self._placement("p1", "images/a.png", "option", 0.99, option_label="A")]
+        placements = [self._placement("p1", "paper/auto/images/a.png", "option", 0.99, option_label="A")]
         layout_items = [
             {"type": "text", "text": "A.", "pageIndex": 0, "bbox": [100, 100, 140, 130]},
             {"type": "text", "text": "B.", "pageIndex": 0, "bbox": [500, 100, 540, 130]},

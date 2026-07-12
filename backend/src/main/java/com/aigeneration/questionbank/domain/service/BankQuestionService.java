@@ -240,6 +240,7 @@ public class BankQuestionService {
         item.put("difficulty", value(entity.getDifficulty(), "medium"));
         item.put("score", entity.getScore() == null ? 0 : entity.getScore());
         item.put("images", json.readList(entity.getImagesJson()));
+        item.put("imagePlacements", json.readList(entity.getImagePlacementsJson()));
         item.put("options", json.readList(entity.getOptionsJson()));
         List<Object> children = json.readList(entity.getChildrenJson());
         item.put("children", children);
@@ -314,6 +315,7 @@ public class BankQuestionService {
         entity.setDifficulty(value(text(payload.get("difficulty")), "medium"));
         entity.setScore(doubleValue(payload.get("score")));
         entity.setImagesJson(json.write(payload.get("images")));
+        entity.setImagePlacementsJson(json.write(payload.get("imagePlacements")));
         entity.setOptionsJson(json.write(payload.get("options")));
         entity.setChildrenJson(json.write(subQuestions));
     }

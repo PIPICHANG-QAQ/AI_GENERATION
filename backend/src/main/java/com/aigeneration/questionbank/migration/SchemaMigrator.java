@@ -55,6 +55,8 @@ public class SchemaMigrator {
         addColumnIfMissing("java_callback_events", "max_retry_count", "INT");
         addColumnIfMissing("java_callback_events", "next_retry_at", "TIMESTAMP");
         addColumnIfMissing("java_papers", "sub_selections_json", "TEXT");
+        addColumnIfMissing("java_import_questions", "image_placements_json", "TEXT");
+        addColumnIfMissing("java_bank_questions", "image_placements_json", "TEXT");
     }
 
     /**
@@ -78,6 +80,7 @@ public class SchemaMigrator {
                   difficulty VARCHAR(40),
                   score DOUBLE,
                   images_json TEXT,
+                  image_placements_json TEXT,
                   options_json TEXT,
                   children_json TEXT,
                   math_validation_json TEXT,
