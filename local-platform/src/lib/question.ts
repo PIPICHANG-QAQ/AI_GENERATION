@@ -903,6 +903,7 @@ export function getQuestionMarkdownParts(
   questionType: string,
   fallbackOptions: unknown = [],
   images: QuestionImage[] = [],
+  preferFallbackOptions = false,
 ): { stemMarkdown: string; options: QuestionOption[] } {
   const normalizedMarkdown = normalizeQuestionImageRefsInMarkdown(markdown, images);
   const parsed = splitChoiceOptionsFromMarkdown(normalizedMarkdown, questionType);
@@ -910,6 +911,12 @@ export function getQuestionMarkdownParts(
     questionType === "choice"
       ? normalizeQuestionOptions(fallbackOptions, images)
       : [];
+  if (preferFallbackOptions && normalizedFallbackOptions.length > 0) {
+    return {
+      stemMarkdown: parsed.options.length > 0 ? parsed.stemMarkdown : String(normalizedMarkdown || "").trim(),
+      options: normalizedFallbackOptions,
+    };
+  }
   if (parsed.options.length > 0) {
     const parsedOptions = normalizeQuestionOptions(parsed.options, images);
     return {

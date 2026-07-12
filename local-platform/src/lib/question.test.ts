@@ -35,6 +35,22 @@ describe("question image ownership", () => {
     expect(result.options.map((option) => option.content)).toEqual(["甲", "乙"]);
   });
 
+  it("can strip text-only tasks while preferring structured image options", () => {
+    const result = getQuestionMarkdownParts(
+      "题干\n\\begin{tasks}(2)\n\\task 甲\n\\task 乙\n\\end{tasks}",
+      "choice",
+      [
+        { label: "A", contentMarkdown: "![](图1) 甲" },
+        { label: "B", contentMarkdown: "![](图2) 乙" },
+      ],
+      [{ imageId: "a", label: "图1" }, { imageId: "b", label: "图2" }],
+      true,
+    );
+
+    expect(result.stemMarkdown).toBe("题干");
+    expect(result.options.map((option) => option.content)).toEqual(["![](图1) 甲", "![](图2) 乙"]);
+  });
+
   it("creates reviewable unassigned placements for new images", () => {
     const placements = ensureImagePlacements([{ imageId: "a" }], []);
 

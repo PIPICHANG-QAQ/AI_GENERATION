@@ -1,7 +1,8 @@
 import React from "react";
 import { StatusTag } from "@/components/ui/StatusTag";
 import { MarkdownRenderer } from "@/components/ui/MarkdownRenderer";
-import { getImageKey, getQuestionImages, getQuestionMarkdown, getSubQuestions, type QuestionImage } from "@/lib/question";
+import { getImageKey, getQuestionImages, getSubQuestions, type QuestionImage } from "@/lib/question";
+import { buildQuestionVisualModel, type QuestionVisualIssue } from "@/lib/question-visual-model";
 
 const metaPill = "text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-md border border-border";
 
@@ -17,6 +18,22 @@ function mergeImages(...groups: QuestionImage[][]): QuestionImage[] {
   return merged;
 }
 
+function VisualIssues({ issues }: { issues: QuestionVisualIssue[] }) {
+  if (issues.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-1">
+      {issues.map((issue, index) => (
+        <div
+          key={`${issue.code}-${issue.imageId || issue.optionLabel || index}`}
+          className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1"
+        >
+          {issue.message}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function QuestionPreview({
   question,
   showAnswers = true,
@@ -27,7 +44,8 @@ export function QuestionPreview({
   showMeta?: boolean;
 }) {
   const q = question || {};
-  const questionImages = getQuestionImages(q);
+  const visual = buildQuestionVisualModel(q);
+  const questionImages = visual.images;
   const subQuestions = getSubQuestions(q);
 
   return (
@@ -47,18 +65,21 @@ export function QuestionPreview({
 
       <div className="mb-4">
         <MarkdownRenderer
-          content={getQuestionMarkdown(q)}
+          content={visual.stemMarkdown}
           images={questionImages}
           questionType={q.type}
-          options={q.options}
+          options={visual.options}
           siblingContent={[q.answer, q.analysis]}
+          preferStructuredOptions
         />
+        <VisualIssues issues={visual.issues} />
       </div>
 
       {subQuestions.length > 0 ? (
         <div className="space-y-3 rounded-md border border-primary/15 bg-primary/5 p-3">
           {subQuestions.map((sub: any, subIndex: number) => {
             const subImages = mergeImages(questionImages, getQuestionImages(sub));
+            const subVisual = buildQuestionVisualModel({ ...sub, images: subImages });
             return (
               <div key={sub.id || subIndex} className="rounded-md border border-border bg-card p-3">
                 <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -71,12 +92,14 @@ export function QuestionPreview({
                 </div>
                 <div className="text-sm text-foreground/80">
                   <MarkdownRenderer
-                    content={getQuestionMarkdown(sub)}
-                    images={subImages}
+                    content={subVisual.stemMarkdown}
+                    images={subVisual.images}
                     questionType={sub.type || q.type}
-                    options={sub.options}
+                    options={subVisual.options}
                     siblingContent={[sub.answer, sub.analysis]}
+                    preferStructuredOptions
                   />
+                  <VisualIssues issues={subVisual.issues} />
                 </div>
                 {showAnswers && (
                   <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2">

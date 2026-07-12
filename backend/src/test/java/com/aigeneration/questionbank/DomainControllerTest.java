@@ -1031,6 +1031,58 @@ class DomainControllerTest {
         }
     }
 
+    /** Text-only standardization must not erase structured option image references. */
+    @Test
+    void aiStandardizePreservesOptionImagesWhenResponseHasNoVisualFields() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/worker/ai/standardize", exchange ->
+                writeJson(exchange, Map.of(
+                        "markdown", "清理后的题干",
+                        "standardizer", Map.of("source", "test")
+                ))
+        );
+        server.start();
+        String oldBaseUrl = pythonWorkerProperties.getBaseUrl();
+        boolean oldProxyEnabled = pythonWorkerProperties.isApiProxyEnabled();
+        try {
+            pythonWorkerProperties.setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
+            pythonWorkerProperties.setApiProxyEnabled(true);
+            Map<String, Object> payload = new LinkedHashMap<>(
+                    importTaskPayload("ai_visual_task_1", "待校验", 1, "AI 题图保护任务")
+            );
+            @SuppressWarnings("unchecked")
+            Map<String, Object> question = new LinkedHashMap<>(((List<Map<String, Object>>) payload.get("questions")).get(0));
+            question.put("images", List.of(Map.of("imageId", "img-1", "label", "图1", "url", "/api/a.jpg")));
+            question.put("options", List.of(Map.of(
+                    "label", "A",
+                    "content", "![](图1) 食品夹",
+                    "contentMarkdown", "![](图1) 食品夹"
+            )));
+            question.put("imagePlacements", List.of(Map.of(
+                    "imageId", "img-1",
+                    "target", Map.of("kind", "option", "optionLabel", "A")
+            )));
+            payload.put("questions", List.of(question));
+            importTaskMetadataService.syncMap(payload);
+
+            mockMvc.perform(postJson(
+                            "/api/import-tasks/ai_visual_task_1/questions/ai_visual_task_1_question_1/standardize/ai",
+                            Map.of("markdown", "含图片选项的题干", "writeResult", true)
+                    ))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.question.options[0].contentMarkdown").value("![](图1) 食品夹"));
+
+            var saved = importQuestionSyncService.getQuestion("ai_visual_task_1_question_1");
+            org.assertj.core.api.Assertions.assertThat(saved.getOptionsJson()).contains("图1");
+            org.assertj.core.api.Assertions.assertThat(saved.getImagesJson()).contains("img-1");
+            org.assertj.core.api.Assertions.assertThat(saved.getImagePlacementsJson()).contains("optionLabel");
+        } finally {
+            pythonWorkerProperties.setBaseUrl(oldBaseUrl);
+            pythonWorkerProperties.setApiProxyEnabled(oldProxyEnabled);
+            server.stop(0);
+        }
+    }
+
     /**
      * 验证 AI 标准化默认只返回候选，不直接覆盖导入题编辑内容。
      *

@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 导入题目同步服务。
@@ -163,6 +164,7 @@ public class ImportQuestionSyncService {
      * @param aiResponse AI 原始响应
      * @return 更新后的题目实体；题目不存在或任务不匹配时返回 null
      */
+    @Transactional
     public ImportQuestionEntity updateStandardizedResult(String taskId, String questionId, String markdown, String answer, String analysis, Map<String, Object> aiResponse) {
         ImportQuestionEntity question = questionMapper.selectById(questionId);
         if (question == null || !taskId.equals(question.getTaskId())) {
@@ -185,6 +187,18 @@ public class ImportQuestionSyncService {
         if (!hasSubQuestions && answer != null && !answer.isBlank()) {
             question.setAnswer(answer);
         }
+        List<Object> responseOptions = listValue(aiResponse.get("options"));
+        List<Object> responseImages = listValue(aiResponse.get("images"));
+        List<Object> responsePlacements = listValue(aiResponse.get("imagePlacements"));
+        if (!responseOptions.isEmpty()) {
+            question.setOptionsJson(json.write(responseOptions));
+        }
+        if (!responseImages.isEmpty()) {
+            question.setImagesJson(json.write(responseImages));
+        }
+        if (!responsePlacements.isEmpty()) {
+            question.setImagePlacementsJson(json.write(responsePlacements));
+        }
         Map<String, Object> raw = json.readMap(question.getRawJson());
         raw.put("aiLastStandardizeResponse", aiResponse);
         raw.put("manualMarkdown", question.getManualMarkdown());
@@ -192,9 +206,15 @@ public class ImportQuestionSyncService {
         raw.put("answer", question.getAnswer());
         raw.put("children", children);
         raw.put("subQuestions", children);
+        raw.put("options", json.readList(question.getOptionsJson()));
+        raw.put("images", json.readList(question.getImagesJson()));
+        raw.put("imagePlacements", json.readList(question.getImagePlacementsJson()));
         question.setRawJson(json.write(raw));
         question.setUpdatedAt(LocalDateTime.now());
         questionMapper.updateById(question);
+        if (!responseImages.isEmpty()) {
+            syncImages(taskId, questionId, responseImages, question.getUpdatedAt());
+        }
         return question;
     }
 

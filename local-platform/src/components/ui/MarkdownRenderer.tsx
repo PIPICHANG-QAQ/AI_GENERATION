@@ -13,32 +13,34 @@ import {
   type QuestionOption,
 } from "@/lib/question";
 
+function MarkdownImage({ src, alt, images, ...props }: any & { images: QuestionImage[] }) {
+  const [failed, setFailed] = React.useState(false);
+  const resolvedSrc = questionImageSrc(resolveImageSrc(src, images));
+  const label = alt || src?.split("/").pop() || "未知图片";
+  if (failed || !resolvedSrc) {
+    return (
+      <span className="not-prose inline-block mt-2 text-xs text-destructive bg-destructive/10 px-2 py-1 rounded-md border border-destructive/20">
+        图片加载失败: {label}
+      </span>
+    );
+  }
+  return (
+    <span className="not-prose block max-w-full my-2">
+      <img
+        {...props}
+        src={resolvedSrc}
+        alt={alt || "图片"}
+        className="max-w-full max-h-[420px] h-auto rounded-md border border-border/60 bg-card cursor-pointer hover:opacity-90 block object-contain"
+        onClick={() => window.open(resolvedSrc, "_blank")}
+        onError={() => setFailed(true)}
+      />
+    </span>
+  );
+}
+
 function markdownComponents(images: QuestionImage[] = []) {
   return {
-    img: ({ node, src, alt, ...props }: any) => {
-      const resolvedSrc = questionImageSrc(resolveImageSrc(src, images));
-      const label = alt || src?.split("/").pop() || "未知图片";
-      return (
-        <span className="not-prose block max-w-full my-2">
-          <img
-            {...props}
-            src={resolvedSrc}
-            alt={alt || "图片"}
-            className="max-w-full max-h-[420px] h-auto rounded-md border border-border/60 bg-card cursor-pointer hover:opacity-90 block object-contain"
-            onClick={() => resolvedSrc && window.open(resolvedSrc, "_blank")}
-            onError={(e) => {
-              const target = e.target as HTMLImageElement;
-              target.style.display = "none";
-              const span = target.nextElementSibling as HTMLSpanElement;
-              if (span) span.style.display = "inline-block";
-            }}
-          />
-          <span className="hidden mt-2 text-xs text-destructive bg-destructive/10 px-2 py-1 rounded-md border border-destructive/20">
-            图片加载失败: {label}
-          </span>
-        </span>
-      );
-    },
+    img: ({ node, ...props }: any) => <MarkdownImage {...props} images={images} />,
   };
 }
 
@@ -223,6 +225,7 @@ export function MarkdownRenderer({
   options,
   siblingContent = [],
   showUnreferenced = false,
+  preferStructuredOptions = false,
 }: {
   content: string;
   images?: QuestionImage[];
@@ -230,10 +233,17 @@ export function MarkdownRenderer({
   options?: QuestionOption[] | unknown[];
   siblingContent?: string[];
   showUnreferenced?: boolean;
+  preferStructuredOptions?: boolean;
 }) {
   const raw = content || "";
   const imageList = images || [];
-  const choiceParts = getQuestionMarkdownParts(raw, questionType || "", options, imageList);
+  const choiceParts = getQuestionMarkdownParts(
+    raw,
+    questionType || "",
+    options,
+    imageList,
+    preferStructuredOptions,
+  );
   const shouldUseChoiceParts = choiceParts.options.length > 0 && (questionType === "choice" || raw.includes("\\task"));
   const renderContent = shouldUseChoiceParts ? choiceParts.stemMarkdown : choiceParts.stemMarkdown || raw;
   const segments = splitTasks(renderContent);
