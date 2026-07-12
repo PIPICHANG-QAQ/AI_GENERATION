@@ -48,6 +48,15 @@ public class ImportTaskCanonicalizationService {
         return worker.postJson(WORKER_PREVIEW_PATH, Map.of("task", currentTaskPayload(task)));
     }
 
+    /** Fail fast when duplicate/question-ownership review blocks a global AI batch. */
+    public Map<String, Object> requireReadyForStandardization(String taskId) {
+        Map<String, Object> result = preview(taskId);
+        if (result.get("blockingIssues") instanceof List<?> issues && !issues.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Please resolve question structure before standardization");
+        }
+        return result;
+    }
+
     /** Apply a fresh preview only when its content token matches the user's preview token. */
     @Transactional
     public Map<String, Object> apply(String taskId, Map<String, Object> payload) {

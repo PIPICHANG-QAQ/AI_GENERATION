@@ -112,6 +112,9 @@ public class PythonWorkerProxyFilter extends OncePerRequestFilter {
                 && path.matches("^/api/import-tasks/[^/]+/canonicalization/(preview|apply|rollback)$")) {
             return true;
         }
+        if (path.matches("^/api/import-tasks/[^/]+/standardization-jobs(?:/[^/]+(?:/(?:cancel|resume|retry-failed))?)?$")) {
+            return true;
+        }
         if ("GET".equalsIgnoreCase(method)
                 && (path.equals("/api/import-tasks")
                 || path.matches("^/api/import-tasks/[^/]+$")

@@ -75,6 +75,20 @@ CREATE TABLE IF NOT EXISTS java_import_task_snapshots (
   created_at TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS java_standardization_batch_jobs (
+  id VARCHAR(80) PRIMARY KEY, task_id VARCHAR(80) NOT NULL, status VARCHAR(40) NOT NULL,
+  total_questions INT, total_items INT, completed_questions INT, completed_items INT,
+  success_items INT, failed_items INT, max_concurrency INT, cancel_requested_at TIMESTAMP,
+  created_at TIMESTAMP, started_at TIMESTAMP, finished_at TIMESTAMP, updated_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS java_standardization_batch_items (
+  id VARCHAR(80) PRIMARY KEY, job_id VARCHAR(80) NOT NULL, question_id VARCHAR(80) NOT NULL,
+  status VARCHAR(40) NOT NULL, input_hash VARCHAR(80), attempt_count INT,
+  total_items INT, completed_items INT, success_items INT, failed_items INT, error_message TEXT,
+  created_at TIMESTAMP, started_at TIMESTAMP, finished_at TIMESTAMP, updated_at TIMESTAMP
+);
+
 -- 导入题表：保存导入任务拆出的题目快照、人工 Markdown、AI 回写和公式校验结果。
 CREATE TABLE IF NOT EXISTS java_import_questions (
   id VARCHAR(80) PRIMARY KEY,
