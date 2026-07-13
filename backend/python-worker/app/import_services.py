@@ -324,6 +324,7 @@ def build_structure_diffs(
             {
                 "questionId": str(question.get("id") or ""),
                 "sourceQuestionId": source_id,
+                "number": question.get("number"),
                 "optionCountBefore": before_count,
                 "optionCountAfter": after_count,
                 "placements": placement_diffs,

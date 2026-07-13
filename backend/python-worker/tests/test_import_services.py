@@ -198,6 +198,7 @@ class ImportServicesTest(unittest.TestCase):
             },
         )
         diff = result["structureDiffs"][0]
+        self.assertEqual(1, diff["number"])
         self.assertEqual(3, diff["optionCountBefore"])
         self.assertEqual(4, diff["optionCountAfter"])
         self.assertTrue(any(item["imageId"] == "images/d.png" and item["newTarget"]["optionLabel"] == "D" for item in diff["placements"]))

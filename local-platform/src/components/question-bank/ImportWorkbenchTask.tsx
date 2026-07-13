@@ -27,6 +27,7 @@ import { QuestionCard } from "./QuestionCard";
 import { getQuestionImages, getQuestionMarkdown, getSourceFileInfo, getSubQuestions } from "@/lib/question";
 import { aiAnalysisFallbackMessage, buildSubQuestionAnalysisPayload, subAnalysisPatch } from "@/lib/sub-question-ai";
 import { formatStandardizationProgress } from "@/lib/standardization-job";
+import { canonicalStructureReview } from "@/lib/placement-review";
 
 type OcrFlowStepStatus = "pending" | "running" | "success" | "failed" | "skipped" | string;
 
@@ -561,8 +562,13 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
     try {
       const preview: any = await api.previewCanonicalization(taskId);
       setCanonicalPreview(preview);
+      const structureReview = canonicalStructureReview(preview);
       if (Array.isArray(preview?.blockingIssues) && preview.blockingIssues.length > 0) {
         toast({ title: "请先整理题目结构", description: "存在重复题或题图归属冲突，需要人工复核", variant: "destructive" });
+        return;
+      }
+      if (structureReview.changed) {
+        toast({ title: "请先确认题目结构调整", description: "检测到选项数量或题图归属变化" });
         return;
       }
       const currentQuestionCount = Array.isArray(task?.questions) ? task.questions.length : 0;
@@ -1032,15 +1038,29 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
         </div>
       )}
 
-      {canonicalPreview?.summary?.mergedQuestionCount > 0 && (
+      {canonicalPreview && (
         <div className="shrink-0 px-4 py-2 bg-amber-50 border-b border-amber-200 flex items-center justify-between gap-3 text-sm text-amber-900">
-          <span>
-            整理题目结构：{canonicalPreview.summary.beforeQuestionCount} → {canonicalPreview.summary.afterQuestionCount} 道，
-            将合并 {canonicalPreview.summary.mergedQuestionCount} 道答案区重复题。
-          </span>
+          <div>
+            <div>
+              整理题目结构：{canonicalPreview.summary?.beforeQuestionCount} → {canonicalPreview.summary?.afterQuestionCount} 道
+              {canonicalPreview.summary?.mergedQuestionCount > 0 ? `，将合并 ${canonicalPreview.summary.mergedQuestionCount} 道答案区重复题` : ""}。
+            </div>
+            {canonicalStructureReview(canonicalPreview).lines.slice(0, 4).map((line) => (
+              <div key={line} className="mt-1 text-xs">{line}</div>
+            ))}
+            {canonicalStructureReview(canonicalPreview).blocking && (
+              <div className="mt-1 text-xs font-medium">存在题图归属阻断项，只能人工复核，不能直接应用。</div>
+            )}
+          </div>
           <div className="flex gap-2">
             <Button size="sm" variant="outline" onClick={() => setCanonicalPreview(null)}>暂不处理</Button>
-            <Button size="sm" onClick={() => void applyCanonicalPreview()}>应用整理</Button>
+            <Button
+              size="sm"
+              onClick={() => void applyCanonicalPreview()}
+              disabled={canonicalStructureReview(canonicalPreview).blocking}
+            >
+              应用整理
+            </Button>
           </div>
         </div>
       )}

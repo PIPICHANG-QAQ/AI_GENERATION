@@ -58,6 +58,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { Wand2, Code, Save, Eye, Pencil, Database, CheckCircle2, ImageIcon, Plus, Trash2 } from "lucide-react";
 import { QuestionPreview } from "./QuestionPreview";
+import { placementReview } from "@/lib/placement-review";
 
 const selectClass =
   "w-full h-9 rounded-md border border-input bg-card px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 disabled:cursor-not-allowed";
@@ -110,7 +111,8 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   const [confirmDeleteIndex, setConfirmDeleteIndex] = useState<number | null>(null);
   const readOnly = false;
   const hasSubQuestions = subForms.length > 0;
-  const canBank = isVerified || isBanked;
+  const placementState = placementReview(question);
+  const canBank = (isVerified || isBanked) && !placementState.blocking;
 
   const { data: imageLibraryData } = useQuery({
     queryKey: ["importTaskImageLibrary", taskId],
@@ -549,6 +551,12 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
       </div>
 
       <div className="p-4">
+        {placementState.blocking && (
+          <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <div className="font-medium">题图归属待复核，暂不能入库</div>
+            <div className="mt-1">{placementState.labels.join("；")}</div>
+          </div>
+        )}
         {mode === "preview" && (
           <div className="space-y-3">
             {!readOnly && (
