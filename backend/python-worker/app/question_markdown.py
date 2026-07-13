@@ -267,6 +267,10 @@ def detect_choice_option_markers(markdown: str) -> list[dict[str, Any]]:
     )
     glued_punctuated_pattern = re.compile(rf"(?<=[\u4e00-\u9fff）)\]}}])([B-Hb-hＢ-Ｈｂ-ｈ])[\.．、:：]\s*")
     bare_line_pattern = re.compile(rf"(^|[\r\n]+)\s*(?:[-*+]\s*)?({label_pattern})(?=\s+)")
+    weak_inline_pattern = re.compile(
+        rf"(?<=[\u4e00-\u9fff）)\]}}])[ \t　]+({label_pattern})[ \t]*"
+        rf"(?=\r?\n(?:[ \t]*\r?\n)*[ \t]*(?:!\[|<!--\s*page-break))"
+    )
     markers: list[dict[str, Any]] = []
     for match in punctuated_pattern.finditer(markdown):
         label = normalize_choice_label(match.group(2) or match.group(3) or "")
@@ -277,6 +281,8 @@ def detect_choice_option_markers(markdown: str) -> list[dict[str, Any]]:
                 "label": label,
                 "marker_start": match.start() + len(match.group(1) or ""),
                 "content_start": match.end(),
+                "strength": "strong",
+                "reasons": ["punctuated-option-label"],
             }
         )
     for match in glued_punctuated_pattern.finditer(markdown):
@@ -288,6 +294,8 @@ def detect_choice_option_markers(markdown: str) -> list[dict[str, Any]]:
                 "label": label,
                 "marker_start": match.start(1),
                 "content_start": match.end(),
+                "strength": "strong",
+                "reasons": ["glued-punctuated-option-label"],
             }
         )
     for match in bare_line_pattern.finditer(markdown):
@@ -299,12 +307,44 @@ def detect_choice_option_markers(markdown: str) -> list[dict[str, Any]]:
                 "label": label,
                 "marker_start": match.start() + len(match.group(1) or ""),
                 "content_start": match.end(),
+                "strength": "strong",
+                "reasons": ["bare-line-option-label"],
+            }
+        )
+    strong_markers = sorted(markers, key=lambda item: (item["marker_start"], item["content_start"]))
+    for match in weak_inline_pattern.finditer(markdown):
+        label = normalize_choice_label(match.group(1) or "")
+        if not label or not has_expected_strong_prefix(strong_markers, label, match.start(1)):
+            continue
+        markers.append(
+            {
+                "label": label,
+                "marker_start": match.start(1),
+                "content_start": match.end(),
+                "strength": "weak",
+                "reasons": ["embedded-expected-label", "followed-by-layout-block"],
             }
         )
     deduped: dict[tuple[int, str], dict[str, Any]] = {}
     for marker in markers:
         deduped[(int(marker["marker_start"]), str(marker["label"]))] = marker
     return sorted(deduped.values(), key=lambda item: (item["marker_start"], item["content_start"]))
+
+
+def has_expected_strong_prefix(markers: list[dict[str, Any]], label: str, before: int) -> bool:
+    """弱标签仅在已有 A 起始的连续强标签链后生效。"""
+    preceding = [marker for marker in markers if int(marker.get("marker_start") or 0) < before]
+    for index, marker in enumerate(preceding):
+        if marker.get("label") != "A":
+            continue
+        expected = "B"
+        for current in preceding[index + 1 :]:
+            if current.get("label") != expected:
+                break
+            expected = chr(ord(expected) + 1)
+        if expected == label:
+            return True
+    return False
 
 
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*]\s*\(\s*<?([^>)\s]+)>?(?:\s+['\"][^)]*['\"])?\s*\)")

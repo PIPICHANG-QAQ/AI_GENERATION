@@ -13,6 +13,28 @@ from app.question_markdown import question_to_edit_markdown
 
 
 class QuestionBoundaryTest(unittest.TestCase):
+    def test_embedded_final_option_label_restores_stable_four_choice_boundary(self):
+        markdown = """一、选择题
+1. 如图所示，选择正确的一项（ ）
+A. 第一项
+![](images/a.png)
+B. 第二项
+![](images/b.png)
+C. 第三项 D
+
+![](images/d.png)
+第四项
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+        confidence = evaluate_boundary_confidence(markdown, boundaries, [])
+
+        self.assertEqual(
+            ["A", "B", "C", "D"],
+            [option["label"] for option in boundaries["questions"][0]["options"]],
+        )
+        self.assertNotIn("unstable-choice-options", confidence["reasons"])
+
     def test_build_structure_preserves_explicit_option_image_placements(self):
         markdown = """一、选择题
 1. 请选择正确图形
