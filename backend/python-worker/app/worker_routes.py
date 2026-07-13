@@ -9,7 +9,7 @@ from app.ocr_processing import *
 from app.import_services import *
 from app.export_service import *
 from app.ocr_execution import *
-from app.question_layout import attach_paper_layout, render_source_page
+from app.question_layout import attach_paper_layout, load_image_placement_evidence, render_source_page
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
@@ -79,9 +79,11 @@ def preview_import_task_canonicalization(payload: dict[str, Any]) -> dict[str, A
     if not paper_job:
         raise HTTPException(status_code=404, detail="Paper OCR job not found")
     outputs = paper_job.get("outputs") if isinstance(paper_job.get("outputs"), dict) else {}
+    paper_job_id = str(paper_job.get("jobId") or task.get("paperOcrJobId") or "").strip()
+    layout_items = load_image_placement_evidence(OUTPUT_ROOT / paper_job_id, str(outputs.get("markdown") or ""))
     answer_job = safe_read_job(task.get("answerOcrJobId")) if task.get("answerOcrJobId") else None
     answer_context = str(((answer_job or {}).get("outputs") or {}).get("markdown") or "")
-    preview = canonicalize_import_outputs(task, outputs, answer_context)
+    preview = canonicalize_import_outputs(task, outputs, answer_context, layout_items=layout_items)
     preview_task = copy.deepcopy(task)
     preview_task["questions"] = preview["questions"]
     preview_task["canonicalization"] = preview["canonicalization"]

@@ -144,6 +144,64 @@ class ImportServicesTest(unittest.TestCase):
             result["canonicalization"]["idMap"],
         )
 
+    def test_canonicalization_preview_recovers_option_and_layout_placement_diffs(self):
+        markdown = "1. 选择正确图片"
+        images = [{"path": f"images/{label.lower()}.png"} for label in "ABCD"]
+        outputs = {
+            "markdown": markdown,
+            "sections": [
+                {
+                    "questions": [
+                        {
+                            "id": "q_1",
+                            "number": 1,
+                            "type": "choice",
+                            "stemMarkdown": "选择正确图片",
+                            "sourceEvidence": {"start": 0, "end": len(markdown)},
+                            "options": [
+                                {"label": "A", "content": "甲\n![](images/a.png)"},
+                                {"label": "B", "content": "乙\n![](images/b.png)"},
+                                {"label": "C", "content": "![](images/c.png)\n丙 D\n\n![](images/d.png)\n丁"},
+                            ],
+                            "images": images,
+                            "imagePlacements": [
+                                {"placementId": "p-a", "imageId": "images/a.png", "target": {"kind": "option", "optionLabel": "A"}, "inference": {"method": "explicit-offset", "confidence": 0.99, "reasons": []}},
+                                {"placementId": "p-b", "imageId": "images/b.png", "target": {"kind": "option", "optionLabel": "B"}, "inference": {"method": "explicit-offset", "confidence": 0.99, "reasons": []}},
+                                {"placementId": "p-c", "imageId": "images/c.png", "target": {"kind": "option", "optionLabel": "C"}, "inference": {"method": "explicit-offset", "confidence": 0.99, "reasons": []}},
+                                {"placementId": "p-d", "imageId": "images/d.png", "target": {"kind": "option", "optionLabel": "C"}, "inference": {"method": "explicit-offset", "confidence": 0.99, "reasons": []}},
+                            ],
+                        }
+                    ]
+                }
+            ],
+        }
+        layout_items = []
+        for index, label in enumerate("ABCD"):
+            x = 100 if index % 2 == 0 else 500
+            y = 100 if index < 2 else 300
+            layout_items.extend(
+                [
+                    {"type": "text", "text": f"{label}.", "pageIndex": 0, "bbox": [x, y, x + 40, y + 30]},
+                    {"type": "image", "imageRef": f"images/{label.lower()}.png", "pageIndex": 0, "bbox": [x + 20, y + 40, x + 200, y + 160]},
+                ]
+            )
+
+        result = canonicalize_import_outputs({"id": "task-1"}, outputs, layout_items=layout_items)
+
+        question = result["questions"][0]
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in question["options"]])
+        self.assertEqual(
+            {"images/a.png": "A", "images/b.png": "B", "images/c.png": "C", "images/d.png": "D"},
+            {
+                placement["imageId"]: placement["target"]["optionLabel"]
+                for placement in question["imagePlacements"]
+            },
+        )
+        diff = result["structureDiffs"][0]
+        self.assertEqual(3, diff["optionCountBefore"])
+        self.assertEqual(4, diff["optionCountAfter"])
+        self.assertTrue(any(item["imageId"] == "images/d.png" and item["newTarget"]["optionLabel"] == "D" for item in diff["placements"]))
+
     def test_standardize_repairs_fragmented_latex_delimiters_without_llm(self):
         self.assertIn("展示公式内部嵌套了单个 $ 分隔符", detect_severe_latex_issues(BROKEN_MARKDOWN))
         self.assertIn("行内公式被数学运算符切断", detect_severe_latex_issues(BROKEN_MARKDOWN))

@@ -15,6 +15,7 @@ from app.question_markdown import *
 from app.ocr_processing import *
 from app.question_boundary import detect_sub_question_boundaries, strip_sub_label
 from app.question_canonicalization import apply_canonicalization, build_canonicalization_plan
+from app.image_placement import validate_image_placements
 
 AI_STANDARDIZE_CACHE_VERSION = "2026-07-09-choice-image-ref-guard-v1"
 AI_STANDARDIZE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -133,15 +134,27 @@ def canonicalize_import_outputs(
     task: dict[str, Any],
     outputs: dict[str, Any],
     answer_context: str = "",
+    *,
+    layout_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic, read-only import preview from canonical OCR questions."""
     task_copy = copy.deepcopy(task) if isinstance(task, dict) else {}
     outputs_copy = copy.deepcopy(outputs) if isinstance(outputs, dict) else {}
     source_questions = unique_source_question_ids(top_level_ocr_questions(outputs_copy))
+    original_sources = copy.deepcopy(source_questions)
+    source_questions = [recover_incomplete_choice_options(question) for question in source_questions]
     markdown = str(outputs_copy.get("markdown") or "")
     plan = build_canonicalization_plan(markdown, source_questions)
     applied = apply_canonicalization(source_questions, plan)
     canonical_sources = applied["questions"]
+    if layout_items:
+        layout_structure = {
+            "sections": [{"id": "canonical", "questions": canonical_sources}],
+            "questions": canonical_sources,
+        }
+        reconcile_structure_image_placements(layout_structure, layout_items)
+    for source in canonical_sources:
+        refresh_image_placement_validation(source)
 
     canonical_outputs = copy.deepcopy(outputs_copy)
     canonical_outputs["questions"] = canonical_sources
@@ -178,6 +191,7 @@ def canonicalize_import_outputs(
         if isinstance(existing, dict):
             question = preserve_existing_import_question(existing, question)
             import_questions[index - 1] = question
+        refresh_image_placement_validation(question)
         source = canonical_by_id.get(source_id)
         if isinstance(source, dict):
             merged_sources = [str(value) for value in source.get("mergedFromQuestionIds") or [] if str(value)]
@@ -197,6 +211,18 @@ def canonicalize_import_outputs(
         )
         import_id_map[source_import_id] = canonical_import_id
 
+    structure_diffs = build_structure_diffs(original_sources, task_copy.get("questions") or [], import_questions)
+    placement_blocking_issues = [
+        {
+            "type": "image-placement-validation",
+            "questionId": str(question.get("id") or ""),
+            "reasons": copy.deepcopy((question.get("imagePlacementValidation") or {}).get("blockingReasons") or []),
+        }
+        for question in import_questions
+        if isinstance(question.get("imagePlacementValidation"), dict)
+        and question["imagePlacementValidation"].get("blocking")
+    ]
+    blocking_issues = [*copy.deepcopy(plan.get("blockingIssues") or []), *placement_blocking_issues]
     summary = {
         "beforeQuestionCount": len(source_questions),
         "afterQuestionCount": len(import_questions),
@@ -206,7 +232,7 @@ def canonicalize_import_outputs(
         **copy.deepcopy(plan),
         "sourceIdMap": copy.deepcopy(plan.get("idMap") or {}),
         "idMap": import_id_map,
-        "requiresReview": bool(plan.get("reviewItems")),
+        "requiresReview": bool(plan.get("reviewItems") or blocking_issues),
         "summary": summary,
     }
     token_payload = {
@@ -224,7 +250,95 @@ def canonicalize_import_outputs(
         "canonicalization": canonicalization,
         "automaticMerges": copy.deepcopy(plan.get("automaticMerges") or []),
         "reviewItems": copy.deepcopy(plan.get("reviewItems") or []),
-        "blockingIssues": copy.deepcopy(plan.get("blockingIssues") or []),
+        "blockingIssues": blocking_issues,
+        "structureDiffs": structure_diffs,
+    }
+
+
+def recover_incomplete_choice_options(question: dict[str, Any]) -> dict[str, Any]:
+    """Recover an expected trailing option from saved OCR option text."""
+    recovered = copy.deepcopy(question)
+    options = [item for item in recovered.get("options") or [] if isinstance(item, dict)]
+    if str(recovered.get("type") or "") != "choice" or len(options) < 2 or len(options) >= 4:
+        return recovered
+    lines = [str(recovered.get("stemMarkdown") or "")]
+    for index, option in enumerate(options):
+        label = str(option.get("label") or chr(65 + index)).strip().upper()
+        content = str(option.get("content") or option.get("contentMarkdown") or "")
+        lines.append(f"{label}. {content}")
+    stem, parsed_options = split_choice_options("\n".join(lines), "choice")
+    if len(parsed_options) > len(options):
+        recovered["stemMarkdown"] = stem
+        recovered["options"] = parsed_options
+    return recovered
+
+
+def refresh_image_placement_validation(question: dict[str, Any]) -> None:
+    placements = question.get("imagePlacements")
+    if not isinstance(placements, list):
+        return
+    question["imagePlacementValidation"] = validate_image_placements(
+        [image for image in question.get("images") or [] if isinstance(image, dict)],
+        placements,
+        question_type=str(question.get("type") or "unknown"),
+        option_count=len(question.get("options") or []),
+    )
+
+
+def build_structure_diffs(
+    original_sources: list[dict[str, Any]],
+    existing_questions: list[dict[str, Any]],
+    generated_questions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    original_by_source = {str(item.get("id") or ""): item for item in original_sources if isinstance(item, dict)}
+    existing_by_source = {
+        str(item.get("sourceQuestionId") or ""): item
+        for item in existing_questions
+        if isinstance(item, dict) and str(item.get("sourceQuestionId") or "")
+    }
+    diffs: list[dict[str, Any]] = []
+    for question in generated_questions:
+        source_id = str(question.get("sourceQuestionId") or "")
+        before = existing_by_source.get(source_id) or original_by_source.get(source_id) or {}
+        before_placements = placement_by_image(before.get("imagePlacements"))
+        after_placements = placement_by_image(question.get("imagePlacements"))
+        placement_diffs = []
+        for image_id in sorted(set(before_placements) | set(after_placements)):
+            old = before_placements.get(image_id) or {}
+            new = after_placements.get(image_id) or {}
+            placement_diffs.append(
+                {
+                    "imageId": image_id,
+                    "oldTarget": copy.deepcopy(old.get("target") or {"kind": "unassigned"}),
+                    "newTarget": copy.deepcopy(new.get("target") or {"kind": "unassigned"}),
+                    "confidence": float((new.get("inference") or {}).get("confidence") or 0.0),
+                    "alternatives": copy.deepcopy((new.get("inference") or {}).get("alternatives") or []),
+                }
+            )
+        before_count = len(before.get("options") or [])
+        after_count = len(question.get("options") or [])
+        changed = before_count != after_count or any(
+            item["oldTarget"] != item["newTarget"] for item in placement_diffs
+        )
+        diffs.append(
+            {
+                "questionId": str(question.get("id") or ""),
+                "sourceQuestionId": source_id,
+                "optionCountBefore": before_count,
+                "optionCountAfter": after_count,
+                "placements": placement_diffs,
+                "blockingReasons": copy.deepcopy((question.get("imagePlacementValidation") or {}).get("blockingReasons") or []),
+                "changed": changed,
+            }
+        )
+    return diffs
+
+
+def placement_by_image(value: Any) -> dict[str, dict[str, Any]]:
+    return {
+        normalize_asset_path(str(item.get("imageId") or "")): item
+        for item in value or []
+        if isinstance(item, dict) and normalize_asset_path(str(item.get("imageId") or ""))
     }
 
 
@@ -269,10 +383,39 @@ def preserve_existing_import_question(
     if not existing_children and generated_children:
         merged["subQuestions"] = copy.deepcopy(generated_children)
         merged["children"] = copy.deepcopy(generated_children)
+    for field in ("options", "images"):
+        if generated.get(field):
+            merged[field] = copy.deepcopy(generated[field])
+    if generated.get("imagePlacements"):
+        merged["imagePlacements"] = merge_manual_placements(
+            existing.get("imagePlacements"), generated.get("imagePlacements")
+        )
+    if isinstance(generated.get("imagePlacementValidation"), dict):
+        merged["imagePlacementValidation"] = copy.deepcopy(generated["imagePlacementValidation"])
     merged["id"] = generated.get("id")
     merged["sourceQuestionId"] = generated.get("sourceQuestionId")
     merged["number"] = generated.get("number")
     return merged
+
+
+def merge_manual_placements(existing: Any, generated: Any) -> list[dict[str, Any]]:
+    """Keep confirmed/overridden placements while replacing automatic results."""
+    generated_items = [copy.deepcopy(item) for item in generated or [] if isinstance(item, dict)]
+    manual_by_image = {
+        normalize_asset_path(str(item.get("imageId") or "")): copy.deepcopy(item)
+        for item in existing or []
+        if isinstance(item, dict)
+        and item.get("reviewStatus") in {"confirmed", "overridden"}
+        and normalize_asset_path(str(item.get("imageId") or ""))
+    }
+    output = []
+    seen: set[str] = set()
+    for item in generated_items:
+        image_id = normalize_asset_path(str(item.get("imageId") or ""))
+        output.append(manual_by_image.get(image_id, item))
+        seen.add(image_id)
+    output.extend(item for image_id, item in manual_by_image.items() if image_id not in seen)
+    return output
 
 
 def stable_token_value(value: Any) -> Any:

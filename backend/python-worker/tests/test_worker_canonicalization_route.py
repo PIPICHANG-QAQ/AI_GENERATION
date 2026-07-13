@@ -31,12 +31,13 @@ def test_canonicalization_preview_is_read_only():
         ],
     }
 
-    with patch("app.worker_routes.safe_read_job", return_value={"outputs": outputs}):
-        with patch("app.worker_routes.write_store") as write_store:
-            response = client.post(
-                "/worker/import-tasks/canonicalization/preview",
-                json={"task": task},
-            )
+    with patch("app.worker_routes.safe_read_job", return_value={"jobId": "ocr-1", "outputs": outputs}):
+        with patch("app.worker_routes.load_image_placement_evidence", return_value=[]) as load_layout:
+            with patch("app.worker_routes.write_store") as write_store:
+                response = client.post(
+                    "/worker/import-tasks/canonicalization/preview",
+                    json={"task": task},
+                )
 
     assert response.status_code == 200
     body = response.json()
@@ -47,5 +48,5 @@ def test_canonicalization_preview_is_read_only():
         "mergedQuestionCount": 1,
     }
     assert len(body["questions"]) == 1
+    load_layout.assert_called_once()
     write_store.assert_not_called()
-
