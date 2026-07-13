@@ -453,6 +453,42 @@ $x ^ { 2 } + 4 x + 4 =$ $1 6 x ^ { 2 } + 2 4 x + 9 =$ $9 x ^ { 2 } - 1 2 x + 4 =
         self.assertNotIn("参考答案与试题解析", child["stemMarkdown"])
         self.assertEqual(["images/q28-3.png"], [image["path"] for image in child["images"]])
 
+    def test_trims_split_exam_title_after_last_subquestion_but_keeps_both_images(self):
+        markdown = """## 六、综合题
+37. （6分）某物理兴趣小组设计了如图甲所示的装置。求：
+(1) A 的底面积；
+(2) 两个时刻的压强；
+(3) A 和 B 的重力 $G_A$、$G_B$。
+
+![](images/q37-a.png)
+
+![](images/q37-b.png)
+
+# 2018-2019学年四川省成都市天府新区八年级（下）期末物理试
+
+# 卷
+"""
+        assets = [
+            {"name": "q37-a.png", "path": "images/q37-a.png", "url": "/q37-a.png"},
+            {"name": "q37-b.png", "path": "images/q37-b.png", "url": "/q37-b.png"},
+        ]
+
+        boundaries = detect_local_boundaries(markdown, assets)
+        structured = build_structure_from_boundaries(markdown, boundaries, assets)
+        parent = structured["sections"][0]["questions"][0]
+        child = parent["subQuestions"][2]
+
+        self.assertEqual([], parent["images"])
+        self.assertEqual(
+            ["images/q37-a.png", "images/q37-b.png"],
+            [image["path"] for image in child["images"]],
+        )
+        self.assertIn("A 和 B 的重力", child["stemMarkdown"])
+        self.assertIn("![](图1)", child["stemMarkdown"])
+        self.assertIn("![](图2)", child["stemMarkdown"])
+        self.assertNotIn("2018-2019学年", child["stemMarkdown"])
+        self.assertNotIn("# 卷", child["stemMarkdown"])
+
     def test_trims_overlapping_llm_child_boundaries(self):
         markdown = """## 三、解答题
 21. 已知条件。
