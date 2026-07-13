@@ -63,6 +63,26 @@ class StandardizationRequestFactoryTest {
         assertThat(((Map<?, ?>) request.get("structuredHints")).get("requestPriority")).isEqualTo("retry");
     }
 
+    @Test
+    void placementValidationFromRawSnapshotIsHintedAndHashed() {
+        ImportQuestionEntity question = choiceQuestion();
+        question.setRawJson("""
+                {"imagePlacementValidation":{"blocking":true,
+                 "blockingReasons":["stem_option_geometry_conflict"]}}
+                """);
+
+        Map<String, Object> request = factory.build(question, "题干", "", "global");
+        Map<?, ?> hints = (Map<?, ?>) request.get("structuredHints");
+        Map<?, ?> validation = (Map<?, ?>) hints.get("imagePlacementValidation");
+        String before = request.get("inputHash").toString();
+        question.setRawJson("""
+                {"imagePlacementValidation":{"blocking":false,"blockingReasons":[]}}
+                """);
+
+        assertThat(validation.get("blocking")).isEqualTo(true);
+        assertThat(factory.inputHash(question, "题干", "")).isNotEqualTo(before);
+    }
+
     private ImportQuestionEntity choiceQuestion() {
         ImportQuestionEntity question = new ImportQuestionEntity();
         question.setId("q-2");

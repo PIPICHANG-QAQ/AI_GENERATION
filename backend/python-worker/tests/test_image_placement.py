@@ -159,6 +159,34 @@ class ImagePlacementTest(unittest.TestCase):
         self.assertTrue(any("未归属" in warning for warning in result["warnings"]))
         self.assertTrue(any("没有有效选项" in warning for warning in result["warnings"]))
 
+    def test_validation_blocks_incomplete_four_image_choice_sequence(self):
+        images = [{"path": f"images/{label.lower()}.png"} for label in "ABCD"]
+        placements = [
+            self._placement(f"p-{label}", f"images/{label.lower()}.png", "option", 0.96, option_label=label)
+            for label in "ABC"
+        ]
+        placements.append(self._placement("p-d", "images/d.png", "stem", 0.96))
+
+        result = validate_image_placements(images, placements, question_type="choice", option_count=3)
+
+        self.assertTrue(result["blocking"])
+        self.assertIn("choice_option_sequence_incomplete", result["blockingReasons"])
+        self.assertIn("stem_option_geometry_conflict", result["blockingReasons"])
+        self.assertEqual(4, result["expectedOptionCount"])
+
+    def test_validation_blocks_high_confidence_placement_without_geometry(self):
+        placement = self._placement("p1", "images/a.png", "option", 0.99, option_label="A")
+        placement["sourceEvidence"] = {"pageIndex": None, "bbox": None}
+
+        result = validate_image_placements(
+            [{"path": "images/a.png"}],
+            [placement],
+            question_type="choice",
+            option_count=1,
+        )
+
+        self.assertIn("missing_image_geometry", result["blockingReasons"])
+
     @staticmethod
     def _placement(placement_id, image_id, kind, confidence, option_label=None):
         target = {"kind": kind}

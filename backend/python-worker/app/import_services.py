@@ -741,17 +741,19 @@ def standardize_structure_review_reasons(
     structured_hints: dict[str, Any] | None,
 ) -> list[str]:
     """Block candidates that change stable choice/image structure."""
-    original_options = normalized_choice_hint_options(structured_hints)
+    hints = structured_hints if isinstance(structured_hints, dict) else {}
+    placement_validation = hints.get("imagePlacementValidation") if isinstance(hints.get("imagePlacementValidation"), dict) else {}
+    reasons = [str(reason) for reason in placement_validation.get("blockingReasons") or [] if str(reason).strip()]
+    original_options = normalized_choice_hint_options(hints)
     if len(original_options) < 2:
-        return []
+        return list(dict.fromkeys(reasons))
     _stem, markdown_options = split_choice_options(str(response.get("markdown") or ""), "choice")
     candidate_options = normalized_choice_hint_options({"options": markdown_options})
     if len(candidate_options) < 2:
         candidate_options = normalized_choice_hint_options({"options": response.get("options") or []})
-    reasons: list[str] = []
     if len(candidate_options) != len(original_options):
         reasons.append("option_count_changed")
-        return reasons
+        return list(dict.fromkeys(reasons))
     if [item["label"] for item in candidate_options] != [item["label"] for item in original_options]:
         reasons.append("option_labels_changed")
     for original, candidate in zip(original_options, candidate_options):
@@ -760,7 +762,7 @@ def standardize_structure_review_reasons(
         if original_refs and not original_refs.issubset(candidate_refs):
             reasons.append("option_image_reference_removed")
             break
-    return reasons
+    return list(dict.fromkeys(reasons))
 
 
 def finalize_standardize_response(
@@ -1376,6 +1378,7 @@ def build_import_questions(
                 "children": sub_questions,
                 "subQuestions": sub_questions,
                 "mathValidation": source_question.get("mathValidation"),
+                "imagePlacementValidation": copy.deepcopy(source_question.get("imagePlacementValidation")),
                 "autoSemanticRepair": source_question.get("autoSemanticRepair"),
                 "aiMetadata": {
                     **enrichment_meta,

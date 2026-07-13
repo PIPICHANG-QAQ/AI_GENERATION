@@ -202,6 +202,40 @@ class ImportServicesTest(unittest.TestCase):
             self.assertEqual("B", result["answer"])
             self.assertEqual("直接计算。", result["analysis"])
 
+    def test_placement_blocker_prevents_safe_rules_write_for_single_and_global(self):
+        markdown = r"""题干
+
+\begin{tasks}(4)
+\task 甲
+\task 乙
+\task 丙
+\task 丁
+\end{tasks}"""
+        hints = {
+            "type": "choice",
+            "options": [
+                {"label": "A", "content": "甲"},
+                {"label": "B", "content": "乙"},
+                {"label": "C", "content": "丙"},
+                {"label": "D", "content": "丁"},
+            ],
+            "imagePlacementValidation": {
+                "blocking": True,
+                "blockingReasons": ["stem_option_geometry_conflict"],
+            },
+        }
+
+        with patch("app.import_services.standardize_markdown_with_llm") as standardize:
+            results = [
+                standardize_markdown_ai_response(markdown, structured_hints=hints, request_source=source)
+                for source in ("single", "global")
+            ]
+
+        standardize.assert_not_called()
+        for result in results:
+            self.assertEqual("review_required", result["applyRecommendation"])
+            self.assertIn("stem_option_geometry_conflict", result["reviewReasons"])
+
     def test_standardize_uses_clean_raw_ocr_candidate_before_llm(self):
         self.assertEqual([], detect_severe_latex_issues(CLEAN_OCR_MARKDOWN))
         self.assertIn("存在连续 4 个及以上 $", "\n".join(detect_severe_latex_issues(SEVERELY_DAMAGED_MANUAL_MARKDOWN)))
@@ -665,6 +699,34 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual(4, len(question["images"]))
         self.assertNotIn("![]", question["stemMarkdown"])
         self.assertEqual(["![](图1)", "![](图2)", "![](图3)", "![](图4)"], [option["content"] for option in question["options"]])
+
+    def test_build_import_questions_preserves_image_placement_validation(self):
+        validation = {
+            "blocking": True,
+            "blockingReasons": ["choice_option_sequence_incomplete"],
+        }
+        outputs = {
+            "sections": [
+                {
+                    "questions": [
+                        {
+                            "id": "q1",
+                            "number": 1,
+                            "type": "choice",
+                            "stemMarkdown": "选择正确项",
+                            "options": [{"label": "A", "content": "甲"}, {"label": "B", "content": "乙"}],
+                            "images": [],
+                            "imagePlacementValidation": validation,
+                        }
+                    ]
+                }
+            ]
+        }
+
+        with patch.dict("os.environ", {"ENABLE_IMPORT_SYNC_AI_ENRICH": "false", "OCR_AUTO_STANDARDIZE_MODE": "off"}):
+            imported = build_import_questions({}, outputs, "")[0]
+
+        self.assertEqual(validation, imported["imagePlacementValidation"])
 
     def test_build_import_questions_attaches_trailing_choice_images_to_text_options(self):
         task = {"stage": "初中", "subject": "物理", "grade": "八年级", "title": "测试卷"}

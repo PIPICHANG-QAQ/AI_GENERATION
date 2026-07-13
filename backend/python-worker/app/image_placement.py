@@ -360,12 +360,16 @@ def validate_image_placements(
     question_type: str = "unknown",
     option_count: int = 0,
 ) -> dict[str, Any]:
-    """Validate asset conservation and exclusive high-confidence ownership."""
+    """Validate asset conservation, geometry evidence, and choice invariants."""
     asset_ids = {image_key(image) for image in images if isinstance(image, dict)}
     asset_ids.discard("")
     errors: list[str] = []
     warnings: list[str] = []
     exclusive_owners: dict[str, list[str]] = {}
+    blocking_reasons: list[str] = []
+    option_image_counts: dict[str, int] = {}
+    stem_image_count = 0
+    missing_geometry_count = 0
 
     for placement in placements:
         if not isinstance(placement, dict):
@@ -377,23 +381,71 @@ def validate_image_placements(
         confidence = float(inference.get("confidence") or 0.0)
         if image_id not in asset_ids:
             errors.append(f"题图放置引用的资源不存在：{image_id or '<empty>'}")
+            blocking_reasons.append("image_asset_conservation_failed")
         if kind == "unassigned":
             warnings.append(f"题图尚未归属：{image_id}")
         elif placement.get("reviewStatus") == "needs_review":
             warnings.append(f"题图归属需要人工复核：{image_id}")
         if kind not in NON_EXCLUSIVE_TARGET_KINDS and confidence >= 0.9:
             exclusive_owners.setdefault(image_id, []).append(str(placement.get("placementId") or kind))
+        if kind == "option":
+            option_label = str(target.get("optionLabel") or "").strip().upper()
+            if option_label:
+                option_image_counts[option_label] = option_image_counts.get(option_label, 0) + 1
+        elif kind == "stem":
+            stem_image_count += 1
+        source_evidence = placement.get("sourceEvidence") if isinstance(placement.get("sourceEvidence"), dict) else {}
+        if kind not in NON_EXCLUSIVE_TARGET_KINDS and confidence >= 0.95 and (
+            not isinstance(source_evidence.get("pageIndex"), int) or not valid_bbox(source_evidence.get("bbox"))
+        ):
+            missing_geometry_count += 1
+            blocking_reasons.append("missing_image_geometry")
+        if "manual-placement-protected" in (inference.get("reasons") or []):
+            blocking_reasons.append("manual_placement_conflict")
 
     for image_id, owners in exclusive_owners.items():
         if image_id and len(owners) > 1:
             errors.append(f"题图存在多个高置信归属：{image_id}")
+            blocking_reasons.append("option_image_one_to_one_violation")
     if question_type == "choice" and option_count < 2:
         warnings.append("选择题没有有效选项，无法可靠校验选项题图")
 
+    expected_option_count = 0
+    if question_type == "choice":
+        expected_option_count = 4 if option_count in {3, 4} or len(asset_ids) >= 4 else option_count
+    if expected_option_count == 4 and option_count != 4:
+        blocking_reasons.append("choice_option_sequence_incomplete")
+    missing_option_labels = [
+        chr(ord("A") + index)
+        for index in range(expected_option_count)
+        if option_image_counts.get(chr(ord("A") + index), 0) == 0
+    ]
+    if stem_image_count and len(asset_ids) >= expected_option_count >= 2 and missing_option_labels:
+        blocking_reasons.append("stem_option_geometry_conflict")
+    if any(count > 1 for count in option_image_counts.values()) and missing_option_labels:
+        blocking_reasons.append("option_image_one_to_one_violation")
+
+    blocking_reasons = list(dict.fromkeys(blocking_reasons))
+    blocker_messages = {
+        "choice_option_sequence_incomplete": "选择题选项序列不完整",
+        "stem_option_geometry_conflict": "题干题图与选项题图布局冲突",
+        "option_image_one_to_one_violation": "选项题图不满足一对一归属",
+        "missing_image_geometry": "高置信题图归属缺少页码或坐标证据",
+        "image_asset_conservation_failed": "题图资源与归属记录不守恒",
+        "manual_placement_conflict": "自动归属与人工确认结果冲突",
+    }
+    errors.extend(blocker_messages[code] for code in blocking_reasons if blocker_messages[code] not in errors)
+
     return {
         "valid": not errors,
+        "blocking": bool(blocking_reasons),
+        "blockingReasons": blocking_reasons,
         "errors": errors,
         "warnings": warnings,
+        "expectedOptionCount": expected_option_count,
+        "optionImageCounts": option_image_counts,
+        "missingOptionLabels": missing_option_labels,
+        "missingGeometryCount": missing_geometry_count,
         "placementCount": len(placements),
         "unassignedCount": sum(
             1

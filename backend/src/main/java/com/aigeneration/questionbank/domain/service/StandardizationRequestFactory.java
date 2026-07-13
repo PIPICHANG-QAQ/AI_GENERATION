@@ -33,6 +33,8 @@ public class StandardizationRequestFactory {
         List<Object> images = json.readList(question.getImagesJson());
         List<Object> placements = json.readList(question.getImagePlacementsJson());
         List<Object> subQuestions = json.readList(question.getChildrenJson());
+        Map<String, Object> rawSnapshot = json.readMap(question.getRawJson());
+        Object placementValidation = rawSnapshot.get("imagePlacementValidation");
         String markdown = withChoiceOptions(
                 firstText(requestedMarkdown, question.getManualMarkdown(), question.getStemMarkdown()),
                 question.getType(),
@@ -51,6 +53,7 @@ public class StandardizationRequestFactory {
         hints.put("options", options);
         hints.put("images", images);
         hints.put("imagePlacements", placements);
+        hints.put("imagePlacementValidation", placementValidation instanceof Map<?, ?> ? placementValidation : Map.of());
         hints.put("subQuestions", subQuestions);
         hints.put("requestPriority", switch (source) {
             case "retry" -> "retry";
@@ -81,6 +84,8 @@ public class StandardizationRequestFactory {
         content.put("options", json.readList(question.getOptionsJson()));
         content.put("images", json.readList(question.getImagesJson()));
         content.put("imagePlacements", json.readList(question.getImagePlacementsJson()));
+        Object placementValidation = json.readMap(question.getRawJson()).get("imagePlacementValidation");
+        content.put("imagePlacementValidation", placementValidation instanceof Map<?, ?> ? placementValidation : Map.of());
         content.put("subQuestions", json.readList(question.getChildrenJson()));
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
