@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app.image_placement import (
     build_image_placements,
@@ -109,6 +110,25 @@ class ImagePlacementTest(unittest.TestCase):
 
         self.assertLess(placements[0]["inference"]["confidence"], 0.95)
         self.assertEqual("needs_review", placements[0]["reviewStatus"])
+
+    def test_ambiguous_layout_can_use_injected_multimodal_mapping(self):
+        placements = [self._placement("p1", "images/a.png", "unassigned", 0.0)]
+        layout_items = [
+            {"type": "text", "text": "A.", "pageIndex": 0, "bbox": [100, 100, 140, 130]},
+            {"type": "text", "text": "B.", "pageIndex": 0, "bbox": [300, 100, 340, 130]},
+            {"type": "image", "imageRef": "images/a.png", "pageIndex": 0, "bbox": [190, 150, 250, 230]},
+        ]
+
+        with patch.dict("os.environ", {"IMAGE_PLACEMENT_MULTIMODAL_ENABLED": "true"}):
+            reconciled, summary = reconcile_image_placements(
+                placements,
+                layout_items,
+                multimodal_resolver=lambda _payload: {"assignments": {"images/a.png": "B"}},
+            )
+
+        self.assertEqual("B", reconciled[0]["target"]["optionLabel"])
+        self.assertEqual("multimodal-layout", reconciled[0]["inference"]["method"])
+        self.assertTrue(summary["multimodal"]["applied"])
 
     def test_explicit_offsets_assign_stem_option_subquestion_and_unassigned(self):
         boundary = {

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from copy import deepcopy
 from typing import Any
 
 from app.choice_layout_assignment import assign_choice_images
+from app.image_placement_multimodal import resolve_ambiguous_assignments
 from app.question_markdown import normalize_asset_path
 
 
@@ -112,6 +114,9 @@ def build_image_placements(
 def reconcile_image_placements(
     placements: list[dict[str, Any]],
     layout_items: list[dict[str, Any]],
+    *,
+    multimodal_resolver: Any = None,
+    crop_evidence: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Reconcile automatic placements with a global bbox assignment."""
     reconciled = deepcopy(placements)
@@ -123,6 +128,56 @@ def reconcile_image_placements(
         for item in layout_items
         if isinstance(item, dict) and str(item.get("imageRef") or "").strip()
     ]
+    has_auto_conflict = False
+    for placement in placements:
+        if not isinstance(placement, dict) or placement.get("reviewStatus") in {"confirmed", "overridden"}:
+            continue
+        image_node = unique_layout_image_node(str(placement.get("imageId") or ""), image_nodes)
+        image_ref = normalize_asset_path(str((image_node or {}).get("imageRef") or ""))
+        assigned = global_assignment.get("assignments", {}).get(image_ref)
+        target = placement.get("target") if isinstance(placement.get("target"), dict) else {}
+        if isinstance(assigned, dict) and (
+            target.get("kind") != "option" or str(target.get("optionLabel") or "") != assigned.get("optionLabel")
+        ):
+            has_auto_conflict = True
+            break
+    multimodal = {
+        "applied": False,
+        "reason": "resolver-unavailable",
+        "assignments": {},
+        "candidates": deepcopy(global_assignment.get("assignments") or {}),
+    }
+    if callable(multimodal_resolver):
+        multimodal = resolve_ambiguous_assignments(
+            crop_evidence or [],
+            global_assignment.get("assignments") or {},
+            label_values,
+            multimodal_resolver,
+            enabled=os.getenv("IMAGE_PLACEMENT_MULTIMODAL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
+            has_conflict=has_auto_conflict,
+        )
+        resolved = multimodal.get("assignments") if multimodal.get("applied") else {}
+        if resolved and all(target in label_values for target in resolved.values()):
+            for image_ref, option_label in resolved.items():
+                assigned = global_assignment["assignments"].get(image_ref)
+                if not isinstance(assigned, dict):
+                    continue
+                assigned.update(
+                    {
+                        "optionLabel": option_label,
+                        "confidence": 0.95,
+                        "reviewStatus": "auto",
+                        "method": "multimodal-layout",
+                    }
+                )
+            global_assignment["blockingReasons"] = [
+                reason
+                for reason in global_assignment.get("blockingReasons") or []
+                if reason != "layout_assignment_ambiguous"
+            ]
+        elif resolved:
+            multimodal["applied"] = False
+            multimodal["reason"] = "non-option-target-requires-review"
     conflict_count = 0
     protected_manual_count = 0
     for placement in reconciled:
@@ -134,6 +189,7 @@ def reconcile_image_placements(
             continue
         option_label = str(assigned.get("optionLabel") or "")
         geometry_confidence = float(assigned.get("confidence") or 0.0)
+        assignment_method = str(assigned.get("method") or "layout-global")
         if not option_label:
             continue
         target = placement.get("target") if isinstance(placement.get("target"), dict) else {"kind": "unassigned"}
@@ -169,7 +225,7 @@ def reconcile_image_placements(
             placement["target"] = {"kind": "option", "optionLabel": option_label}
             inference.update(
                 {
-                    "method": "layout-global",
+                    "method": assignment_method,
                     "confidence": geometry_confidence,
                     "reasons": ["global-option-cell-assignment"],
                     "alternatives": assigned.get("alternatives") or [],
@@ -188,7 +244,7 @@ def reconcile_image_placements(
             placement["target"] = {"kind": "option", "optionLabel": option_label}
             inference.update(
                 {
-                    "method": "layout-global",
+                    "method": assignment_method,
                     "confidence": geometry_confidence,
                     "reasons": [*reasons, "geometry-conflict", "global-option-cell-assignment"],
                     "alternatives": [
@@ -226,6 +282,7 @@ def reconcile_image_placements(
         "secondBestCost": global_assignment.get("secondBestCost"),
         "margin": global_assignment.get("margin"),
         "blockingReasons": global_assignment.get("blockingReasons") or [],
+        "multimodal": multimodal,
     }
 
 
