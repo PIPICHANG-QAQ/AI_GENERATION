@@ -534,7 +534,78 @@ export function removeQuestionImageRefsFromOptions(options: unknown, removedImag
 export function getQuestionMarkdown(q: any): string {
   if (!q) return "";
   const markdown = q.manualMarkdown || q.stemMarkdown || q.stem || q.content || "";
-  return withEditableChoiceOptions(markdown, q.options, getQuestionImages(q));
+  const images = ensureQuestionImageLabels(getQuestionImages(q));
+  const normalizedMarkdown = normalizeTasksEnvironment(normalizeQuestionImageRefsInMarkdown(markdown, images));
+  const parsedManual = splitChoiceOptionsFromMarkdown(normalizedMarkdown, q.type || "");
+  const rawOptions = /\\task\b/.test(normalizedMarkdown) && parsedManual.options.length >= 2
+    ? parsedManual.options
+    : q.options;
+  const options = choiceOptionsWithTrustedPlacements(q, images, rawOptions);
+  return withEditableChoiceOptions(markdown, options, images);
+}
+
+function choiceOptionsWithTrustedPlacements(
+  question: any,
+  images: QuestionImage[],
+  rawOptions: unknown = question?.options,
+): QuestionOption[] {
+  type TrustedOptionPlacement = {
+    image: QuestionImage;
+    imageIndex: number;
+    optionLabel: string;
+    order: number;
+  };
+  const options = normalizeQuestionOptions(rawOptions, images);
+  const placements = Array.isArray(question?.imagePlacements) ? question.imagePlacements : [];
+  if (question?.type !== "choice" || options.length < 2 || images.length === 0 || placements.length === 0) {
+    return options;
+  }
+
+  const candidates: TrustedOptionPlacement[] = placements
+    .map((placement: any, fallbackOrder: number): TrustedOptionPlacement | null => {
+      const target = placement?.target && typeof placement.target === "object" ? placement.target : {};
+      const optionLabel = String(target.optionLabel || "").trim().toUpperCase();
+      const confidence = Number(placement?.inference?.confidence || 0);
+      const reviewStatus = String(placement?.reviewStatus || "").trim();
+      const isTrusted = ["confirmed", "overridden"].includes(reviewStatus)
+        || (reviewStatus !== "needs_review" && confidence >= 0.95);
+      const imageIndex = images.findIndex((image, index) => imageRefMatches(String(placement?.imageId || ""), image, index));
+      if (!isTrusted || target.kind !== "option" || !optionLabel || imageIndex < 0) return null;
+      return {
+        image: images[imageIndex],
+        imageIndex,
+        optionLabel,
+        order: Number.isInteger(placement?.order) ? Number(placement.order) : fallbackOrder,
+      };
+    })
+    .filter((item: TrustedOptionPlacement | null): item is TrustedOptionPlacement => item !== null);
+  const candidatesByImage = new Map<number, TrustedOptionPlacement[]>();
+  candidates.forEach((candidate) => {
+    const grouped = candidatesByImage.get(candidate.imageIndex) || [];
+    grouped.push(candidate);
+    candidatesByImage.set(candidate.imageIndex, grouped);
+  });
+  const optionLabels = new Set(options.map((option) => option.label));
+  const trusted = Array.from(candidatesByImage.values())
+    .filter((group) => group.length === 1 && optionLabels.has(group[0].optionLabel))
+    .map((group) => group[0])
+    .sort((left: TrustedOptionPlacement, right: TrustedOptionPlacement) => left.order - right.order);
+  if (trusted.length === 0) return options;
+
+  const trustedImages = trusted.map((item) => item.image);
+  const tokensByLabel = new Map<string, string[]>();
+  trusted.forEach(({ image, imageIndex, optionLabel }) => {
+    const tokens = tokensByLabel.get(optionLabel) || [];
+    const token = `![](${getQuestionImageLabel(image, imageIndex)})`;
+    if (!tokens.includes(token)) tokens.push(token);
+    tokensByLabel.set(optionLabel, tokens);
+  });
+
+  return options.map((option) => {
+    const text = atomicTaskOptionContent(removeQuestionImageRefsFromMarkdown(option.content, trustedImages));
+    const content = [...(tokensByLabel.get(option.label) || []), text].filter(Boolean).join(" ");
+    return { ...option, content, contentMarkdown: content };
+  });
 }
 
 export function getQuestionImages(q: any): QuestionImage[] {
@@ -771,21 +842,24 @@ function tasksColumnCount(optionCount: number) {
   return 1;
 }
 
+function atomicTaskOptionContent(value: string) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
 export function withEditableChoiceOptions(markdown: string, rawOptions: unknown, images: QuestionImage[] = []): string {
   const normalizedMarkdown = normalizeTasksEnvironment(normalizeQuestionImageRefsInMarkdown(markdown, images)).trim();
   const options = normalizeQuestionOptions(rawOptions, images);
   if (options.length === 0) return normalizedMarkdown;
-  if (splitChoiceOptionsFromMarkdown(normalizedMarkdown, "choice").options.length > 0) {
-    return normalizedMarkdown;
-  }
+  const parsed = splitChoiceOptionsFromMarkdown(normalizedMarkdown, "choice");
+  const stemMarkdown = parsed.options.length > 0 ? parsed.stemMarkdown : normalizedMarkdown;
 
   const optionBlock = [
     "",
     `\\begin{tasks}(${tasksColumnCount(options.length)})`,
-    ...options.map((option) => `\\task ${option.contentMarkdown || option.content}`),
+    ...options.map((option) => `\\task ${atomicTaskOptionContent(option.contentMarkdown || option.content)}`),
     "\\end{tasks}",
   ].join("\n");
-  return `${normalizedMarkdown}${normalizedMarkdown ? "\n" : ""}${optionBlock}`.trim();
+  return `${stemMarkdown}${stemMarkdown ? "\n" : ""}${optionBlock}`.trim();
 }
 
 function splitTasksOptions(markdown: string): { stemMarkdown: string; options: QuestionOption[] } {

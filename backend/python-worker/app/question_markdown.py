@@ -625,6 +625,82 @@ def normalize_question_options_image_refs(options: Any, images: Any) -> list[dic
     return normalized_options
 
 
+def reconcile_choice_option_image_refs(question: dict[str, Any]) -> bool:
+    """按可信放置结果原子化选择题选项中的题图与文字。"""
+    if str(question.get("type") or "").strip() != "choice":
+        return False
+    images = normalize_question_images(question.get("images") or [])
+    options = normalize_question_options_image_refs(question.get("options") or [], images)
+    placements = [item for item in question.get("imagePlacements") or [] if isinstance(item, dict)]
+    if len(options) < 2 or not images or not placements:
+        return False
+
+    images_by_id: dict[str, dict[str, Any]] = {}
+    canonical_id_by_image: dict[int, str] = {}
+    for image in images:
+        canonical_id = ""
+        for key in ("imageId", "path", "url", "name"):
+            normalized = normalize_asset_path(str(image.get(key) or ""))
+            if normalized:
+                images_by_id[normalized] = image
+                canonical_id = canonical_id or normalized
+        if canonical_id:
+            canonical_id_by_image[id(image)] = canonical_id
+
+    option_labels = {str(option.get("label") or "").strip().upper() for option in options}
+    candidates_by_image: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+    for fallback_order, placement in enumerate(placements):
+        target = placement.get("target") if isinstance(placement.get("target"), dict) else {}
+        option_label = normalize_choice_label(str(target.get("optionLabel") or ""))
+        if target.get("kind") != "option" or not option_label:
+            continue
+        inference = placement.get("inference") if isinstance(placement.get("inference"), dict) else {}
+        confidence = float(inference.get("confidence") or 0.0)
+        review_status = str(placement.get("reviewStatus") or "").strip()
+        if review_status not in {"confirmed", "overridden"} and (
+            review_status == "needs_review" or confidence < 0.95
+        ):
+            continue
+        image_id = normalize_asset_path(str(placement.get("imageId") or ""))
+        image = images_by_id.get(image_id)
+        if image is None:
+            continue
+        order = placement.get("order")
+        canonical_id = canonical_id_by_image.get(id(image))
+        if canonical_id:
+            candidates_by_image.setdefault(canonical_id, []).append(
+                (int(order) if isinstance(order, int) else fallback_order, option_label, image)
+            )
+    trusted = [
+        candidates[0]
+        for candidates in candidates_by_image.values()
+        if len(candidates) == 1 and candidates[0][1] in option_labels
+    ]
+    if not trusted:
+        return False
+
+    trusted.sort(key=lambda item: item[0])
+    trusted_images = [image for _order, _label, image in trusted]
+    tokens_by_label: dict[str, list[str]] = {}
+    for image_index, (_order, option_label, image) in enumerate(trusted):
+        token = question_image_markdown(image, image_index)
+        if token and token not in tokens_by_label.setdefault(option_label, []):
+            tokens_by_label[option_label].append(token)
+
+    next_options: list[dict[str, Any]] = []
+    for option in options:
+        label = str(option.get("label") or "").strip().upper()
+        text = remove_question_images_from_markdown(option.get("content") or "", trusted_images)
+        text = re.sub(r"\s+", " ", text).strip()
+        content = " ".join([*tokens_by_label.get(label, []), text]).strip()
+        next_options.append({**option, "content": content, "contentMarkdown": content})
+
+    changed = next_options != options
+    if changed:
+        question["options"] = next_options
+    return changed
+
+
 def trailing_question_images(markdown: str, images: Any) -> list[dict[str, Any]]:
     """提取题干末尾连续题图块对应的题图。"""
     normalized_images = normalize_question_images(images)

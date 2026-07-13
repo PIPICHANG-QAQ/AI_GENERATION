@@ -102,6 +102,60 @@ class ImportTaskCanonicalizationServiceTest {
     }
 
     @Test
+    void applyAllowsPlacementReviewWhenStructureHasNoApplyBlockers() {
+        List<Map<String, Object>> questions = List.of(Map.of("id", "q-1", "number", 1));
+        when(worker.postJson(anyString(), any())).thenReturn(Map.of(
+                "applyToken", "fresh",
+                "questions", questions,
+                "canonicalization", Map.of("version", "question-canonicalization.v1"),
+                "paperLayout", Map.of("regions", List.of()),
+                "applyBlockingIssues", List.of(),
+                "blockingIssues", List.of(Map.of("type", "image-placement-validation"))
+        ));
+
+        Map<String, Object> result = service.apply("task-1", Map.of("applyToken", "fresh"));
+
+        verify(snapshotMapper).insert(any(ImportTaskSnapshotEntity.class));
+        verify(questionSyncService).syncQuestions("task-1", questions);
+        assertEquals(true, result.get("applied"));
+    }
+
+    @Test
+    void applyRejectsExplicitStructureApplyBlockers() {
+        when(worker.postJson(anyString(), any())).thenReturn(Map.of(
+                "applyToken", "fresh",
+                "questions", List.of(),
+                "applyBlockingIssues", List.of("ambiguous-duplicate-question"),
+                "blockingIssues", List.of()
+        ));
+
+        assertThrows(
+                ResponseStatusException.class,
+                () -> service.apply("task-1", Map.of("applyToken", "fresh"))
+        );
+
+        verifyNoInteractions(snapshotMapper);
+        verify(questionSyncService, never()).syncQuestions(anyString(), any());
+    }
+
+    @Test
+    void applyFallsBackToLegacyBlockingIssuesWhenApplyFieldIsMissing() {
+        when(worker.postJson(anyString(), any())).thenReturn(Map.of(
+                "applyToken", "fresh",
+                "questions", List.of(),
+                "blockingIssues", List.of(Map.of("type", "image-placement-validation"))
+        ));
+
+        assertThrows(
+                ResponseStatusException.class,
+                () -> service.apply("task-1", Map.of("applyToken", "fresh"))
+        );
+
+        verifyNoInteractions(snapshotMapper);
+        verify(questionSyncService, never()).syncQuestions(anyString(), any());
+    }
+
+    @Test
     void rollbackRestoresLatestSnapshot() {
         ImportTaskSnapshotEntity snapshot = new ImportTaskSnapshotEntity();
         snapshot.setId("snapshot-1");

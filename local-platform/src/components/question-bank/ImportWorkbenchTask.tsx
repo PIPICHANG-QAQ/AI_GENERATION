@@ -1049,7 +1049,11 @@ export function ImportWorkbenchTask({ taskId }: { taskId: string }) {
               <div key={line} className="mt-1 text-xs">{line}</div>
             ))}
             {canonicalStructureReview(canonicalPreview).blocking && (
-              <div className="mt-1 text-xs font-medium">存在题图归属阻断项，只能人工复核，不能直接应用。</div>
+              <div className="mt-1 text-xs font-medium">存在重复题或题目边界冲突，需人工复核后才能应用。</div>
+            )}
+            {!canonicalStructureReview(canonicalPreview).blocking
+              && canonicalStructureReview(canonicalPreview).reviewRequired && (
+              <div className="mt-1 text-xs font-medium">题目结构可先应用；题图归属项仍需逐题复核。</div>
             )}
           </div>
           <div className="flex gap-2">

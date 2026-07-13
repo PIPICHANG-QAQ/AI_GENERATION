@@ -390,6 +390,177 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual(4, diff["optionCountAfter"])
         self.assertTrue(any(item["imageId"] == "images/d.png" and item["newTarget"]["optionLabel"] == "D" for item in diff["placements"]))
 
+    def test_canonicalization_preview_rewrites_trusted_option_image_placements_atomically(self):
+        images = [
+            {"path": f"images/{label.lower()}.png", "label": f"图{index}"}
+            for index, label in enumerate("ABCD", start=1)
+        ]
+        placements = [
+            {
+                "placementId": f"p-{label.lower()}",
+                "imageId": f"images/{label.lower()}.png",
+                "target": {"kind": "option", "optionLabel": label},
+                "order": index,
+                "inference": {"method": "layout-global", "confidence": 0.98, "reasons": []},
+                "reviewStatus": "auto",
+            }
+            for index, label in enumerate("ABCD")
+        ]
+        outputs = {
+            "markdown": "1. 如图所示，属于省力杠杆的是（ ）",
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": "如图所示，属于省力杠杆的是（ ）",
+                    "options": [
+                        {"label": "A", "content": "![](图1)\n\n食品夹"},
+                        {"label": "B", "content": "![](图2)  \n船桨\n\n![](图3)"},
+                        {"label": "C", "content": "修枝剪刀\n\n![](图4)"},
+                        {"label": "D", "content": "托盘天平"},
+                    ],
+                    "images": images,
+                    "imagePlacements": placements,
+                }
+            ],
+        }
+
+        question = canonicalize_import_outputs({"id": "task-1"}, outputs)["questions"][0]
+
+        self.assertEqual(
+            [
+                "![](图1) 食品夹",
+                "![](图2) 船桨",
+                "![](图3) 修枝剪刀",
+                "![](图4) 托盘天平",
+            ],
+            [option["content"] for option in question["options"]],
+        )
+
+    def test_canonicalization_preview_preserves_image_when_trusted_target_option_is_missing(self):
+        outputs = {
+            "markdown": "1. 选择正确图片",
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": "选择正确图片",
+                    "options": [
+                        {"label": "A", "content": "甲"},
+                        {"label": "B", "content": "乙"},
+                        {"label": "C", "content": "![](图1) 丙"},
+                    ],
+                    "images": [{"path": "images/a.png", "label": "图1"}],
+                    "imagePlacements": [
+                        {
+                            "placementId": "p-invalid",
+                            "imageId": "images/a.png",
+                            "target": {"kind": "option", "optionLabel": "D"},
+                            "inference": {"method": "layout-global", "confidence": 0.99, "reasons": []},
+                            "reviewStatus": "auto",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        question = canonicalize_import_outputs({"id": "task-1"}, outputs)["questions"][0]
+
+        self.assertIn("![](图1)", question["options"][2]["content"])
+        self.assertEqual(1, len(question["images"]))
+
+    def test_canonicalization_preview_preserves_image_when_trusted_owners_conflict(self):
+        placements = [
+            {
+                "placementId": f"p-{label.lower()}",
+                "imageId": "images/a.png",
+                "target": {"kind": "option", "optionLabel": label},
+                "inference": {"method": "layout-global", "confidence": 0.99, "reasons": []},
+                "reviewStatus": "auto",
+            }
+            for label in ("A", "B")
+        ]
+        outputs = {
+            "markdown": "1. 选择正确图片",
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": "选择正确图片",
+                    "options": [
+                        {"label": "A", "content": "甲"},
+                        {"label": "B", "content": "乙"},
+                        {"label": "C", "content": "![](图1) 丙"},
+                    ],
+                    "images": [{"path": "images/a.png", "label": "图1"}],
+                    "imagePlacements": placements,
+                }
+            ],
+        }
+
+        question = canonicalize_import_outputs({"id": "task-1"}, outputs)["questions"][0]
+
+        contents = [option["content"] for option in question["options"]]
+        self.assertEqual(1, sum(content.count("![](图1)") for content in contents))
+        self.assertIn("![](图1)", contents[2])
+
+    def test_canonicalization_preview_keeps_placement_review_out_of_apply_blocking_issues(self):
+        outputs = {
+            "markdown": "1. 选择正确答案",
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": "选择正确答案",
+                    "options": [
+                        {"label": "A", "content": "甲"},
+                        {"label": "B", "content": "乙"},
+                    ],
+                    "images": [{"path": "images/actual.png", "label": "图1"}],
+                    "imagePlacements": [
+                        {
+                            "placementId": "p-missing",
+                            "imageId": "images/missing.png",
+                            "target": {"kind": "option", "optionLabel": "A"},
+                            "inference": {"method": "rule", "confidence": 0.99, "reasons": []},
+                            "reviewStatus": "auto",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        result = canonicalize_import_outputs({"id": "task-1"}, outputs)
+
+        self.assertEqual([], result["applyBlockingIssues"])
+        self.assertEqual("image-placement-validation", result["blockingIssues"][0]["type"])
+
+    def test_canonicalization_preview_keeps_ambiguous_duplicates_apply_blocking(self):
+        markdown = "1. 同题\n1. 同题\n参考答案\n1. 同题"
+        answer_start = markdown.rindex("1. 同题")
+        outputs = {
+            "markdown": markdown,
+            "questions": [
+                {"id": "paper-a", "number": 1, "stemMarkdown": "同题", "sourceEvidence": {"start": 0, "end": 5}},
+                {"id": "paper-b", "number": 1, "stemMarkdown": "同题", "sourceEvidence": {"start": 6, "end": 11}},
+                {
+                    "id": "answer-a",
+                    "number": 1,
+                    "stemMarkdown": "同题",
+                    "sourceEvidence": {"start": answer_start, "end": len(markdown)},
+                },
+            ],
+        }
+
+        result = canonicalize_import_outputs({"id": "task-1"}, outputs)
+
+        self.assertEqual(["ambiguous-duplicate-question"], result["applyBlockingIssues"])
+        self.assertIn("ambiguous-duplicate-question", result["blockingIssues"])
+
     def test_canonicalization_preview_recovers_question_glued_to_section_heading(self):
         markdown = """一、解答题
 1．（6分）完成实验。

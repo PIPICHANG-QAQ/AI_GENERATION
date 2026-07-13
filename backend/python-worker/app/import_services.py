@@ -167,6 +167,7 @@ def canonicalize_import_outputs(
         }
         reconcile_structure_image_placements(layout_structure, layout_items)
     for source in canonical_sources:
+        reconcile_choice_option_image_refs(source)
         refresh_image_placement_validation(source)
 
     canonical_outputs = copy.deepcopy(outputs_copy)
@@ -204,6 +205,7 @@ def canonicalize_import_outputs(
         if isinstance(existing, dict):
             question = preserve_existing_import_question(existing, question)
             import_questions[index - 1] = question
+        reconcile_choice_option_image_refs(question)
         refresh_image_placement_validation(question)
         source = canonical_by_id.get(source_id)
         if isinstance(source, dict):
@@ -235,7 +237,8 @@ def canonicalize_import_outputs(
         if isinstance(question.get("imagePlacementValidation"), dict)
         and question["imagePlacementValidation"].get("blocking")
     ]
-    blocking_issues = [*copy.deepcopy(plan.get("blockingIssues") or []), *placement_blocking_issues]
+    apply_blocking_issues = copy.deepcopy(plan.get("blockingIssues") or [])
+    blocking_issues = [*apply_blocking_issues, *placement_blocking_issues]
     summary = {
         "beforeQuestionCount": len(original_sources),
         "afterQuestionCount": len(import_questions),
@@ -273,6 +276,7 @@ def canonicalize_import_outputs(
         "canonicalization": canonicalization,
         "automaticMerges": copy.deepcopy(plan.get("automaticMerges") or []),
         "reviewItems": copy.deepcopy(plan.get("reviewItems") or []),
+        "applyBlockingIssues": apply_blocking_issues,
         "blockingIssues": blocking_issues,
         "structureDiffs": structure_diffs,
     }

@@ -69,7 +69,10 @@ public class ImportTaskCanonicalizationService {
         if (submittedToken.isBlank() || !submittedToken.equals(freshToken)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Canonicalization preview is stale; preview again");
         }
-        if (fresh.get("blockingIssues") instanceof List<?> issues && !issues.isEmpty()) {
+        Object applyBlockers = fresh.containsKey("applyBlockingIssues")
+                ? fresh.get("applyBlockingIssues")
+                : fresh.get("blockingIssues");
+        if (applyBlockers instanceof List<?> issues && !issues.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Canonicalization has unresolved review items");
         }
 

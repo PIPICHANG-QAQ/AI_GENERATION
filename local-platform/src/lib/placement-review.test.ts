@@ -40,4 +40,21 @@ describe("placement review", () => {
     expect(result.blocking).toBe(false);
     expect(result.lines).toContain("第 4 题：选项 3 → 4；images/d.png：C → D（97%）");
   });
+
+  it("allows structure apply while keeping placement blockers reviewable", () => {
+    const result = canonicalStructureReview({
+      structureDiffs: [],
+      applyBlockingIssues: [],
+      blockingIssues: [
+        {
+          type: "image-placement-validation",
+          questionId: "q-2",
+          reasons: ["stem_option_geometry_conflict"],
+        },
+      ],
+    });
+
+    expect(result.blocking).toBe(false);
+    expect(result.reviewRequired).toBe(true);
+  });
 });

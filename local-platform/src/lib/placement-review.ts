@@ -22,14 +22,23 @@ export function placementReview(question: any): { blocking: boolean; reasons: st
   };
 }
 
-export function canonicalStructureReview(preview: any): { changed: boolean; blocking: boolean; lines: string[] } {
+export function canonicalStructureReview(preview: any): {
+  changed: boolean;
+  blocking: boolean;
+  reviewRequired: boolean;
+  lines: string[];
+} {
   const diffs = Array.isArray(preview?.structureDiffs)
     ? preview.structureDiffs.filter((item: any) => item?.changed)
     : [];
   const blockingIssues = Array.isArray(preview?.blockingIssues) ? preview.blockingIssues : [];
+  const applyBlockingIssues = Array.isArray(preview?.applyBlockingIssues)
+    ? preview.applyBlockingIssues
+    : blockingIssues;
   return {
     changed: diffs.length > 0,
-    blocking: blockingIssues.length > 0,
+    blocking: applyBlockingIssues.length > 0,
+    reviewRequired: blockingIssues.length > 0,
     lines: diffs.map((diff: any) => formatStructureDiff(diff)),
   };
 }

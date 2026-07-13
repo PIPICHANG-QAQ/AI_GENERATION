@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ensureImagePlacements,
   ensureQuestionImageLabels,
+  getQuestionMarkdown,
   getQuestionMarkdownParts,
   imagePlacementIssues,
   moveQuestionImageReference,
@@ -83,5 +84,163 @@ describe("question image ownership", () => {
 
     expect(moved.markdown).not.toContain("![](图1)");
     expect(moved.options[1].content).toContain("![](图1)");
+  });
+
+  it("serializes trusted choice placements as one atomic task per option", () => {
+    const images = [
+      { imageId: "images/a.png", path: "images/a.png", label: "图1" },
+      { imageId: "images/b.png", path: "images/b.png", label: "图2" },
+      { imageId: "images/c.png", path: "images/c.png", label: "图3" },
+      { imageId: "images/d.png", path: "images/d.png", label: "图4" },
+    ];
+    const imagePlacements = "ABCD".split("").map((label, index) => ({
+      imageId: `images/${label.toLowerCase()}.png`,
+      target: { kind: "option", optionLabel: label },
+      order: index,
+      reviewStatus: "auto",
+      inference: { confidence: 0.98 },
+    }));
+
+    const result = getQuestionMarkdown({
+      type: "choice",
+      manualMarkdown: "（2分）如图所示，属于省力杠杆的是（ ）",
+      images,
+      imagePlacements,
+      options: [
+        { label: "A", content: "![](图1)\n\n食品夹" },
+        { label: "B", content: "![](图2)  \n船桨\n\n![](图3)" },
+        { label: "C", content: "修枝剪刀\n\n![](图4)" },
+        { label: "D", content: "托盘天平" },
+      ],
+    });
+
+    expect(result).toBe([
+      "（2分）如图所示，属于省力杠杆的是（ ）",
+      "",
+      "\\begin{tasks}(4)",
+      "\\task ![](图1) 食品夹",
+      "\\task ![](图2) 船桨",
+      "\\task ![](图3) 修枝剪刀",
+      "\\task ![](图4) 托盘天平",
+      "\\end{tasks}",
+    ].join("\n"));
+  });
+
+  it("rebuilds an existing malformed tasks block from trusted structured options", () => {
+    const images = [
+      { imageId: "images/a.png", label: "图1" },
+      { imageId: "images/b.png", label: "图2" },
+    ];
+    const result = getQuestionMarkdown({
+      type: "choice",
+      manualMarkdown: [
+        "题干",
+        "",
+        "\\begin{tasks}(2)",
+        "\\task ![](图1)",
+        "甲",
+        "\\task 乙",
+        "![](图2)",
+        "\\end{tasks}",
+      ].join("\n"),
+      images,
+      imagePlacements: [
+        {
+          imageId: "images/a.png",
+          target: { kind: "option", optionLabel: "A" },
+          order: 0,
+          reviewStatus: "auto",
+          inference: { confidence: 0.99 },
+        },
+        {
+          imageId: "images/b.png",
+          target: { kind: "option", optionLabel: "B" },
+          order: 1,
+          reviewStatus: "auto",
+          inference: { confidence: 0.99 },
+        },
+      ],
+      options: [
+        { label: "A", content: "![](图1) 甲" },
+        { label: "B", content: "乙 ![](图2)" },
+      ],
+    });
+
+    expect(result).toBe([
+      "题干",
+      "",
+      "\\begin{tasks}(2)",
+      "\\task ![](图1) 甲",
+      "\\task ![](图2) 乙",
+      "\\end{tasks}",
+    ].join("\n"));
+  });
+
+  it("preserves manually edited task text while reconciling trusted images", () => {
+    const result = getQuestionMarkdown({
+      type: "choice",
+      manualMarkdown: [
+        "题干",
+        "",
+        "\\begin{tasks}(2)",
+        "\\task ![](图1) 人工甲",
+        "\\task ![](图2) 人工乙",
+        "\\end{tasks}",
+      ].join("\n"),
+      images: [
+        { imageId: "images/a.png", label: "图1" },
+        { imageId: "images/b.png", label: "图2" },
+      ],
+      imagePlacements: [
+        { imageId: "images/a.png", target: { kind: "option", optionLabel: "A" }, reviewStatus: "auto", inference: { confidence: 0.99 } },
+        { imageId: "images/b.png", target: { kind: "option", optionLabel: "B" }, reviewStatus: "auto", inference: { confidence: 0.99 } },
+      ],
+      options: [
+        { label: "A", content: "![](图1) 自动甲" },
+        { label: "B", content: "![](图2) 自动乙" },
+      ],
+    });
+
+    expect(result).toContain("\\task ![](图1) 人工甲");
+    expect(result).toContain("\\task ![](图2) 人工乙");
+    expect(result).not.toContain("自动甲");
+  });
+
+  it("preserves an image when a trusted placement points to a missing option", () => {
+    const result = getQuestionMarkdown({
+      type: "choice",
+      manualMarkdown: "题干",
+      images: [{ imageId: "images/a.png", label: "图1" }],
+      imagePlacements: [
+        { imageId: "images/a.png", target: { kind: "option", optionLabel: "D" }, reviewStatus: "auto", inference: { confidence: 0.99 } },
+      ],
+      options: [
+        { label: "A", content: "甲" },
+        { label: "B", content: "乙" },
+        { label: "C", content: "![](图1) 丙" },
+      ],
+    });
+
+    expect(result).toContain("\\task ![](图1) 丙");
+  });
+
+  it("preserves one image reference when trusted placements have duplicate owners", () => {
+    const result = getQuestionMarkdown({
+      type: "choice",
+      manualMarkdown: "题干",
+      images: [{ imageId: "images/a.png", label: "图1" }],
+      imagePlacements: [
+        { imageId: "images/a.png", target: { kind: "option", optionLabel: "A" }, reviewStatus: "auto", inference: { confidence: 0.99 } },
+        { imageId: "images/a.png", target: { kind: "option", optionLabel: "B" }, reviewStatus: "auto", inference: { confidence: 0.99 } },
+      ],
+      options: [
+        { label: "A", content: "甲" },
+        { label: "B", content: "乙" },
+        { label: "C", content: "![](图1) 丙" },
+      ],
+    });
+
+    expect(result.match(/!\[\]\(图1\)/g)).toHaveLength(1);
+    expect(result).toContain("\\task ![](图1) 丙");
   });
 });
