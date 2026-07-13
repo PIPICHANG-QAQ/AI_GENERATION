@@ -38,6 +38,41 @@ class ImagePlacementTest(unittest.TestCase):
         self.assertEqual("A", question["imagePlacements"][0]["target"]["optionLabel"])
         self.assertEqual(1, summary["methodCounts"]["layout-global"])
 
+    def test_structure_reconciliation_uses_anchor_group_when_markdown_offsets_drift(self):
+        placements = [
+            self._placement(f"p-{label}", f"images/{label.lower()}.png", "option", 0.99, option_label=("C" if label == "D" else label))
+            for label in "ABCD"
+        ]
+        question = {
+            "id": "q_4",
+            "number": 4,
+            "sourceEvidence": {"start": 100, "end": 500},
+            "imagePlacements": placements,
+            "children": [],
+        }
+        structured = {"sections": [{"questions": [question]}], "questions": [question]}
+        layout_items = [
+            {"order": 0, "type": "text", "text": "3．上一题", "pageIndex": 0, "bbox": [80, 400, 300, 430], "markdownStart": 900},
+            {"order": 1, "type": "text", "text": "4．如图所示", "pageIndex": 0, "bbox": [80, 500, 300, 530], "markdownStart": 1000},
+            {"order": 2, "type": "image", "imageRef": "images/a.png", "pageIndex": 0, "bbox": [120, 550, 250, 680]},
+            {"order": 3, "type": "text", "text": "A", "pageIndex": 0, "bbox": [100, 670, 115, 682]},
+            {"order": 4, "type": "image", "imageRef": "images/b.png", "pageIndex": 0, "bbox": [350, 550, 480, 680]},
+            {"order": 5, "type": "text", "text": "B", "pageIndex": 0, "bbox": [330, 670, 345, 682]},
+            {"order": 6, "type": "image", "imageRef": "images/c.png", "pageIndex": 1, "bbox": [120, 80, 250, 210]},
+            {"order": 7, "type": "text", "text": "C", "pageIndex": 1, "bbox": [100, 200, 115, 212]},
+            {"order": 8, "type": "image", "imageRef": "images/d.png", "pageIndex": 1, "bbox": [350, 80, 480, 210]},
+            {"order": 9, "type": "text", "text": "运动鞋底的鞋钉 D", "pageIndex": 1, "bbox": [235, 200, 345, 212]},
+            {"order": 10, "type": "text", "text": "5．下一题", "pageIndex": 1, "bbox": [80, 250, 300, 280], "markdownStart": 1200},
+        ]
+
+        reconcile_structure_image_placements(structured, layout_items)
+
+        self.assertEqual(
+            ["A", "B", "C", "D"],
+            [placement["target"]["optionLabel"] for placement in question["imagePlacements"]],
+        )
+        self.assertTrue(all(placement["sourceEvidence"]["bbox"] for placement in question["imagePlacements"]))
+
     def test_geometry_maps_two_column_grid_independent_of_serialized_image_order(self):
         image_positions = {
             "images/d.png": [520, 340, 700, 460],

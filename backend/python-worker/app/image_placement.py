@@ -122,7 +122,8 @@ def reconcile_image_placements(
     reconciled = deepcopy(placements)
     labels = option_label_nodes(layout_items)
     label_values = list(dict.fromkeys(label for label, _node in labels))
-    global_assignment = assign_choice_images(layout_items, label_values)
+    synthetic_labels = [node for _label, node in labels if node.get("syntheticOptionLabel")]
+    global_assignment = assign_choice_images([*layout_items, *synthetic_labels], label_values)
     image_nodes = [
         item
         for item in layout_items
@@ -318,8 +319,29 @@ def reconcile_structure_image_placements(
         "unassignedCount": 0,
         "protectedManualCount": 0,
         "blockingReasons": [],
+        "anchorAlignedQuestionCount": 0,
     }
     seen_questions: set[int] = set()
+    ordered_questions: list[dict[str, Any]] = []
+    ordered_seen: set[int] = set()
+    for section in structured.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        for question in section.get("questions") or []:
+            if isinstance(question, dict) and id(question) not in ordered_seen:
+                ordered_seen.add(id(question))
+                ordered_questions.append(question)
+    for question in structured.get("questions") or []:
+        if isinstance(question, dict) and id(question) not in ordered_seen:
+            ordered_seen.add(id(question))
+            ordered_questions.append(question)
+
+    aligned_layout_groups: dict[str, dict[str, Any]] = {}
+    if layout_items and ordered_questions:
+        from app.question_layout import align_layout_groups_to_source_questions, sequential_question_item_groups
+
+        groups = sequential_question_item_groups(layout_items, len(layout_items))
+        aligned_layout_groups = align_layout_groups_to_source_questions(ordered_questions, groups)
 
     def reconcile_question(question: dict[str, Any]) -> None:
         object_id = id(question)
@@ -328,7 +350,13 @@ def reconcile_structure_image_placements(
         seen_questions.add(object_id)
         placements = question.get("imagePlacements")
         if isinstance(placements, list):
-            question_items = layout_items_for_evidence(layout_items, question.get("sourceEvidence"))
+            question_id = str(question.get("id") or "")
+            aligned_group = aligned_layout_groups.get(question_id)
+            question_items = list(aligned_group.get("items") or []) if isinstance(aligned_group, dict) else []
+            if question_items:
+                totals["anchorAlignedQuestionCount"] += 1
+            else:
+                question_items = layout_items_for_evidence(layout_items, question.get("sourceEvidence"))
             reconciled, summary = reconcile_image_placements(placements, question_items)
             question["imagePlacements"] = reconciled
             totals["placementCount"] += summary["placementCount"]
@@ -399,6 +427,30 @@ def option_label_nodes(layout_items: list[dict[str, Any]]) -> list[tuple[str, di
         match = OPTION_LABEL_RE.match(str(item.get("text") or ""))
         if match:
             nodes.append((match.group(1).upper(), item))
+    present = {label for label, _item in nodes}
+    expected = "A"
+    while expected in present and expected < "H":
+        expected = chr(ord(expected) + 1)
+    if expected not in present:
+        embedded_pattern = re.compile(rf"\s({expected})\s*$", flags=re.I)
+        for item in layout_items:
+            if not isinstance(item, dict) or not valid_bbox(item.get("bbox")):
+                continue
+            if not embedded_pattern.search(str(item.get("text") or "")):
+                continue
+            synthetic = deepcopy(item)
+            x1, y1, x2, y2 = [float(value) for value in item["bbox"][:4]]
+            label_width = max(10.0, min(18.0, (x2 - x1) * 0.18))
+            synthetic.update(
+                {
+                    "text": expected,
+                    "bbox": [x2 - label_width, y1, x2, y2],
+                    "syntheticOptionLabel": True,
+                    "syntheticOptionLabelReason": "embedded-expected-label",
+                }
+            )
+            nodes.append((expected, synthetic))
+            break
     return nodes
 
 
