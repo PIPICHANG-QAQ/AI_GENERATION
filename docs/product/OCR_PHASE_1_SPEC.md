@@ -15,6 +15,8 @@ OCR-Flow 是 `question-engine` 的核心底层能力：它负责把试卷/答案
 - 识别题干、选项、小问 / 子题、题图和题型。
 - 先抽取试卷结构契约，再拆题：总题数、大题段声明、每段题号范围必须约束后续题号候选。
 - 保护选择题和空位题结构：选项、空位占位、小问和题图都必须按 OCR 证据归属，不能靠模型补写。
+- 对图片型选择题恢复连续 A–H 选项链，并使用 MinerU `middle/content_list` 的页码、bbox 和页尺寸构造二维选项单元格；四图四选项默认执行全局一对一分配，不再把 Markdown offset 当作唯一高置信事实。
+- 明确四选一但选项不完整、题干图与选项图冲突、归属缺少几何证据或资源不守恒时，写入 `imagePlacementValidation.blockingReasons` 并阻止标准化自动覆盖与入库。
 - 对低置信空位题执行题目级视觉修复：使用 OCR bbox 裁出 question crop，检测长横线，并可选调用 Pix2Text 做二次 OCR。
 - 对 Markdown + LaTeX 做本地标准化和风险检测。
 - 在大模型已配置时执行低置信边界确认、人工触发 AI 标准化、AI 解析和答案解析匹配。
@@ -38,6 +40,14 @@ OCR-Flow 是 `question-engine` 的核心底层能力：它负责把试卷/答案
 ## Provider 边界
 
 默认 provider 为 `mineru`。业务层不得直接依赖 MinerU 的内部目录结构或 Python API，只依赖 OCR-Flow 的统一输出。
+
+## 选择题题图归属
+
+- 强标签包括带标点标签和独立行标签；粘在说明文字末尾的弱标签只有在 A 起始连续链、后续图片/布局块共同支持时才采用。
+- 证据优先级为：人工 `confirmed/overridden` placement、完整选项链与二维布局一致、二维全局分配、Markdown offset、受限多模态候选、未归属。
+- offset-only placement 最高只能进入待复核；二维全局分配的最优/次优 margin 不足时返回 alternatives，不静默覆盖。
+- `IMAGE_PLACEMENT_MULTIMODAL_ENABLED=false` 为默认值。启用后仍只允许模型输出 `imageId → stem|A-H|unassigned`；非法 JSON、未知图片、重复选项、超时或模型不可用时继续 `review_required`。
+- canonicalization preview 使用已保存 OCR Markdown、middle/content JSON 和图片重新计算，返回 `structureDiffs`；apply 使用现有 token、事务和回滚快照，不重新运行 MinerU，也不覆盖人工 placement。
 
 配置项：
 

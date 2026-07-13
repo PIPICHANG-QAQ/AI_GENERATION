@@ -1,4 +1,4 @@
-%% Version: 2026-07-10 / product v16 / GlobalStandardize
+%% Version: 2026-07-13 / product v17 / LayoutChoiceAssignment
 %% Status: current-primary
 %% Scope: authoritative end-to-end OCR-Flow algorithm, structure contract, LLM routing, first-return auto standardization, review, layout overlay isolation, rescan, global standardization, and AI assistance flow.
 flowchart TD
@@ -41,6 +41,11 @@ flowchart TD
   BoundarySource["确定结构边界源<br/>AI merged 或 local fallback"]:::mixed
 
   BuildByEvidence["question-structure-build<br/>按 OCR 原文边界切片生成题目结构"]:::local
+  ChoiceSequence["选择题选项链恢复<br/>强标签 + 受约束弱标签<br/>连续 A-H，不跨下一题"]:::local
+  ChoiceLayout["二维选项单元格<br/>pageIndex + bbox + page size<br/>支持图片在标签前与跨页"]:::local
+  GlobalImageAssignment["题图全局一对一分配<br/>总代价 + 次优 margin + alternatives<br/>人工 placement 冻结"]:::mixed
+  PlacementInvariant{"题图结构不变量<br/>选项完整 / 几何证据 / 资产守恒<br/>题干与选项无冲突？"}:::mixed
+  PlacementReview["imagePlacementValidation<br/>blockingReasons / review_required<br/>阻止标准化自动写回和入库"]:::local
   ImageCanonical["题图引用标签化<br/>原始路径 / API URL / 文件名 / 换行图片语法 -> ![](图N)<br/>选项图保留在 options；无可靠位置才追加题干并写 warning"]:::local
   SubSplit["sub-question-split<br/>大题内小问写入 subQuestions/children"]:::local
   ChoiceBlankProtect["choice-blank-structure-protect<br/>选项边界、____ 占位、题图回收"]:::mixed
@@ -133,7 +138,10 @@ flowchart TD
   BoundaryValidate -- "通过" --> BoundarySource
   BoundaryValidate -- "失败" --> BoundaryLocalFallback
   BoundarySource --> BuildByEvidence
-  BuildByEvidence --> ImageCanonical --> SubSplit --> ChoiceBlankProtect --> VisualRepair --> StructureValidate
+  BuildByEvidence --> ChoiceSequence --> ChoiceLayout --> GlobalImageAssignment --> PlacementInvariant
+  PlacementInvariant -- "通过" --> ImageCanonical
+  PlacementInvariant -- "冲突 / 低 margin" --> PlacementReview --> ImageCanonical
+  ImageCanonical --> SubSplit --> ChoiceBlankProtect --> VisualRepair --> StructureValidate
   VisualRepairPreload -- "只读上下文" --> VisualRepair
   StructureValidate -- "通过" --> MathNormalize
   StructureValidate -- "失败" --> RuleFallback --> MathNormalize

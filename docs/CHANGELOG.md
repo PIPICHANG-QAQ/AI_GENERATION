@@ -1,5 +1,15 @@
 # 变更记录
 
+## 2026-07-13
+
+- 选择题解析新增受约束弱标签恢复：可从连续 A/B/C 后的 `说明文字 D + 图片块` 恢复 D，同时过滤孤立字母和普通正文变量。
+- 新增二维选项单元格与全局一对一题图分配器，消费 MinerU pageIndex、bbox 和页尺寸，支持图片位于标签之前、四宫格乱序和跨页选项；Markdown offset 不再天然获得 0.98/0.99。
+- 自动二维结果可纠正错误 offset；人工 `confirmed/overridden` placement 冻结。最优/次优 margin、alternatives、冲突数和保护数量进入审计摘要。
+- `imagePlacementValidation` 新增选项完整、题干/选项冲突、几何缺失、资产守恒和一对一阻断机器码，并进入 Java 统一标准化 request；单题与全局流程均按同一守卫返回 `review_required`。
+- canonicalization preview 基于保存的 OCR Markdown 与 middle/content 布局重算选项和题图，不重新运行 MinerU；新增 `structureDiffs`，沿用 token、事务快照和 rollback。
+- 增加默认关闭的受限多模态兜底协议；只处理中等置信或 offset/二维冲突，非法映射、超时和模型不可用保持人工复核。
+- 人工校验页显示题图阻断原因和旧→新归属，有阻断项时禁止入库或直接应用结构整理。
+
 ## 2026-07-12
 
 - 题图归属升级为显式 `imagePlacements`：按 Markdown offset 确认题干/选项/小问 owner，以 bbox 几何处理双栏顺序，只在无显式证据时补充，冲突时保留主证据并标记复核。

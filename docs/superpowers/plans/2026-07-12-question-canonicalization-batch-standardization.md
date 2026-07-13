@@ -836,7 +836,7 @@ git commit -m "docs: publish canonicalization and batch job contracts"
 
 - [ ] **Step 5: Package and back up the server**
 
-Use `scripts/package_delivery.sh` from the feature worktree. Upload the artifact to `/home/user`, create a timestamped backup of `/home/user/AI_GENERATION_DOCKER` excluding `.env`, `server-data`, the MinerU venv, build outputs, and node_modules, and preserve `/home/user/AI_GENERATION_DOCKER/server-data` unchanged.
+Use `scripts/package_delivery.sh` from the feature worktree. Upload the artifact to `$REMOTE_HOME`, create a timestamped backup of `$DEPLOY_DIR` excluding `.env`, `server-data`, the MinerU venv, build outputs, and node_modules, and preserve `$DEPLOY_DIR/server-data` unchanged.
 
 - [ ] **Step 6: Build and deploy without merging main**
 

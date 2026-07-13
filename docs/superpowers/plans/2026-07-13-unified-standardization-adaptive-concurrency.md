@@ -191,7 +191,7 @@ def test_same_count_image_options_with_removed_refs_require_review():
 - [ ] **Step 2: Run the tests and verify RED**
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/pytest -q \
+PYTHONPATH=backend/python-worker backend/python-worker/.venv/bin/python -m pytest -q \
   backend/python-worker/tests/test_import_services.py -k 'cached_standardize_response_reports_cache_without_model_call or same_count_image_options_with_removed_refs_require_review'
 ```
 
@@ -239,9 +239,9 @@ Compare original structured options against result Markdown/options. Emit stable
 - [ ] **Step 6: Run focused and full Python tests**
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/pytest -q \
+PYTHONPATH=backend/python-worker backend/python-worker/.venv/bin/python -m pytest -q \
   backend/python-worker/tests/test_import_services.py
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/pytest -q \
+PYTHONPATH=backend/python-worker backend/python-worker/.venv/bin/python -m pytest -q \
   backend/python-worker/tests
 ```
 
@@ -287,7 +287,7 @@ def test_interactive_waiter_precedes_batch_waiter():
 - [ ] **Step 2: Run tests and verify RED**
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/pytest -q \
+PYTHONPATH=backend/python-worker backend/python-worker/.venv/bin/python -m pytest -q \
   backend/python-worker/tests/test_adaptive_concurrency.py
 ```
 
@@ -318,9 +318,9 @@ Leave boundary and analysis semaphores unchanged. Add `adaptiveConcurrency` snap
 - [ ] **Step 5: Run focused and full worker tests**
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/pytest -q \
+PYTHONPATH=backend/python-worker backend/python-worker/.venv/bin/python -m pytest -q \
   backend/python-worker/tests/test_adaptive_concurrency.py backend/python-worker/tests/test_llm_splitter.py
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/pytest -q backend/python-worker/tests
+PYTHONPATH=backend/python-worker backend/python-worker/.venv/bin/python -m pytest -q backend/python-worker/tests
 ```
 
 Expected: all pass.
@@ -542,12 +542,12 @@ git commit -m "docs: configure adaptive standardization"
 
 **Files:**
 - Verify all changed files
-- Deploy to `/home/user/AI_GENERATION_DOCKER`
+- Deploy to `$DEPLOY_DIR`
 
 - [ ] **Step 1: Run full local verification in parallel**
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/pytest -q backend/python-worker/tests
+PYTHONPATH=backend/python-worker backend/python-worker/.venv/bin/python -m pytest -q backend/python-worker/tests
 cd backend && mvn -q test
 cd local-platform && npm test -- --run && npm run build
 python3 scripts/check_question_engine_contract.py
@@ -566,7 +566,7 @@ Confirm each acceptance item in `docs/superpowers/specs/2026-07-13-unified-stand
 Over SSH, create:
 
 ```bash
-cd /home/user
+cd "$REMOTE_HOME"
 sudo tar -czf AI_GENERATION_DOCKER_backup_$(date +%Y%m%d_%H%M%S).tar.gz AI_GENERATION_DOCKER
 ```
 
@@ -579,7 +579,7 @@ Transfer the committed worktree contents while excluding `.git`, local virtual e
 - [ ] **Step 5: Rebuild and start the service**
 
 ```bash
-cd /home/user/AI_GENERATION_DOCKER
+cd "$DEPLOY_DIR"
 sudo docker compose -f docker-compose.server.yml up -d --build question-engine
 sudo docker compose -f docker-compose.server.yml ps
 ```

@@ -18,15 +18,15 @@
 - Test: `backend/python-worker/tests/test_question_boundary.py`
 - Test: `backend/python-worker/tests/test_question_markdown.py`
 
-- [ ] 添加失败测试：输入 `A/B/C` 后出现 `运动鞋底的鞋钉 D\n\n![](images/d.png)` 时，`split_choice_options()` 应恢复 A–D，且 D 的内容包含图片。
-- [ ] 添加失败测试：英文正文中的普通大写 `D`、公式变量 `D` 和缺少 A–C 前序链的孤立 `D` 不得成为选项。
-- [ ] 添加失败测试：跨页序列化 Markdown 中 A/B 在前页、C/D 在后页时仍生成一个单调 A–D 链，且不越过下一题题号。
-- [ ] 运行 `cd backend/python-worker && python -m pytest tests/test_question_markdown.py tests/test_question_boundary.py -q`，确认新测试因弱标签候选尚未实现而失败。
-- [ ] 在 `detect_choice_option_markers()` 中增加仅针对“当前期望标签”的弱候选：要求前序链存在，候选后紧邻换行/图片/短文本块，并记录 `strength` 与 `reasons`，不把弱候选直接当作独立强标签。
-- [ ] 调整 `split_choice_options()` 的候选链选择：优先连续 A–D、拒绝重复/倒序/跨下一题；仅在弱候选获得图片或完整链补强时采用。
-- [ ] 在边界置信度中把明确选择题但只有 2/3 个选项标记为 `unstable-choice-options`，四项完整链才可视为稳定。
-- [ ] 重跑目标测试，确认通过；再运行 `cd backend/python-worker && python -m pytest tests/test_question_boundary.py tests/test_import_services.py -q` 防止导入链回归。
-- [ ] 提交：`git add backend/python-worker/app/question_markdown.py backend/python-worker/app/question_boundary.py backend/python-worker/tests/test_question_markdown.py backend/python-worker/tests/test_question_boundary.py && git commit -m "fix: recover embedded choice option labels"`
+- [x] 添加失败测试：输入 `A/B/C` 后出现 `运动鞋底的鞋钉 D\n\n![](images/d.png)` 时，`split_choice_options()` 应恢复 A–D，且 D 的内容包含图片。
+- [x] 添加失败测试：英文正文中的普通大写 `D`、公式变量 `D` 和缺少 A–C 前序链的孤立 `D` 不得成为选项。
+- [x] 添加失败测试：跨页序列化 Markdown 中 A/B 在前页、C/D 在后页时仍生成一个单调 A–D 链，且不越过下一题题号。
+- [x] 运行 `cd backend/python-worker && python -m pytest tests/test_question_markdown.py tests/test_question_boundary.py -q`，确认新测试因弱标签候选尚未实现而失败。
+- [x] 在 `detect_choice_option_markers()` 中增加仅针对“当前期望标签”的弱候选：要求前序链存在，候选后紧邻换行/图片/短文本块，并记录 `strength` 与 `reasons`，不把弱候选直接当作独立强标签。
+- [x] 调整 `split_choice_options()` 的候选链选择：优先连续 A–D、拒绝重复/倒序/跨下一题；仅在弱候选获得图片或完整链补强时采用。
+- [x] 在边界置信度中把明确选择题但只有 2/3 个选项标记为 `unstable-choice-options`，四项完整链才可视为稳定。
+- [x] 重跑目标测试，确认通过；再运行 `cd backend/python-worker && python -m pytest tests/test_question_boundary.py tests/test_import_services.py -q` 防止导入链回归。
+- [x] 提交：`git add backend/python-worker/app/question_markdown.py backend/python-worker/app/question_boundary.py backend/python-worker/tests/test_question_markdown.py backend/python-worker/tests/test_question_boundary.py && git commit -m "fix: recover embedded choice option labels"`
 
 ## Task 2: 新增二维选项单元格与全局一对一分配器
 
@@ -34,18 +34,18 @@
 - Create: `backend/python-worker/app/choice_layout_assignment.py`
 - Create: `backend/python-worker/tests/test_choice_layout_assignment.py`
 
-- [ ] 添加失败测试：四宫格图片输入顺序为 D/A/C/B 时，结果仍为 `a→A, b→B, c→C, d→D`。
-- [ ] 添加失败测试：图片位于标签上方时，轮胎图应归 A、骆驼图应归 B，而不是题干和 A。
-- [ ] 添加失败测试：A/B 与 C/D 分处连续两页时，分配器输出同一 A–D 序列；不同题目页区间的节点不得混入。
-- [ ] 添加失败测试：最优和次优总代价差小于阈值时返回 `needs_review` 与 alternatives，不伪造高置信结果。
-- [ ] 运行 `cd backend/python-worker && python -m pytest tests/test_choice_layout_assignment.py -q`，确认模块缺失导致 RED。
-- [ ] 实现纯函数节点归一化：校验 `pageIndex`、bbox、页宽/页高、稳定 `imageRef`，并构造 `option-label`、`text`、`image` 节点。
-- [ ] 实现选项单元格构造，支持“标签→图片”“图片→标签”和同行/同列；跨页只允许题目布局范围内的连续页面。
-- [ ] 实现代价函数：同页、行列重叠、归一化距离、阅读顺序、offset 一致性和交叉惩罚。
-- [ ] 用 `itertools.permutations` 对最多 A–H 的小规模集合求全局最低成本，并计算次优 margin；无多图聚类证据时强制一对一。
-- [ ] 输出确定性审计字段：`totalCost`、`secondBestCost`、`margin`、`blockingReasons`、逐图 alternatives 和 confidence。
-- [ ] 运行目标测试确认 GREEN，并运行 `python -m compileall -q app`。
-- [ ] 提交：`git add backend/python-worker/app/choice_layout_assignment.py backend/python-worker/tests/test_choice_layout_assignment.py && git commit -m "feat: assign choice images with layout constraints"`
+- [x] 添加失败测试：四宫格图片输入顺序为 D/A/C/B 时，结果仍为 `a→A, b→B, c→C, d→D`。
+- [x] 添加失败测试：图片位于标签上方时，轮胎图应归 A、骆驼图应归 B，而不是题干和 A。
+- [x] 添加失败测试：A/B 与 C/D 分处连续两页时，分配器输出同一 A–D 序列；不同题目页区间的节点不得混入。
+- [x] 添加失败测试：最优和次优总代价差小于阈值时返回 `needs_review` 与 alternatives，不伪造高置信结果。
+- [x] 运行 `cd backend/python-worker && python -m pytest tests/test_choice_layout_assignment.py -q`，确认模块缺失导致 RED。
+- [x] 实现纯函数节点归一化：校验 `pageIndex`、bbox、页宽/页高、稳定 `imageRef`，并构造 `option-label`、`text`、`image` 节点。
+- [x] 实现选项单元格构造，支持“标签→图片”“图片→标签”和同行/同列；跨页只允许题目布局范围内的连续页面。
+- [x] 实现代价函数：同页、行列重叠、归一化距离、阅读顺序、offset 一致性和交叉惩罚。
+- [x] 用 `itertools.permutations` 对最多 A–H 的小规模集合求全局最低成本，并计算次优 margin；无多图聚类证据时强制一对一。
+- [x] 输出确定性审计字段：`totalCost`、`secondBestCost`、`margin`、`blockingReasons`、逐图 alternatives 和 confidence。
+- [x] 运行目标测试确认 GREEN，并运行 `python -m compileall -q app`。
+- [x] 提交：`git add backend/python-worker/app/choice_layout_assignment.py backend/python-worker/tests/test_choice_layout_assignment.py && git commit -m "feat: assign choice images with layout constraints"`
 
 ## Task 3: 将二维分配接入 OCR placement，并保护人工结果
 
@@ -165,7 +165,7 @@
 - [ ] 对普通纯文字选择题、单题标准化和全局标准化各跑一组回归，确认结果逻辑一致；阻断题不得自动写回，稳定题仍走规则/缓存快速路径。
 - [ ] 若任一真实样本失败，保存 preview 证据，按系统化调试流程新增失败测试后修复，并重复本任务全部验证命令。
 - [ ] 提交文档和必要修复：`git add docs backend local-platform .env.example && git commit -m "docs: document layout-aware image placement"`（仅在有未提交文件时执行）。
-- [ ] 将当前分支部署到 `/home/user/AI_GENERATION_DOCKER`，同步时排除 `.env`、`server-data`、构建缓存和本地依赖；使用现有服务器环境变量重建并启动 Docker Compose。
+- [ ] 将当前分支部署到 `$DEPLOY_DIR`，同步时排除 `.env`、`server-data`、构建缓存和本地依赖；使用现有服务器环境变量重建并启动 Docker Compose。
 - [ ] 发布后检查容器健康、`/api/health`、前端页面、canonicalization preview 和上述第 4/6 题结果；记录镜像/提交版本和验证输出。
 - [ ] 保留 `codex/image-placement-upgrade` 分支，不合并 `main`，不自动 apply 用户原任务数据。
 

@@ -27,6 +27,13 @@
 - 可选导出 Markdown/DOCX/PDF。
 - 通过 callback-flow 向平台通知任务完成、失败或可重试事件。
 
+题图归属兼容说明：
+
+- 导入题继续使用既有 `images[]` 和 `imagePlacements[]`，没有新增破坏性 API 字段。
+- worker/Java 题目原始快照可附带 `imagePlacementValidation`，其中 `blockingReasons` 是稳定机器码；Java 会将其放入单题和全局标准化的 `structuredHints`。
+- `POST /api/import-tasks/{taskId}/canonicalization/preview` 可附带 `structureDiffs[]`，列出 `optionCountBefore/After`、题图 `oldTarget/newTarget`、confidence 和 alternatives。apply/rollback 路径不变。
+- 本次没有修改 `question-engine.v1.yaml`：上述字段均位于既有可扩展题目快照/preview 响应中，`question-package.v1` 的 `images` 与 `imagePlacements` 结构保持兼容。
+
 平台负责：
 
 - 用户、租户、学校、机构、教师身份。

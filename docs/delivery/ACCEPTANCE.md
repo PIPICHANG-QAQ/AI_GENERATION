@@ -38,6 +38,15 @@
 
 ## 能力目录与平台契约
 
+### 选择题选项与题图二维归属
+
+- OCR 将 `A/B/C` 后粘在说明文字末尾、且后接图片布局块的预期 `D` 恢复为连续 A–D；普通英文变量或孤立 D 不得误判。
+- 图片位于选项字母之前、双栏/四宫格、跨页 A/B + C/D 时，使用 page/bbox 全局一对一分配，不依赖图片序列化顺序。
+- 第 4 题真实回归样本必须恢复 4 个选项并把四图归入 A/B/C/D；第 6 题轮胎、骆驼、菜刀、图钉必须分别归 A/B/C/D。
+- 明确四选一但只有三项、题干存在图片且选项缺图、高置信 placement 缺 page/bbox、同图多个排他归属时必须 `review_required`，原题不得被单题或全局标准化自动覆盖。
+- canonicalization preview 必须只读并返回结构差异；apply 前保存回滚快照，人工 `confirmed/overridden` placement 不得被自动结果覆盖。
+- 前端必须显示阻断原因和题图旧→新归属；有阻断项时单题入库和 canonicalization apply 不可用。
+
 - `GET /api/engine` 必须返回能力发动机编码 `question-engine`。
 - `GET /api/engine` 必须返回四个主模块：`question-import`、`question-bank`、`paper-assembly`、`knowledge-base`。
 - `GET /api/engine` 必须返回六个补充能力：`review-workbench`、`ai-flow`、`export-flow`、`file-flow`、`callback-flow`、`sdk-openapi`。

@@ -20,6 +20,7 @@ Java 主后端（第一阶段并行骨架）
   Engine 能力目录：/api/engine
   标准题目包：question-package.v1
   题图归属 JSON 持久化：images 资产池 + imagePlacements owner/evidence/inference
+  题图结构守卫：imagePlacementValidation 进入统一单题/全局标准化 structuredHints
   知识点 / 题库题目 / 试卷基础 CRUD
   导入任务元数据、状态机与题目/题图同步
   导入原文件 Java 存储与预览
@@ -38,6 +39,8 @@ FastAPI / Python worker
   默认 MinerU provider 子进程调用
   大模型拆题
   AI 题目元数据补全
+  选择题选项链恢复 + 跨页二维单元格 + 全局一对一题图分配
+  canonicalization 复用已保存 OCR 布局，输出旧/新归属差异与阻断机器码
   公式标准化与校验
   图片归属协调：Markdown offset 优先，page/bbox 几何只读补充，冲突进入人工复核
   导出运行时探针：/api/system/export-flow、/worker/export-flow
