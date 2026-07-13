@@ -15,6 +15,7 @@ from app.import_services import (
     find_bank_question_index_for_import,
     normalize_display_math_blocks,
     normalize_sub_questions,
+    recover_stale_glued_section_questions,
     render_validate_markdown_candidate,
     standardize_markdown_ai_response,
     top_level_ocr_questions,
@@ -144,6 +145,192 @@ class ImportServicesTest(unittest.TestCase):
             result["canonicalization"]["idMap"],
         )
 
+    def test_canonicalization_preview_replaces_auto_saved_glued_choice_stem(self):
+        glued_stem = (
+            "下列说法正确的是（A．做功越少的机械做功越慢"
+            "B．流体在流速大的地方压强大"
+            "C．力的作用效果只与力的大小有关"
+            "D．风力发电机是将风能转化为电能的设备"
+        )
+        markdown = f"11．{glued_stem}\n参考答案\n11．下列说法正确的是（ ）"
+        answer_start = markdown.rindex("11．")
+        outputs = {
+            "markdown": markdown,
+            "questions": [
+                {
+                    "id": "q_11",
+                    "number": 11,
+                    "type": "choice",
+                    "stemMarkdown": glued_stem,
+                    "manualMarkdown": glued_stem,
+                    "options": [],
+                    "sourceEvidence": {"start": 0, "end": markdown.index("参考答案")},
+                },
+                {
+                    "id": "q_11_2",
+                    "number": 11,
+                    "type": "choice",
+                    "stemMarkdown": "下列说法正确的是（ ）",
+                    "options": [
+                        {"label": "A", "content": "甲"},
+                        {"label": "B", "content": "乙"},
+                        {"label": "C", "content": "丙"},
+                        {"label": "D", "content": "丁"},
+                    ],
+                    "sourceEvidence": {"start": answer_start, "end": len(markdown)},
+                },
+            ],
+        }
+        task = {
+            "id": "task-1",
+            "questions": [
+                {
+                    "id": "saved-q11",
+                    "sourceQuestionId": "q_11",
+                    "number": 11,
+                    "type": "choice",
+                    "stemMarkdown": glued_stem,
+                    "manualMarkdown": glued_stem,
+                    "options": [],
+                }
+            ],
+        }
+
+        result = canonicalize_import_outputs(task, outputs)
+
+        question = result["questions"][0]
+        self.assertEqual("下列说法正确的是（ ）", question["stemMarkdown"])
+        self.assertEqual("下列说法正确的是（ ）", question["manualMarkdown"])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in question["options"]])
+
+    def test_canonicalization_preview_keeps_manually_edited_options(self):
+        outputs = {
+            "markdown": "1．选择正确答案（ ）\nA．自动甲 B．自动乙 C．自动丙 D．自动丁",
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": "选择正确答案（ ）",
+                    "options": [
+                        {"label": "A", "content": "自动甲"},
+                        {"label": "B", "content": "自动乙"},
+                        {"label": "C", "content": "自动丙"},
+                        {"label": "D", "content": "自动丁"},
+                    ],
+                    "sourceEvidence": {"start": 0, "end": 40},
+                }
+            ],
+        }
+        task = {
+            "id": "task-1",
+            "questions": [
+                {
+                    "id": "saved-q1",
+                    "sourceQuestionId": "q_1",
+                    "number": 1,
+                    "stemMarkdown": "选择正确答案（ ）",
+                    "manualMarkdown": "选择正确答案（ ）",
+                    "manualEditedAt": "2026-07-13T10:00:00",
+                    "options": [{"label": "A", "content": "人工保留选项"}],
+                }
+            ],
+        }
+
+        question = canonicalize_import_outputs(task, outputs)["questions"][0]
+
+        self.assertEqual([{"label": "A", "content": "人工保留选项"}], question["options"])
+
+    def test_canonicalization_preview_does_not_treat_blank_manual_as_auto_saved(self):
+        glued_stem = "选择正确答案（A．甲B．乙C．丙D．丁"
+        markdown = f"1．{glued_stem}\n参考答案\n1．选择正确答案（ ）"
+        outputs = {
+            "markdown": markdown,
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": glued_stem,
+                    "options": [],
+                    "sourceEvidence": {"start": 0, "end": markdown.index("参考答案")},
+                },
+                {
+                    "id": "q_1_2",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": "选择正确答案（ ）",
+                    "options": [
+                        {"label": "A", "content": "甲"},
+                        {"label": "B", "content": "乙"},
+                        {"label": "C", "content": "丙"},
+                        {"label": "D", "content": "丁"},
+                    ],
+                    "sourceEvidence": {"start": markdown.rindex("1．"), "end": len(markdown)},
+                },
+            ],
+        }
+        task = {
+            "id": "task-1",
+            "questions": [
+                {
+                    "id": "saved-q1",
+                    "sourceQuestionId": "q_1",
+                    "number": 1,
+                    "stemMarkdown": glued_stem,
+                    "manualMarkdown": "",
+                    "options": [],
+                }
+            ],
+        }
+
+        question = canonicalize_import_outputs(task, outputs)["questions"][0]
+
+        self.assertEqual(glued_stem, question["stemMarkdown"])
+        self.assertEqual("", question["manualMarkdown"])
+        self.assertEqual([], question["options"])
+
+    def test_canonicalization_preview_does_not_convert_saved_solution_to_choice(self):
+        glued_stem = "请分析（A．条件甲 B．条件乙 C．条件丙 D．条件丁"
+        outputs = {
+            "markdown": "1．请选择（ ）\nA．甲 B．乙 C．丙 D．丁",
+            "questions": [
+                {
+                    "id": "q_1",
+                    "number": 1,
+                    "type": "choice",
+                    "stemMarkdown": "请选择（ ）",
+                    "options": [
+                        {"label": "A", "content": "甲"},
+                        {"label": "B", "content": "乙"},
+                        {"label": "C", "content": "丙"},
+                        {"label": "D", "content": "丁"},
+                    ],
+                    "sourceEvidence": {"start": 0, "end": 30},
+                }
+            ],
+        }
+        task = {
+            "id": "task-1",
+            "questions": [
+                {
+                    "id": "saved-q1",
+                    "sourceQuestionId": "q_1",
+                    "number": 1,
+                    "type": "solution",
+                    "stemMarkdown": glued_stem,
+                    "manualMarkdown": glued_stem,
+                    "options": [],
+                }
+            ],
+        }
+
+        question = canonicalize_import_outputs(task, outputs)["questions"][0]
+
+        self.assertEqual(glued_stem, question["stemMarkdown"])
+        self.assertEqual(glued_stem, question["manualMarkdown"])
+        self.assertEqual([], question["options"])
+
     def test_canonicalization_preview_recovers_option_and_layout_placement_diffs(self):
         markdown = "1. 选择正确图片"
         images = [{"path": f"images/{label.lower()}.png"} for label in "ABCD"]
@@ -202,6 +389,129 @@ class ImportServicesTest(unittest.TestCase):
         self.assertEqual(3, diff["optionCountBefore"])
         self.assertEqual(4, diff["optionCountAfter"])
         self.assertTrue(any(item["imageId"] == "images/d.png" and item["newTarget"]["optionLabel"] == "D" for item in diff["placements"]))
+
+    def test_canonicalization_preview_recovers_question_glued_to_section_heading(self):
+        markdown = """一、解答题
+1．（6分）完成实验。
+
+2．（6分）继续实验。
+
+五、选择题（每小题2分，共10分）3．（2分）如图所示，下列说法正确的是（ ）
+A．甲 B．乙 C．丙 D．丁
+
+4．（2分）下一道选择题是（ ）
+A．甲 B．乙 C．丙 D．丁
+"""
+        q2_start = markdown.index("2．")
+        q2_end = markdown.index("五、选择题")
+        q4_start = markdown.index("4．")
+        outputs = {
+            "markdown": markdown,
+            "assets": [],
+            "sections": [
+                {
+                    "questions": [
+                        {
+                            "id": "q_1",
+                            "number": 1,
+                            "type": "solution",
+                            "stemMarkdown": "（6分）完成实验。",
+                            "analysis": "保留旧结构分析字段",
+                            "sourceEvidence": {"start": markdown.index("1．"), "end": q2_start},
+                        },
+                        {
+                            "id": "q_2",
+                            "number": 2,
+                            "type": "solution",
+                            "stemMarkdown": "（6分）继续实验。",
+                            "sourceEvidence": {"start": q2_start, "end": q2_end},
+                        },
+                        {
+                            "id": "q_4",
+                            "number": 4,
+                            "type": "choice",
+                            "stemMarkdown": "下一道选择题是（ ）",
+                            "sourceEvidence": {"start": q4_start, "end": len(markdown)},
+                            "options": [
+                                {"label": "A", "content": "甲"},
+                                {"label": "B", "content": "乙"},
+                                {"label": "C", "content": "丙"},
+                                {"label": "D", "content": "丁"},
+                            ],
+                        },
+                    ]
+                }
+            ],
+        }
+        task = {
+            "id": "task-1",
+            "questions": [
+                {
+                    "id": "saved-q4",
+                    "sourceQuestionId": "q_4",
+                    "number": 3,
+                    "manualMarkdown": "人工修订后的第4题",
+                    "options": [],
+                }
+            ],
+        }
+
+        result = canonicalize_import_outputs(task, outputs)
+
+        self.assertEqual(["q_1", "q_2", "q_3", "q_4"], [question["sourceQuestionId"] for question in result["questions"]])
+        self.assertEqual("保留旧结构分析字段", result["questions"][0]["analysis"])
+        self.assertEqual(3, result["summary"]["beforeQuestionCount"])
+        self.assertEqual(4, result["summary"]["afterQuestionCount"])
+        self.assertEqual(1, result["summary"]["recoveredQuestionCount"])
+        self.assertEqual(0, result["summary"]["mergedQuestionCount"])
+        recovered = result["questions"][2]
+        self.assertEqual(3, recovered["number"])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in recovered["options"]])
+        saved = result["questions"][3]
+        self.assertEqual("saved-q4", saved["id"])
+        self.assertEqual(4, saved["number"])
+        self.assertEqual("人工修订后的第4题", saved["manualMarkdown"])
+        recovered_diff = next(item for item in result["structureDiffs"] if item["sourceQuestionId"] == "q_3")
+        self.assertTrue(recovered_diff["added"])
+        self.assertTrue(recovered_diff["changed"])
+        renumbered_diff = next(item for item in result["structureDiffs"] if item["sourceQuestionId"] == "q_4")
+        self.assertEqual(3, renumbered_diff["numberBefore"])
+        self.assertEqual(4, renumbered_diff["numberAfter"])
+        self.assertTrue(renumbered_diff["changed"])
+
+    def test_glued_section_recovery_ignores_existing_question_with_shifted_start(self):
+        markdown = """一、解答题
+1．完成实验。
+
+五、选择题（每小题2分）2．选择正确答案（ ）
+A．甲 B．乙 C．丙 D．丁
+"""
+        inline_start = markdown.index("2．")
+        stored_questions = [
+            {
+                "id": "q_1",
+                "number": 1,
+                "type": "solution",
+                "stemMarkdown": "完成实验。",
+                "analysis": "必须保留的旧结构字段",
+                "sourceEvidence": {"start": markdown.index("1．"), "end": markdown.index("五、选择题")},
+            },
+            {
+                "id": "q_2",
+                "number": 2,
+                "type": "choice",
+                "stemMarkdown": "选择正确答案（ ）",
+                "options": [{"label": "A", "content": "甲"}],
+                "sourceEvidence": {"start": inline_start + 1, "end": len(markdown)},
+            },
+        ]
+
+        recovered = recover_stale_glued_section_questions(
+            {"markdown": markdown, "assets": [], "questions": stored_questions},
+            stored_questions,
+        )
+
+        self.assertEqual(stored_questions, recovered)
 
     def test_standardize_repairs_fragmented_latex_delimiters_without_llm(self):
         self.assertIn("展示公式内部嵌套了单个 $ 分隔符", detect_severe_latex_issues(BROKEN_MARKDOWN))
@@ -1145,6 +1455,7 @@ class ImportServicesTest(unittest.TestCase):
             ],
             question["options"],
         )
+        self.assertTrue(question["manualOptionsEditedAt"])
         self.assertEqual(
             [
                 {"label": "A", "content": "正确", "contentMarkdown": "正确"},

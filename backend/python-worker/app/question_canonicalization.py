@@ -14,6 +14,7 @@ ANSWER_HEADING_RE = re.compile(
 TASKS_BLOCK_RE = re.compile(r"\\begin\{tasks\}[\s\S]*?\\end\{tasks\}", re.IGNORECASE)
 QUESTION_PREFIX_RE = re.compile(r"^\s*\d+\s*[.．、]\s*")
 SUB_QUESTION_LABEL_RE = re.compile(r"\(?\s*([0-9]+|[a-zA-Z])\s*\)?")
+INLINE_OPTION_MARKER_RE = re.compile(r"(?<![A-Za-z0-9_])([A-H])[.．、:：]\s*")
 
 
 def build_canonicalization_plan(markdown: str, questions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -133,6 +134,20 @@ def merge_answer_fields(canonical: dict[str, Any], duplicate: dict[str, Any]) ->
                 }
             )
 
+    canonical_options = [item for item in canonical.get("options") or [] if isinstance(item, dict)]
+    duplicate_options = [item for item in duplicate.get("options") or [] if isinstance(item, dict)]
+    raw_stem = str(canonical.get("stemMarkdown") or "")
+    cleaned_stem, had_glued_options = strip_glued_choice_options(raw_stem)
+    same_choice_type = (
+        str(canonical.get("type") or "").strip().lower() == "choice"
+        and str(duplicate.get("type") or "").strip().lower() == "choice"
+    )
+    if same_choice_type and not canonical_options and duplicate_options and had_glued_options:
+        canonical["stemMarkdown"] = cleaned_stem
+        if not canonical.get("manualMarkdown") or str(canonical.get("manualMarkdown")) == raw_stem:
+            canonical["manualMarkdown"] = cleaned_stem
+        canonical["options"] = copy.deepcopy(duplicate_options)
+
     canonical_children = canonical.get("subQuestions")
     if not isinstance(canonical_children, list):
         canonical_children = canonical.get("children") if isinstance(canonical.get("children"), list) else []
@@ -232,7 +247,25 @@ def stem_core(question: dict[str, Any]) -> str:
     value = TASKS_BLOCK_RE.sub("", value)
     value = QUESTION_PREFIX_RE.sub("", value)
     value = re.sub(r"【\s*(?:分析|解答|答案|点评|详解)\s*】[\s\S]*$", "", value)
+    if str(question.get("type") or "").strip().lower() == "choice" and not option_labels(question):
+        value, _ = strip_glued_choice_options(value)
     return re.sub(r"[\s\u3000]+", "", value).strip("。．")
+
+
+def strip_glued_choice_options(value: str) -> tuple[str, bool]:
+    source = str(value or "")
+    option_markers = list(INLINE_OPTION_MARKER_RE.finditer(source))
+    option_labels = [match.group(1).upper() for match in option_markers]
+    if len(option_labels) < 4 or option_labels[:4] != ["A", "B", "C", "D"]:
+        return source, False
+    stem = source[: option_markers[0].start()].rstrip()
+    if not stem.endswith(("（", "(")):
+        return source, False
+    if stem.endswith("（"):
+        stem += " ）"
+    elif stem.endswith("("):
+        stem += " )"
+    return stem, True
 
 
 def match_score(paper: dict[str, Any], answer: dict[str, Any]) -> float:

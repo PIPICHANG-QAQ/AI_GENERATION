@@ -1,4 +1,8 @@
-from app.question_canonicalization import apply_canonicalization, build_canonicalization_plan
+from app.question_canonicalization import (
+    apply_canonicalization,
+    build_canonicalization_plan,
+    strip_glued_choice_options,
+)
 
 
 def test_answer_zone_duplicate_merges_into_paper_question():
@@ -33,6 +37,98 @@ def test_answer_zone_duplicate_merges_into_paper_question():
     assert plan["automaticMerges"][0]["duplicateId"] == "q_1_2"
     assert plan["automaticMerges"][0]["canonicalId"] == "q_1"
     assert plan["blockingIssues"] == []
+
+
+def test_answer_zone_duplicate_merges_when_paper_options_are_glued_into_stem():
+    glued_stem = (
+        "下列说法正确的是（A．做功越少的机械做功越慢"
+        "B．流体在流速大的地方压强大"
+        "C．力的作用效果只与力的大小有关"
+        "D．风力发电机是将风能转化为电能的设备"
+    )
+    markdown = (
+        f"11．{glued_stem}\n"
+        "参考答案\n"
+        "11．下列说法正确的是（ ）\nA．甲 B．乙 C．丙 D．丁"
+    )
+    answer_start = markdown.index("11．", markdown.index("参考答案"))
+    questions = [
+        {
+            "id": "q_11",
+            "number": 11,
+            "type": "choice",
+            "stemMarkdown": glued_stem,
+            "options": [],
+            "sourceEvidence": {"start": 0, "end": markdown.index("参考答案")},
+        },
+        {
+            "id": "q_11_2",
+            "number": 11,
+            "type": "choice",
+            "stemMarkdown": "下列说法正确的是（ ）",
+            "options": [
+                {"label": "A", "content": "甲"},
+                {"label": "B", "content": "乙"},
+                {"label": "C", "content": "丙"},
+                {"label": "D", "content": "丁"},
+            ],
+            "sourceEvidence": {"start": answer_start, "end": len(markdown)},
+        },
+    ]
+
+    plan = build_canonicalization_plan(markdown, questions)
+
+    assert plan["idMap"]["q_11_2"] == "q_11"
+    assert plan["automaticMerges"][0]["duplicateId"] == "q_11_2"
+    assert plan["reviewItems"] == []
+
+    canonical = apply_canonicalization(questions, plan)["questions"][0]
+    assert canonical["stemMarkdown"] == "下列说法正确的是（ ）"
+    assert [option["label"] for option in canonical["options"]] == ["A", "B", "C", "D"]
+
+
+def test_body_abc_enumeration_is_not_treated_as_glued_choice_options():
+    stem = "请比较 A．甲路线 B．乙路线 C．丙路线 D．丁路线 后求甲的值"
+
+    cleaned, detected = strip_glued_choice_options(stem)
+
+    assert detected is False
+    assert cleaned == stem
+
+
+def test_solution_merge_does_not_convert_parenthesized_abcd_conditions_to_options():
+    stem = "请分析（A．条件甲 B．条件乙 C．条件丙 D．条件丁"
+    markdown = f"1．{stem}\n参考答案\n1．{stem}"
+    answer_start = markdown.rindex("1．")
+    questions = [
+        {
+            "id": "q_1",
+            "number": 1,
+            "type": "solution",
+            "stemMarkdown": stem,
+            "options": [],
+            "sourceEvidence": {"start": 0, "end": markdown.index("参考答案")},
+        },
+        {
+            "id": "q_1_2",
+            "number": 1,
+            "type": "solution",
+            "stemMarkdown": stem,
+            "options": [
+                {"label": "A", "content": "条件甲"},
+                {"label": "B", "content": "条件乙"},
+                {"label": "C", "content": "条件丙"},
+                {"label": "D", "content": "条件丁"},
+            ],
+            "sourceEvidence": {"start": answer_start, "end": len(markdown)},
+        },
+    ]
+
+    plan = build_canonicalization_plan(markdown, questions)
+    canonical = apply_canonicalization(questions, plan)["questions"][0]
+
+    assert canonical["stemMarkdown"] == stem
+    assert canonical["options"] == []
 
 
 def test_same_number_without_answer_heading_is_not_merged():

@@ -13,8 +13,18 @@ from difflib import SequenceMatcher
 from app.worker_base import *
 from app.question_markdown import *
 from app.ocr_processing import *
-from app.question_boundary import detect_sub_question_boundaries, strip_sub_label
-from app.question_canonicalization import apply_canonicalization, build_canonicalization_plan
+from app.question_boundary import (
+    build_structure_from_boundaries,
+    detect_local_boundaries,
+    detect_sub_question_boundaries,
+    strip_sub_label,
+)
+from app.question_canonicalization import (
+    answer_zone_start,
+    apply_canonicalization,
+    build_canonicalization_plan,
+    strip_glued_choice_options,
+)
 from app.image_placement import validate_image_placements
 
 AI_STANDARDIZE_CACHE_VERSION = "2026-07-09-choice-image-ref-guard-v1"
@@ -140,8 +150,11 @@ def canonicalize_import_outputs(
     """Build a deterministic, read-only import preview from canonical OCR questions."""
     task_copy = copy.deepcopy(task) if isinstance(task, dict) else {}
     outputs_copy = copy.deepcopy(outputs) if isinstance(outputs, dict) else {}
-    source_questions = unique_source_question_ids(top_level_ocr_questions(outputs_copy))
-    original_sources = copy.deepcopy(source_questions)
+    stored_source_questions = top_level_ocr_questions(outputs_copy)
+    original_sources = unique_source_question_ids(stored_source_questions)
+    source_questions = unique_source_question_ids(
+        recover_stale_glued_section_questions(outputs_copy, stored_source_questions)
+    )
     source_questions = [recover_incomplete_choice_options(question) for question in source_questions]
     markdown = str(outputs_copy.get("markdown") or "")
     plan = build_canonicalization_plan(markdown, source_questions)
@@ -224,9 +237,19 @@ def canonicalize_import_outputs(
     ]
     blocking_issues = [*copy.deepcopy(plan.get("blockingIssues") or []), *placement_blocking_issues]
     summary = {
-        "beforeQuestionCount": len(source_questions),
+        "beforeQuestionCount": len(original_sources),
         "afterQuestionCount": len(import_questions),
-        "mergedQuestionCount": len(source_questions) - len(import_questions),
+        "recoveredQuestionCount": max(0, len(source_questions) - len(original_sources)),
+        "addedQuestionCount": sum(1 for item in structure_diffs if item.get("added")),
+        "removedQuestionCount": sum(1 for item in structure_diffs if item.get("removed")),
+        "renumberedQuestionCount": sum(
+            1
+            for item in structure_diffs
+            if item.get("numberBefore") is not None
+            and item.get("numberAfter") is not None
+            and item.get("numberBefore") != item.get("numberAfter")
+        ),
+        "mergedQuestionCount": len(plan.get("automaticMerges") or []),
     }
     canonicalization = {
         **copy.deepcopy(plan),
@@ -253,6 +276,66 @@ def canonicalize_import_outputs(
         "blockingIssues": blocking_issues,
         "structureDiffs": structure_diffs,
     }
+
+
+def recover_stale_glued_section_questions(
+    outputs: dict[str, Any], stored_questions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Rebuild stale OCR structure only when a newly detected inline-section question is missing."""
+    markdown = str(outputs.get("markdown") or "")
+    if not markdown:
+        return stored_questions
+    assets = [item for item in outputs.get("assets") or [] if isinstance(item, dict)]
+    boundaries = detect_local_boundaries(markdown, assets)
+    inline_starts = {
+        int(candidate["start"])
+        for candidate in boundaries.get("anchorCandidates") or []
+        if isinstance(candidate, dict)
+        and candidate.get("accepted")
+        and candidate.get("source") == "inline-section"
+        and isinstance(candidate.get("start"), int)
+    }
+    if not inline_starts:
+        return stored_questions
+    rebuilt = build_structure_from_boundaries(markdown, boundaries, assets)
+    rebuilt_questions = top_level_ocr_questions(rebuilt)
+    if not rebuilt_questions:
+        return stored_questions
+
+    answer_start = answer_zone_start(markdown)
+
+    def occurrence_key(question: dict[str, Any]) -> tuple[int, bool]:
+        evidence = question.get("sourceEvidence") if isinstance(question.get("sourceEvidence"), dict) else {}
+        start = int(evidence.get("start") or 0)
+        return int(question.get("number") or 0), start >= answer_start
+
+    stored_counts: dict[tuple[int, bool], int] = {}
+    for question in stored_questions:
+        if not isinstance(question, dict):
+            continue
+        key = occurrence_key(question)
+        stored_counts[key] = stored_counts.get(key, 0) + 1
+
+    rebuilt_counts: dict[tuple[int, bool], int] = {}
+    missing_questions: list[dict[str, Any]] = []
+    for question in rebuilt_questions:
+        if not isinstance(question, dict):
+            continue
+        key = occurrence_key(question)
+        rebuilt_counts[key] = rebuilt_counts.get(key, 0) + 1
+        evidence = question.get("sourceEvidence") if isinstance(question.get("sourceEvidence"), dict) else {}
+        start = evidence.get("start")
+        if start not in inline_starts or stored_counts.get(key, 0) >= rebuilt_counts[key]:
+            continue
+        missing_questions.append(question)
+
+    if not missing_questions:
+        return stored_questions
+    combined = [*stored_questions, *missing_questions]
+    return sorted(
+        combined,
+        key=lambda question: int((question.get("sourceEvidence") or {}).get("start") or 0),
+    )
 
 
 def recover_incomplete_choice_options(question: dict[str, Any]) -> dict[str, Any]:
@@ -296,10 +379,14 @@ def build_structure_diffs(
         for item in existing_questions
         if isinstance(item, dict) and str(item.get("sourceQuestionId") or "")
     }
+    before_by_source = {**original_by_source, **existing_by_source}
     diffs: list[dict[str, Any]] = []
+    generated_source_ids: set[str] = set()
     for question in generated_questions:
         source_id = str(question.get("sourceQuestionId") or "")
-        before = existing_by_source.get(source_id) or original_by_source.get(source_id) or {}
+        generated_source_ids.add(source_id)
+        before = before_by_source.get(source_id) or {}
+        added = source_id not in before_by_source
         before_placements = placement_by_image(before.get("imagePlacements"))
         after_placements = placement_by_image(question.get("imagePlacements"))
         placement_diffs = []
@@ -317,7 +404,12 @@ def build_structure_diffs(
             )
         before_count = len(before.get("options") or [])
         after_count = len(question.get("options") or [])
-        changed = before_count != after_count or any(
+        number_before = before.get("number") if before else None
+        number_after = question.get("number")
+        before_markdown = str(before.get("manualMarkdown") or before.get("stemMarkdown") or "")
+        after_markdown = str(question.get("manualMarkdown") or question.get("stemMarkdown") or "")
+        stem_changed = bool(before) and before_markdown != after_markdown
+        changed = added or number_before != number_after or stem_changed or before_count != after_count or any(
             item["oldTarget"] != item["newTarget"] for item in placement_diffs
         )
         diffs.append(
@@ -325,11 +417,47 @@ def build_structure_diffs(
                 "questionId": str(question.get("id") or ""),
                 "sourceQuestionId": source_id,
                 "number": question.get("number"),
+                "numberBefore": number_before,
+                "numberAfter": number_after,
+                "added": added,
+                "removed": False,
+                "stemChanged": stem_changed,
                 "optionCountBefore": before_count,
                 "optionCountAfter": after_count,
                 "placements": placement_diffs,
                 "blockingReasons": copy.deepcopy((question.get("imagePlacementValidation") or {}).get("blockingReasons") or []),
                 "changed": changed,
+            }
+        )
+    removed_candidates = existing_by_source or original_by_source
+    for source_id, before in removed_candidates.items():
+        if source_id in generated_source_ids:
+            continue
+        before_placements = placement_by_image(before.get("imagePlacements"))
+        diffs.append(
+            {
+                "questionId": str(before.get("id") or ""),
+                "sourceQuestionId": source_id,
+                "number": before.get("number"),
+                "numberBefore": before.get("number"),
+                "numberAfter": None,
+                "added": False,
+                "removed": True,
+                "stemChanged": False,
+                "optionCountBefore": len(before.get("options") or []),
+                "optionCountAfter": 0,
+                "placements": [
+                    {
+                        "imageId": image_id,
+                        "oldTarget": copy.deepcopy(placement.get("target") or {"kind": "unassigned"}),
+                        "newTarget": {"kind": "unassigned"},
+                        "confidence": 0.0,
+                        "alternatives": [],
+                    }
+                    for image_id, placement in sorted(before_placements.items())
+                ],
+                "blockingReasons": [],
+                "changed": True,
             }
         )
     return diffs
@@ -384,9 +512,42 @@ def preserve_existing_import_question(
     if not existing_children and generated_children:
         merged["subQuestions"] = copy.deepcopy(generated_children)
         merged["children"] = copy.deepcopy(generated_children)
-    for field in ("options", "images"):
-        if generated.get(field):
-            merged[field] = copy.deepcopy(generated[field])
+    existing_stem = str(existing.get("stemMarkdown") or "")
+    existing_manual = str(existing.get("manualMarkdown") or "")
+    _, existing_has_glued_options = strip_glued_choice_options(existing_stem)
+    same_choice_type = (
+        normalize_question_type(existing.get("type")) == "choice"
+        and normalize_question_type(generated.get("type")) == "choice"
+    )
+    manually_reviewed = bool(
+        existing.get("manualEditedAt")
+        or existing.get("manualOptionsEditedAt")
+        or existing.get("status") in {"已校验", "已入库"}
+        or (existing_manual and existing_manual != existing_stem)
+    )
+    auto_saved_glued_choice = bool(
+        same_choice_type
+        and existing_has_glued_options
+        and not existing.get("options")
+        and generated.get("options")
+        and existing_manual
+        and existing_manual == existing_stem
+        and not manually_reviewed
+    )
+    if auto_saved_glued_choice:
+        merged["stemMarkdown"] = copy.deepcopy(generated.get("stemMarkdown") or "")
+        merged["manualMarkdown"] = copy.deepcopy(
+            generated.get("manualMarkdown") or generated.get("stemMarkdown") or ""
+        )
+    if (
+        generated.get("options")
+        and same_choice_type
+        and not manually_reviewed
+        and (not existing_has_glued_options or auto_saved_glued_choice)
+    ):
+        merged["options"] = copy.deepcopy(generated["options"])
+    if generated.get("images"):
+        merged["images"] = copy.deepcopy(generated["images"])
     if generated.get("imagePlacements"):
         merged["imagePlacements"] = merge_manual_placements(
             existing.get("imagePlacements"), generated.get("imagePlacements")
@@ -2165,6 +2326,7 @@ def update_import_question_from_payload(question: dict[str, Any], payload: Impor
         question["score"] = payload.score
     if payload.options is not None:
         question["options"] = normalize_question_options_image_refs(payload.options, question.get("images"))
+        question["manualOptionsEditedAt"] = now_iso()
     if payload.status is not None:
         if payload.status not in QUESTION_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid question status")

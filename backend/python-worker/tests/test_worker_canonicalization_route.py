@@ -45,6 +45,10 @@ def test_canonicalization_preview_is_read_only():
     assert body["summary"] == {
         "beforeQuestionCount": 2,
         "afterQuestionCount": 1,
+        "recoveredQuestionCount": 0,
+        "addedQuestionCount": 0,
+        "removedQuestionCount": 1,
+        "renumberedQuestionCount": 0,
         "mergedQuestionCount": 1,
     }
     assert len(body["questions"]) == 1
