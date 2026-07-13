@@ -12,6 +12,7 @@ from app.import_services import (
     clear_standardize_cache,
     detect_severe_latex_issues,
     find_bank_question_index_for_import,
+    import_task_image_library,
     normalize_display_math_blocks,
     normalize_sub_questions,
     render_validate_markdown_candidate,
@@ -52,6 +53,34 @@ $$\left\{\begin{array}{l l}{\displaystyle${\frac{5 x - 1}{6}$} + 2$\geq$ \displa
 
 
 class ImportServicesTest(unittest.TestCase):
+    def test_task_image_library_indexes_nested_subquestion_images(self):
+        task = {
+            "questions": [
+                {
+                    "id": "q37",
+                    "number": 37,
+                    "images": [],
+                    "subQuestions": [
+                        {
+                            "id": "q37_sub_3",
+                            "label": "(3)",
+                            "images": [
+                                {"name": "q37-a.png", "path": "images/q37-a.png", "url": "/q37-a.png"},
+                                {"name": "q37-b.png", "path": "images/q37-b.png", "url": "/q37-b.png"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        library = import_task_image_library(task)
+
+        self.assertEqual(2, len(library))
+        self.assertEqual(["subQuestion", "subQuestion"], [item["ownerKind"] for item in library])
+        self.assertEqual(["q37_sub_3", "q37_sub_3"], [item["ownerId"] for item in library])
+        self.assertEqual(["(3)", "(3)"], [item["ownerLabel"] for item in library])
+
     def setUp(self):
         clear_standardize_cache()
 

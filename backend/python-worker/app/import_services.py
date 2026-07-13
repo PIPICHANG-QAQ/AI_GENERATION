@@ -1580,28 +1580,68 @@ def bank_question_duplicate_reason(
 def import_task_image_library(task: dict[str, Any]) -> list[dict[str, Any]]:
     """汇总导入任务下可复用的题图资源。"""
     images: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    indexed: dict[str, dict[str, Any]] = {}
 
-    def append_asset(asset: dict[str, Any], source: str) -> None:
+    def append_asset(asset: dict[str, Any], source: str, owner: dict[str, Any] | None = None) -> None:
         """执行 append asset 逻辑。"""
         url = str(asset.get("url") or "").strip()
         path = str(asset.get("path") or asset.get("name") or url).strip()
         if not url and not path:
             return
         key = url or path
-        if key in seen:
+        existing = indexed.get(key)
+        if existing is not None:
+            if owner:
+                owners = existing.setdefault("owners", [])
+                if owner not in owners:
+                    owners.append(owner)
+                if not existing.get("ownerKind"):
+                    existing.update(
+                        ownerKind=owner["kind"],
+                        ownerQuestionId=owner["questionId"],
+                        ownerId=owner["id"],
+                        ownerLabel=owner["label"],
+                        ownerPath=owner["path"],
+                    )
             return
-        seen.add(key)
-        images.append(
-            {
-                "name": str(asset.get("name") or Path(path).name or "题图"),
-                "path": path,
-                "url": url,
-                "source": source,
-                "size": asset.get("size", 0),
-                "type": asset.get("type") or Path(path).suffix.lower().lstrip(".") or "image",
-            }
-        )
+        item = {
+            "name": str(asset.get("name") or Path(path).name or "题图"),
+            "path": path,
+            "url": url,
+            "source": source,
+            "size": asset.get("size", 0),
+            "type": asset.get("type") or Path(path).suffix.lower().lstrip(".") or "image",
+        }
+        if owner:
+            item.update(
+                ownerKind=owner["kind"],
+                ownerQuestionId=owner["questionId"],
+                ownerId=owner["id"],
+                ownerLabel=owner["label"],
+                ownerPath=owner["path"],
+                owners=[owner],
+            )
+        indexed[key] = item
+        images.append(item)
+
+    def append_question_images(question: dict[str, Any], root_question_id: str, owner_path: str, owner_kind: str) -> None:
+        owner_id = str(question.get("id") or root_question_id)
+        owner = {
+            "kind": owner_kind,
+            "questionId": root_question_id,
+            "id": owner_id,
+            "label": str(question.get("label") or ""),
+            "path": owner_path,
+        }
+        for image in question.get("images") or []:
+            if isinstance(image, dict):
+                append_asset(image, str(image.get("source") or "题目结构"), owner)
+        children = question.get("subQuestions")
+        if not isinstance(children, list):
+            children = question.get("children") if isinstance(question.get("children"), list) else []
+        for index, child in enumerate(children):
+            if isinstance(child, dict):
+                append_question_images(child, root_question_id, f"{owner_path}.subQuestions[{index}]", "subQuestion")
 
     for source, job_key in (("试卷 OCR", "paperOcrJobId"), ("答案 OCR", "answerOcrJobId")):
         job = safe_read_job(task.get(job_key))
@@ -1613,6 +1653,10 @@ def import_task_image_library(task: dict[str, Any]) -> list[dict[str, Any]]:
     for image in task.get("imageLibrary") or []:
         if isinstance(image, dict):
             append_asset(image, str(image.get("source") or "本地上传"))
+    for question in task.get("questions") or []:
+        if isinstance(question, dict):
+            question_id = str(question.get("id") or "")
+            append_question_images(question, question_id, "question", "question")
     return images
 
 
