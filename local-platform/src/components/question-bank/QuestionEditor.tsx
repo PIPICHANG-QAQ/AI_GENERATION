@@ -40,6 +40,7 @@ import {
   serializeQuestionOptions,
   removeSubQuestionForm,
   subQuestionEditorForm,
+  updateSubQuestionImages,
   type QuestionImage,
 } from "@/lib/question";
 import {
@@ -381,6 +382,7 @@ export function QuestionEditor({
         knowledgePointIds: sub.knowledgePointIds,
         knowledgePoints: knowledgePointNames,
         images: sub.images,
+        imagePlacements: sub.imagePlacements,
         options: serializeQuestionOptions(subParts.options, sub.images),
         contextMatched: sub.contextMatched,
         answerEvidence: sub.answerEvidence,
@@ -412,6 +414,13 @@ export function QuestionEditor({
     if (Object.prototype.hasOwnProperty.call(patch, "markdown")) {
       setSubStandardizeCandidate((current) => (current?.subIndex === index ? null : current));
     }
+  };
+
+  const handleSubImagesChange = (index: number, nextImages: QuestionImage[]) => {
+    setSubForms((current) =>
+      current.map((sub, subIndex) => (subIndex === index ? updateSubQuestionImages(sub, nextImages) : sub)),
+    );
+    setSubStandardizeCandidate(null);
   };
 
   const handleAddSubQuestion = () => {
@@ -727,6 +736,17 @@ export function QuestionEditor({
                         </div>
                       </div>
                     )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>小问题图（仅属于{sub.label || `第 ${subIndex + 1} 小问`}）</Label>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground/80">
+                      此处图片只写入当前小问，不会提升为父题共享图；新增或移除图片会同步更新当前小问源码引用。
+                    </p>
+                    <QuestionImageUploader
+                      images={sub.images}
+                      onChange={(nextImages) => handleSubImagesChange(subIndex, nextImages)}
+                      libraryImages={taskImageLibrary}
+                    />
                   </div>
                   <LatexPreviewField
                     label="小问答案 (支持 LaTeX)"

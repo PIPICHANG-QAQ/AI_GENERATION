@@ -141,6 +141,11 @@ export function QuestionImageUploader({
 
   const srcOf = (img: QuestionImage) => questionImageSrc(img.url || img.path);
   const imageLabel = (img: QuestionImage, index: number) => getQuestionImageLabel(img, index);
+  const ownerLabel = (img: QuestionImage) => {
+    if (img.ownerKind === "subQuestion") return `小问 ${img.ownerLabel || img.ownerId || ""}`.trim();
+    if (img.ownerKind === "question") return "父题";
+    return "";
+  };
   const refToken = (img: QuestionImage, index: number) => `![](${imageLabel(img, index)})`;
 
   const handleRefDragStart = (img: QuestionImage, index: number) => (e: React.DragEvent) => {
@@ -320,6 +325,11 @@ export function QuestionImageUploader({
                     {selected && (
                       <span className="absolute top-2 right-2 w-6 h-6 rounded-full bg-primary text-primary-foreground inline-flex items-center justify-center shadow-sm">
                         <Check className="w-3.5 h-3.5" />
+                      </span>
+                    )}
+                    {ownerLabel(img) && (
+                      <span className="absolute left-1.5 bottom-1.5 max-w-[calc(100%-0.75rem)] truncate rounded bg-background/90 px-1.5 py-0.5 text-[10px] font-medium text-foreground shadow-sm">
+                        {ownerLabel(img)}
                       </span>
                     )}
                   </button>

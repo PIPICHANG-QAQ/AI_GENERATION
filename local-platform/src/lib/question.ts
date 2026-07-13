@@ -15,6 +15,18 @@ export interface QuestionImage {
   type?: string;
   storageFileId?: string;
   questionId?: string;
+  ownerKind?: string;
+  ownerQuestionId?: string;
+  ownerId?: string;
+  ownerLabel?: string;
+  ownerPath?: string;
+  owners?: Array<{
+    kind?: string;
+    questionId?: string;
+    id?: string;
+    label?: string;
+    path?: string;
+  }>;
   raw?: Record<string, unknown>;
 }
 
@@ -63,7 +75,7 @@ export function questionImageSrc(value?: string | null): string {
 }
 
 export function getImageKey(img: QuestionImage): string {
-  return String(img.storageFileId || img.imageId || img.id || img.url || img.path || img.name || "").trim();
+  return String(img.storageFileId || img.url || img.path || img.imageId || img.id || img.name || "").trim();
 }
 
 function safeDecode(value: string): string {
@@ -468,6 +480,47 @@ export function subQuestionEditorForm(sub: any, index: number, parent?: any): an
     analysisEvidence: String(sub?.analysisEvidence ?? sub?.aiMetadata?.analysisEvidence ?? ""),
     warnings: Array.isArray(sub?.warnings) ? sub.warnings : Array.isArray(sub?.aiMetadata?.warnings) ? sub.aiMetadata.warnings : [],
     aiMetadata: sub?.aiMetadata,
+    imagePlacements: Array.isArray(sub?.imagePlacements) ? sub.imagePlacements : [],
+  };
+}
+
+export function updateSubQuestionImages(sub: any, nextImages: QuestionImage[]): any {
+  const previousImages = ensureQuestionImageLabels(Array.isArray(sub?.images) ? sub.images : []);
+  const labeledNextImages = ensureQuestionImageLabels(nextImages, previousImages);
+  const removedImages = getRemovedQuestionImages(previousImages, labeledNextImages);
+  const answer = removeQuestionImageRefsFromMarkdown(sub?.answer || "", removedImages);
+  const analysis = removeQuestionImageRefsFromMarkdown(sub?.analysis || "", removedImages);
+  const options = removeQuestionImageRefsFromOptions(sub?.options, removedImages);
+  const markdown = appendNewImageRefs(
+    removeQuestionImageRefsFromMarkdown(sub?.markdown || "", removedImages),
+    previousImages,
+    labeledNextImages,
+    [answer, analysis, ...options.map((option) => option.content)],
+  );
+  const removedKeys = new Set(
+    removedImages.flatMap((image, index) =>
+      [getImageKey(image), image.url, image.path, image.name, getQuestionImageLabel(image, index)]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const imagePlacements = Array.isArray(sub?.imagePlacements)
+    ? sub.imagePlacements.filter((placement: any) => {
+        const key = String(
+          placement?.imageKey || placement?.storageFileId || placement?.imageId || placement?.url || placement?.path || placement?.name || placement?.label || "",
+        ).trim();
+        return !key || !removedKeys.has(key);
+      })
+    : [];
+
+  return {
+    ...sub,
+    markdown,
+    answer,
+    analysis,
+    options,
+    images: labeledNextImages,
+    imagePlacements,
   };
 }
 
@@ -570,47 +623,6 @@ export function normalizeQuestionOptions(value: unknown, images: QuestionImage[]
     options.push({ label, content, contentMarkdown: content, raw: item });
   });
   return options;
-}
-
-function optionContainsImageRef(option: QuestionOption): boolean {
-  return /!\[[^\]]*]\s*\([^)]+\)/.test(option.contentMarkdown || option.content || "");
-}
-
-function optionsContainImageRefs(options: QuestionOption[]): boolean {
-  return options.some(optionContainsImageRef);
-}
-
-function questionTextSuggestsOptionImages(markdown: string): boolean {
-  const text = String(markdown || "").replace(/!\[[^\]]*]\s*\([^)]+\)/g, "");
-  return /如图|下图|图中|图示|示意图|图形|标志|图[①②③④⑤⑥⑦⑧⑨⑩一二三四五六七八九十1-9]/.test(text);
-}
-
-function attachChoiceImagesToTextOptions(
-  markdown: string,
-  rawOptions: unknown,
-  images: QuestionImage[] = [],
-  questionType: string = "",
-): QuestionOption[] {
-  const options = normalizeQuestionOptions(rawOptions, images);
-  const labeledImages = ensureQuestionImageLabels(images);
-  if (
-    questionType !== "choice" ||
-    options.length < 2 ||
-    labeledImages.length !== options.length ||
-    optionsContainImageRefs(options) ||
-    !questionTextSuggestsOptionImages(markdown)
-  ) {
-    return options;
-  }
-  return options.map((option, index) => {
-    const imageMarkdown = `![](${getQuestionImageLabel(labeledImages[index], index)})`;
-    const content = [imageMarkdown, option.contentMarkdown || option.content].filter(Boolean).join("\n\n");
-    return {
-      ...option,
-      content,
-      contentMarkdown: content,
-    };
-  });
 }
 
 export function serializeQuestionOptions(value: unknown, images: QuestionImage[] = []): QuestionOption[] {
@@ -796,16 +808,13 @@ export function getQuestionMarkdownParts(
   const parsed = splitChoiceOptionsFromMarkdown(normalizedMarkdown, questionType);
   const normalizedFallbackOptions =
     questionType === "choice"
-      ? attachChoiceImagesToTextOptions(parsed.stemMarkdown || normalizedMarkdown, fallbackOptions, images, questionType)
+      ? normalizeQuestionOptions(fallbackOptions, images)
       : [];
   if (parsed.options.length > 0) {
     const parsedOptions = normalizeQuestionOptions(parsed.options, images);
     return {
       stemMarkdown: parsed.stemMarkdown,
-      options:
-        optionsContainImageRefs(normalizedFallbackOptions) && !optionsContainImageRefs(parsedOptions)
-          ? normalizedFallbackOptions
-          : parsedOptions,
+      options: parsedOptions,
     };
   }
   return {
