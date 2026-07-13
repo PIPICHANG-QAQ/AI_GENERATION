@@ -13,6 +13,37 @@ from app.question_markdown import question_to_edit_markdown
 
 
 class QuestionBoundaryTest(unittest.TestCase):
+    def test_detects_question_glued_to_section_heading(self):
+        markdown = """三、解答题
+30．（6 分）完成实验并填写表格。
+
+五、选择题（每小题2分，共10分）31．（2分）如图所示，下列说法正确的是（ ）
+A
+![](images/a.png)
+甲
+B
+![](images/b.png)
+乙
+C
+![](images/c.png)
+丙
+D
+![](images/d.png)
+丁
+
+32．（2分）下列说法正确的是（ ）
+A．甲 B．乙 C．丙 D．丁
+"""
+
+        boundaries = detect_local_boundaries(markdown, [])
+
+        self.assertEqual([30, 31, 32], [question["number"] for question in boundaries["questions"]])
+        question_31 = boundaries["questions"][1]
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in question_31["options"]])
+        self.assertEqual(4, len(question_31["images"]))
+        self.assertNotIn("31．", question_31["sectionTitle"])
+        self.assertLess(boundaries["questions"][0]["end"], question_31["start"])
+
     def test_embedded_final_option_label_restores_stable_four_choice_boundary(self):
         markdown = """一、选择题
 1. 如图所示，选择正确的一项（ ）

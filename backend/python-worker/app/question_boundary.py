@@ -134,23 +134,41 @@ def detect_local_boundaries(markdown: str, assets: list[dict[str, Any]]) -> dict
 
         section_type = infer_question_type(heading_text)
         question_match = QUESTION_NUMBER_RE.match(heading_text)
-        if (
+        is_section_heading = (
             is_section_heading_line(stripped, heading_text, section_type)
             or is_generic_section_heading_line(stripped, heading_text)
-        ) and not question_match:
+        )
+        if is_section_heading and not question_match:
+            expected_next = int(questions[-1].get("number") or 0) + 1 if questions else 1
+            inline_question_match = find_glued_section_question(line, line_start, source, expected_next)
+            clean_heading_text = (
+                line[: inline_question_match.start("number")].strip().lstrip("#").strip()
+                if inline_question_match is not None
+                else heading_text
+            )
+            clean_section_type = infer_question_type(clean_heading_text)
             section_contract = contract_sections_by_start.get(line_start, {})
             current_section = {
                 "id": f"section_{len(sections) + 1}",
-                "title": heading_text,
-                "type": section_type,
+                "title": clean_heading_text,
+                "type": clean_section_type,
                 "start": line_start,
                 "end": len(source),
                 "declaredCount": section_contract.get("declaredCount"),
                 "rangeStart": section_contract.get("rangeStart"),
                 "rangeEnd": section_contract.get("rangeEnd"),
-                "numberingScope": "section" if section_type == "unknown" else "global",
+                "numberingScope": "section" if clean_section_type == "unknown" else "global",
             }
             sections.append(current_section)
+            if inline_question_match is not None:
+                add_question_candidate(
+                    int(inline_question_match.group("number")),
+                    line[inline_question_match.end() :],
+                    line_start + inline_question_match.start("number"),
+                    line_end,
+                    line[inline_question_match.start("number") :].strip(),
+                    "inline-section",
+                )
             continue
 
         if question_match:
@@ -231,6 +249,13 @@ def extract_paper_structure_contract(markdown: str) -> dict[str, Any]:
         section_type = infer_question_type(heading_text)
         if not is_section_heading_line(stripped, heading_text, section_type):
             continue
+        inline_question_match = find_glued_section_question(line, line_start, source)
+        clean_heading_text = (
+            line[: inline_question_match.start("number")].strip().lstrip("#").strip()
+            if inline_question_match is not None
+            else heading_text
+        )
+        section_type = infer_question_type(clean_heading_text)
         count_match = SECTION_QUESTION_COUNT_RE.search(heading_text)
         declared_count = int(count_match.group(1)) if count_match else None
         explicit_ranges = [
@@ -240,7 +265,7 @@ def extract_paper_structure_contract(markdown: str) -> dict[str, Any]:
         explicit_ranges = [(start, end) for start, end in explicit_ranges if end >= start]
         sections.append(
             {
-                "title": heading_text,
+                "title": clean_heading_text,
                 "type": section_type,
                 "start": line_start,
                 "declaredCount": declared_count,
@@ -472,6 +497,25 @@ def is_valid_inline_question_anchor(source: str, line: str, line_start: int, mat
     if IMAGE_FILE_EXTENSION_RE.match(body):
         return False
     return True
+
+
+def find_glued_section_question(
+    line: str,
+    line_start: int,
+    source: str,
+    expected_number: int | None = None,
+) -> re.Match[str] | None:
+    """Find a real question number OCR glued after a section heading."""
+    for match in INLINE_QUESTION_NUMBER_RE.finditer(line):
+        number = int(match.group("number"))
+        if expected_number is not None and number != expected_number:
+            continue
+        if not is_valid_inline_question_anchor(source, line, line_start, match):
+            continue
+        body = line[match.end() :]
+        if looks_like_question_anchor(line[match.start("number") :], body):
+            return match
+    return None
 
 
 def is_offset_inside_markdown_image_ref(text: str, offset: int) -> bool:
