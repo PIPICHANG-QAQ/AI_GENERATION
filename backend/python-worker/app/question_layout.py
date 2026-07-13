@@ -471,6 +471,10 @@ def load_image_placement_evidence(output_dir: Path, markdown: str = "") -> list[
             "pageIndex": parse_int(item.get("pageIndex"), 0),
             "bbox": list(item.get("bbox") or []),
         }
+        if isinstance(item.get("pageWidth"), (int, float)):
+            node["pageWidth"] = float(item["pageWidth"])
+        if isinstance(item.get("pageHeight"), (int, float)):
+            node["pageHeight"] = float(item["pageHeight"])
         if markdown:
             node["order"] = parse_int(item.get("order"), 0)
             if isinstance(item.get("start"), int):

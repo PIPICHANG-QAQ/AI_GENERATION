@@ -8,6 +8,7 @@ import re
 from copy import deepcopy
 from typing import Any
 
+from app.choice_layout_assignment import assign_choice_images
 from app.question_markdown import normalize_asset_path
 
 
@@ -59,26 +60,27 @@ def build_image_placements(
         reasons = ["missing-markdown-offset"]
 
         if isinstance(offset, int):
+            has_geometry = isinstance(image.get("pageIndex"), int) and valid_bbox(image.get("bbox"))
             option = next((item for item in options if interval_contains(item, offset)), None)
             child = next((item for item in children if interval_contains(item, offset)), None)
             if option is not None:
                 target = {"kind": "option", "optionLabel": str(option.get("label") or "").upper()}
                 method = "explicit-offset"
-                confidence = 0.99
-                reasons = ["inside-option-span"]
+                confidence = 0.96 if has_geometry else 0.9
+                reasons = ["inside-option-span"] + (["source-geometry-present"] if has_geometry else ["missing-source-geometry"])
             elif child is not None:
                 target = {
                     "kind": "subquestion",
                     "subQuestionId": str(child.get("id") or child.get("label") or ""),
                 }
                 method = "explicit-offset"
-                confidence = 0.99
-                reasons = ["inside-subquestion-span"]
+                confidence = 0.96 if has_geometry else 0.9
+                reasons = ["inside-subquestion-span"] + (["source-geometry-present"] if has_geometry else ["missing-source-geometry"])
             elif interval_contains(question_boundary, offset):
                 target = {"kind": "stem"}
                 method = "explicit-offset"
-                confidence = 0.98
-                reasons = ["inside-question-stem-span"]
+                confidence = 0.96 if has_geometry else 0.9
+                reasons = ["inside-question-stem-span"] + (["source-geometry-present"] if has_geometry else ["missing-source-geometry"])
             else:
                 reasons = ["outside-question-span"]
 
@@ -101,7 +103,7 @@ def build_image_placements(
                     "reasons": reasons,
                     "alternatives": [],
                 },
-                "reviewStatus": "auto" if target["kind"] in ASSIGNED_TARGET_KINDS else "needs_review",
+                "reviewStatus": "auto" if target["kind"] in ASSIGNED_TARGET_KINDS and confidence >= 0.95 else "needs_review",
             }
         )
     return placements
@@ -111,55 +113,95 @@ def reconcile_image_placements(
     placements: list[dict[str, Any]],
     layout_items: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Corroborate placements with bbox geometry without overriding explicit offsets."""
+    """Reconcile automatic placements with a global bbox assignment."""
     reconciled = deepcopy(placements)
     labels = option_label_nodes(layout_items)
+    label_values = list(dict.fromkeys(label for label, _node in labels))
+    global_assignment = assign_choice_images(layout_items, label_values)
     image_nodes = [
         item
         for item in layout_items
         if isinstance(item, dict) and str(item.get("imageRef") or "").strip()
     ]
     conflict_count = 0
+    protected_manual_count = 0
     for placement in reconciled:
         image_id = normalize_asset_path(str(placement.get("imageId") or ""))
         image_node = unique_layout_image_node(image_id, image_nodes)
-        candidate = geometry_option_candidate(image_node, labels)
-        if candidate is None:
+        image_ref = str(image_node.get("imageRef") or "") if isinstance(image_node, dict) else ""
+        assigned = global_assignment["assignments"].get(normalize_asset_path(image_ref))
+        if not isinstance(assigned, dict):
             continue
-        option_label, geometry_confidence = candidate
+        option_label = str(assigned.get("optionLabel") or "")
+        geometry_confidence = float(assigned.get("confidence") or 0.0)
+        if not option_label:
+            continue
         target = placement.get("target") if isinstance(placement.get("target"), dict) else {"kind": "unassigned"}
         inference = placement.setdefault("inference", {})
         reasons = inference.setdefault("reasons", [])
         alternatives = inference.setdefault("alternatives", [])
         current_kind = str(target.get("kind") or "unassigned")
         current_label = str(target.get("optionLabel") or "")
+        source_evidence = placement.setdefault("sourceEvidence", {})
+        source_evidence.update(
+            {
+                "pageIndex": image_node.get("pageIndex"),
+                "bbox": list(image_node.get("bbox") or []),
+                "pageWidth": image_node.get("pageWidth"),
+                "pageHeight": image_node.get("pageHeight"),
+            }
+        )
+        if placement.get("reviewStatus") in {"confirmed", "overridden"}:
+            protected_manual_count += 1
+            if current_kind != "option" or current_label != option_label:
+                conflict_count += 1
+                if "manual-placement-protected" not in reasons:
+                    reasons.append("manual-placement-protected")
+                alternatives.append(
+                    {
+                        "target": {"kind": "option", "optionLabel": option_label},
+                        "method": "layout-global",
+                        "confidence": geometry_confidence,
+                    }
+                )
+            continue
         if current_kind == "unassigned":
             placement["target"] = {"kind": "option", "optionLabel": option_label}
             inference.update(
                 {
-                    "method": "geometry",
+                    "method": "layout-global",
                     "confidence": geometry_confidence,
-                    "reasons": ["nearest-option-cell", "geometry-margin-sufficient"],
-                    "alternatives": [],
+                    "reasons": ["global-option-cell-assignment"],
+                    "alternatives": assigned.get("alternatives") or [],
                 }
             )
-            placement["reviewStatus"] = "auto" if geometry_confidence >= 0.9 else "needs_review"
+            placement["reviewStatus"] = str(assigned.get("reviewStatus") or "needs_review")
         elif current_kind == "option" and current_label == option_label:
             if "geometry-agreement" not in reasons:
                 reasons.append("geometry-agreement")
+            inference["confidence"] = max(float(inference.get("confidence") or 0.0), geometry_confidence)
+            if geometry_confidence >= 0.95:
+                placement["reviewStatus"] = "auto"
         else:
             conflict_count += 1
-            if "geometry-conflict" not in reasons:
-                reasons.append("geometry-conflict")
-            alternatives.append(
+            previous_target = deepcopy(target)
+            placement["target"] = {"kind": "option", "optionLabel": option_label}
+            inference.update(
                 {
-                    "target": {"kind": "option", "optionLabel": option_label},
-                    "method": "geometry",
+                    "method": "layout-global",
                     "confidence": geometry_confidence,
+                    "reasons": [*reasons, "geometry-conflict", "global-option-cell-assignment"],
+                    "alternatives": [
+                        {
+                            "target": previous_target,
+                            "method": str(inference.get("method") or "explicit-offset"),
+                            "confidence": float(inference.get("confidence") or 0.0),
+                        },
+                        *(assigned.get("alternatives") or []),
+                    ],
                 }
             )
-            inference["confidence"] = min(float(inference.get("confidence") or 0.0), 0.85)
-            placement["reviewStatus"] = "needs_review"
+            placement["reviewStatus"] = str(assigned.get("reviewStatus") or "needs_review")
 
     method_counts: dict[str, int] = {}
     assigned_counts: dict[str, int] = {}
@@ -179,6 +221,11 @@ def reconcile_image_placements(
         "methodCounts": method_counts,
         "conflictCount": conflict_count,
         "unassignedCount": unassigned_count,
+        "protectedManualCount": protected_manual_count,
+        "totalCost": global_assignment.get("totalCost"),
+        "secondBestCost": global_assignment.get("secondBestCost"),
+        "margin": global_assignment.get("margin"),
+        "blockingReasons": global_assignment.get("blockingReasons") or [],
     }
 
 
@@ -212,6 +259,8 @@ def reconcile_structure_image_placements(
         "methodCounts": {},
         "conflictCount": 0,
         "unassignedCount": 0,
+        "protectedManualCount": 0,
+        "blockingReasons": [],
     }
     seen_questions: set[int] = set()
 
@@ -228,6 +277,8 @@ def reconcile_structure_image_placements(
             totals["placementCount"] += summary["placementCount"]
             totals["conflictCount"] += summary["conflictCount"]
             totals["unassignedCount"] += summary["unassignedCount"]
+            totals["protectedManualCount"] += summary["protectedManualCount"]
+            totals["blockingReasons"].extend(summary["blockingReasons"])
             for field in ("assignedCounts", "methodCounts"):
                 for key, value in summary[field].items():
                     totals[field][key] = totals[field].get(key, 0) + value
@@ -245,6 +296,7 @@ def reconcile_structure_image_placements(
     for question in structured.get("questions") or []:
         if isinstance(question, dict):
             reconcile_question(question)
+    totals["blockingReasons"] = list(dict.fromkeys(totals["blockingReasons"]))
     return totals
 
 
@@ -293,37 +345,6 @@ def option_label_nodes(layout_items: list[dict[str, Any]]) -> list[tuple[str, di
     return nodes
 
 
-def geometry_option_candidate(
-    image_node: dict[str, Any] | None,
-    labels: list[tuple[str, dict[str, Any]]],
-) -> tuple[str, float] | None:
-    if not isinstance(image_node, dict) or not valid_bbox(image_node.get("bbox")):
-        return None
-    page_index = image_node.get("pageIndex")
-    image_center = bbox_center(image_node["bbox"])
-    scored: list[tuple[float, str]] = []
-    for label, node in labels:
-        if node.get("pageIndex") != page_index:
-            continue
-        label_center = bbox_center(node["bbox"])
-        distance = math.dist(image_center, label_center)
-        if image_center[1] < label_center[1]:
-            distance *= 1.5
-        scored.append((distance, label))
-    if not scored:
-        return None
-    scored.sort(key=lambda item: item[0])
-    best_distance, best_label = scored[0]
-    if len(scored) == 1:
-        return (best_label, 0.9) if best_distance <= 600 else None
-    second_distance = scored[1][0]
-    margin = second_distance - best_distance
-    if margin < 30 or best_distance > second_distance * 0.8:
-        return None
-    confidence = min(0.97, 0.9 + 0.07 * (margin / max(second_distance, 1.0)))
-    return best_label, round(confidence, 3)
-
-
 def valid_bbox(value: Any) -> bool:
     return (
         isinstance(value, list)
@@ -332,12 +353,6 @@ def valid_bbox(value: Any) -> bool:
         and value[2] > value[0]
         and value[3] > value[1]
     )
-
-
-def bbox_center(bbox: list[float]) -> tuple[float, float]:
-    return ((float(bbox[0]) + float(bbox[2])) / 2.0, (float(bbox[1]) + float(bbox[3])) / 2.0)
-
-
 def validate_image_placements(
     images: list[dict[str, Any]],
     placements: list[dict[str, Any]],

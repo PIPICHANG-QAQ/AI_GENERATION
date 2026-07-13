@@ -35,7 +35,7 @@ class ImagePlacementTest(unittest.TestCase):
         summary = reconcile_structure_image_placements(structured, layout_items)
 
         self.assertEqual("A", question["imagePlacements"][0]["target"]["optionLabel"])
-        self.assertEqual(1, summary["methodCounts"]["geometry"])
+        self.assertEqual(1, summary["methodCounts"]["layout-global"])
 
     def test_geometry_maps_two_column_grid_independent_of_serialized_image_order(self):
         image_positions = {
@@ -66,10 +66,10 @@ class ImagePlacementTest(unittest.TestCase):
             {"images/a.png": "A", "images/b.png": "B", "images/c.png": "C", "images/d.png": "D"},
             by_image,
         )
-        self.assertEqual(4, summary["methodCounts"]["geometry"])
+        self.assertEqual(4, summary["methodCounts"]["layout-global"])
         self.assertEqual(0, summary["unassignedCount"])
 
-    def test_geometry_conflict_does_not_override_explicit_offset(self):
+    def test_global_geometry_corrects_automatic_explicit_offset(self):
         placements = [self._placement("p1", "paper/auto/images/a.png", "option", 0.99, option_label="A")]
         layout_items = [
             {"type": "text", "text": "A.", "pageIndex": 0, "bbox": [100, 100, 140, 130]},
@@ -79,9 +79,36 @@ class ImagePlacementTest(unittest.TestCase):
 
         reconciled, summary = reconcile_image_placements(placements, layout_items)
 
-        self.assertEqual("A", reconciled[0]["target"]["optionLabel"])
+        self.assertEqual("B", reconciled[0]["target"]["optionLabel"])
         self.assertIn("geometry-conflict", reconciled[0]["inference"]["reasons"])
+        self.assertEqual("A", reconciled[0]["inference"]["alternatives"][0]["target"]["optionLabel"])
         self.assertEqual(1, summary["conflictCount"])
+
+    def test_global_geometry_does_not_override_confirmed_manual_placement(self):
+        placement = self._placement("p1", "images/a.png", "option", 0.99, option_label="A")
+        placement["reviewStatus"] = "confirmed"
+        layout_items = [
+            {"type": "text", "text": "A.", "pageIndex": 0, "bbox": [100, 100, 140, 130]},
+            {"type": "text", "text": "B.", "pageIndex": 0, "bbox": [500, 100, 540, 130]},
+            {"type": "image", "imageRef": "images/a.png", "pageIndex": 0, "bbox": [520, 140, 700, 260]},
+        ]
+
+        reconciled, summary = reconcile_image_placements([placement], layout_items)
+
+        self.assertEqual("A", reconciled[0]["target"]["optionLabel"])
+        self.assertEqual("confirmed", reconciled[0]["reviewStatus"])
+        self.assertEqual(1, summary["protectedManualCount"])
+
+    def test_offset_only_placement_without_geometry_is_not_high_confidence(self):
+        boundary = {"id": "q1", "start": 0, "end": 100, "options": []}
+
+        placements = build_image_placements(
+            boundary,
+            [{"path": "images/stem.png", "start": 20, "end": 30}],
+        )
+
+        self.assertLess(placements[0]["inference"]["confidence"], 0.95)
+        self.assertEqual("needs_review", placements[0]["reviewStatus"])
 
     def test_explicit_offsets_assign_stem_option_subquestion_and_unassigned(self):
         boundary = {

@@ -89,6 +89,33 @@ class QuestionLayoutTest(unittest.TestCase):
         )
         self.assertTrue(all(node["blockId"] for node in nodes))
 
+    def test_image_placement_evidence_preserves_middle_page_dimensions(self):
+        middle = {
+            "pdf_info": [
+                {
+                    "page_idx": 0,
+                    "page_size": [800, 1200],
+                    "para_blocks": [
+                        {
+                            "type": "image",
+                            "bbox": [100, 200, 400, 500],
+                            "index": 1,
+                            "lines": [{"spans": [{"type": "image", "img_path": "images/a.png"}]}],
+                        }
+                    ],
+                }
+            ]
+        }
+        (self.output_dir / "paper_middle.json").write_text(
+            json.dumps(middle, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        nodes = load_image_placement_evidence(self.output_dir)
+
+        self.assertEqual(800.0, nodes[0]["pageWidth"])
+        self.assertEqual(1200.0, nodes[0]["pageHeight"])
+
     def setUp(self):
         self.job_id = "layout_test_job"
         self.task_id = "import_task_layout_test"
