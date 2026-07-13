@@ -197,6 +197,13 @@ public class ImportQuestionSyncService {
         question.setRawJson(json.write(raw));
         question.setUpdatedAt(LocalDateTime.now());
         questionMapper.updateById(question);
+        syncImageTree(
+                taskId,
+                questionId,
+                json.readList(question.getImagesJson()),
+                children,
+                question.getUpdatedAt()
+        );
         return question;
     }
 
@@ -236,6 +243,13 @@ public class ImportQuestionSyncService {
         question.setRawJson(json.write(raw));
         question.setUpdatedAt(LocalDateTime.now());
         questionMapper.updateById(question);
+        syncImageTree(
+                taskId,
+                questionId,
+                json.readList(question.getImagesJson()),
+                children,
+                question.getUpdatedAt()
+        );
         return question;
     }
 
@@ -773,7 +787,7 @@ public class ImportQuestionSyncService {
     private void mergeSubQuestionFields(Map<String, Object> target, Map<String, Object> source) {
         for (String field : List.of(
                 "stem", "stemMarkdown", "manualMarkdown", "answer", "analysis",
-                "type", "difficulty", "score", "knowledgePointIds", "knowledgePoints", "options", "images",
+                "type", "difficulty", "score", "knowledgePointIds", "knowledgePoints", "options",
                 "contextMatched", "answerEvidence", "analysisEvidence", "warnings", "aiMetadata")) {
             Object value = source.get(field);
             if (hasValue(value)) {
