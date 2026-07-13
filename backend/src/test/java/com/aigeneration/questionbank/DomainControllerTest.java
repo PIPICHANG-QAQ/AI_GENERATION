@@ -9,6 +9,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.aigeneration.questionbank.config.PythonWorkerProperties;
+import com.aigeneration.questionbank.domain.entity.ImportQuestionEntity;
 import com.aigeneration.questionbank.domain.entity.ImportTaskEntity;
 import com.aigeneration.questionbank.domain.entity.StorageFileEntity;
 import com.aigeneration.questionbank.domain.service.BankQuestionService;
@@ -929,6 +930,109 @@ class DomainControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.images.length()").value(2))
                 .andExpect(jsonPath("$.images[1].source").value("任务题图库"));
+    }
+
+    /**
+     * 验证小问题图会进入任务题图库索引，但不会被提升成父题图片。
+     *
+     * @throws Exception 测试请求失败时抛出
+     */
+    @Test
+    void nestedSubQuestionImagesAreIndexedWithoutBecomingParentImages() throws Exception {
+        String taskId = "nested_image_task_1";
+        String questionId = taskId + "_question_37";
+        Map<String, Object> child = new LinkedHashMap<>();
+        child.put("id", questionId + "_sub_3");
+        child.put("label", "(3)");
+        child.put("stemMarkdown", "A 和 B 的重力。\n\n![](图1)\n\n![](图2)");
+        child.put("manualMarkdown", "A 和 B 的重力。\n\n![](图1)\n\n![](图2)");
+        child.put("images", List.of(
+                Map.of("name", "q37-a.png", "path", "images/q37-a.png", "url", "/q37-a.png", "label", "图1"),
+                Map.of("name", "q37-b.png", "path", "images/q37-b.png", "url", "/q37-b.png", "label", "图2")
+        ));
+
+        Map<String, Object> question = new LinkedHashMap<>();
+        question.put("id", questionId);
+        question.put("number", 37);
+        question.put("status", "待校验");
+        question.put("type", "solution");
+        question.put("stemMarkdown", "某物理兴趣小组设计了如图所示的装置。求：");
+        question.put("images", List.of());
+        question.put("subQuestions", List.of(child));
+
+        Map<String, Object> task = new LinkedHashMap<>(importTaskPayload(taskId, "待校验", 1, "嵌套小问题图任务"));
+        task.put("questions", List.of(question));
+        importTaskMetadataService.syncMap(task);
+
+        mockMvc.perform(get("/api/import-tasks/" + taskId + "/image-library"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].questionId").value(questionId))
+                .andExpect(jsonPath("$.items[0].ownerKind").value("subQuestion"))
+                .andExpect(jsonPath("$.items[0].ownerId").value(questionId + "_sub_3"))
+                .andExpect(jsonPath("$.items[0].ownerLabel").value("(3)"));
+
+        org.assertj.core.api.Assertions.assertThat(importQuestionSyncService.listImages(questionId)).isEmpty();
+    }
+
+    /**
+     * 验证 AI 回写不能覆盖已有小问题图及其归属。
+     */
+    @Test
+    void aiStandardizePreservesExistingSubQuestionImages() throws Exception {
+        String taskId = "nested_image_ai_task_1";
+        String questionId = taskId + "_question_37";
+        String childId = questionId + "_sub_3";
+        Map<String, Object> child = new LinkedHashMap<>();
+        child.put("id", childId);
+        child.put("label", "(3)");
+        child.put("stemMarkdown", "A 和 B 的重力。\n\n![](图1)\n\n![](图2)");
+        child.put("manualMarkdown", "A 和 B 的重力。\n\n![](图1)\n\n![](图2)");
+        child.put("images", List.of(
+                Map.of("name", "q37-a.png", "path", "images/q37-a.png", "url", "/q37-a.png", "label", "图1"),
+                Map.of("name", "q37-b.png", "path", "images/q37-b.png", "url", "/q37-b.png", "label", "图2")
+        ));
+        child.put("imagePlacements", List.of(
+                Map.of("imageKey", "images/q37-a.png", "target", "stem"),
+                Map.of("imageKey", "images/q37-b.png", "target", "stem")
+        ));
+
+        Map<String, Object> question = new LinkedHashMap<>();
+        question.put("id", questionId);
+        question.put("number", 37);
+        question.put("status", "待校验");
+        question.put("type", "solution");
+        question.put("stemMarkdown", "某物理兴趣小组设计了装置。求：");
+        question.put("images", List.of());
+        question.put("subQuestions", List.of(child));
+        Map<String, Object> task = new LinkedHashMap<>(importTaskPayload(taskId, "待校验", 1, "AI 小问题图守恒任务"));
+        task.put("questions", List.of(question));
+        importTaskMetadataService.syncMap(task);
+
+        ImportQuestionEntity updated = importQuestionSyncService.updateStandardizedResult(
+                taskId,
+                questionId,
+                "某物理兴趣小组设计了装置，求：",
+                "",
+                "",
+                Map.of("subQuestions", List.of(Map.of(
+                        "id", childId,
+                        "label", "(3)",
+                        "stemMarkdown", "A 和 B 的重力。",
+                        "images", List.of(Map.of("name", "wrong.png", "path", "images/wrong.png", "url", "/wrong.png"))
+                )))
+        );
+
+        JsonNode updatedJson = objectMapper.valueToTree(importQuestionSyncService.toMap(updated));
+        JsonNode updatedChild = updatedJson.path("subQuestions").get(0);
+        org.assertj.core.api.Assertions.assertThat(updatedChild.path("images").findValuesAsText("path"))
+                .containsExactly("images/q37-a.png", "images/q37-b.png");
+        org.assertj.core.api.Assertions.assertThat(updatedChild.path("imagePlacements").size()).isEqualTo(2);
+
+        mockMvc.perform(get("/api/import-tasks/" + taskId + "/image-library"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].ownerKind").value("subQuestion"));
     }
 
     /**

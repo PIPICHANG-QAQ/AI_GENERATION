@@ -45,6 +45,7 @@ import {
   removeSubQuestionForm,
   subQuestionEditorForm,
   updateImagePlacementTarget,
+  updateSubQuestionImages,
   type QuestionImage,
 } from "@/lib/question";
 import {
@@ -398,6 +399,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
         knowledgePoints: sub.knowledgePoints.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
         options: serializeQuestionOptions(subParts.options, sub.images),
         images: sub.images,
+        imagePlacements: sub.imagePlacements,
         contextMatched: sub.contextMatched,
         answerEvidence: sub.answerEvidence,
         analysisEvidence: sub.analysisEvidence,
@@ -427,6 +429,14 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     if (Object.prototype.hasOwnProperty.call(patchValue, "markdown")) {
       setSubStandardizeCandidate((current) => (current?.subIndex === subIndex ? null : current));
     }
+    setDirty(true);
+  };
+
+  const handleSubImagesChange = (subIndex: number, nextImages: QuestionImage[]) => {
+    setSubForms((current) =>
+      current.map((sub, index) => (index === subIndex ? updateSubQuestionImages(sub, nextImages) : sub)),
+    );
+    setSubStandardizeCandidate(null);
     setDirty(true);
   };
 
@@ -901,6 +911,20 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
                         />
                       </div>
                     </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">
+                      小问题图（仅属于{sub.label || `第 ${subIndex + 1} 小问`}）
+                    </Label>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground/80">
+                      此处图片只写入当前小问，不会提升为父题共享图；新增或移除图片会同步更新当前小问源码引用。
+                    </p>
+                    <QuestionImageUploader
+                      images={sub.images}
+                      onChange={(nextImages) => handleSubImagesChange(subIndex, nextImages)}
+                      libraryImages={taskImageLibrary}
+                      readOnly={readOnly}
+                    />
                   </div>
                   <div className="grid grid-cols-1 @2xl:grid-cols-2 gap-3">
                     <div className="space-y-1.5">

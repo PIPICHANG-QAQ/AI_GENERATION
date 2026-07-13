@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app import worker_base
 from app.import_services import (
+    apply_auto_standardize_result,
     auto_standardize_import_questions,
     bank_question_duplicate_reason,
     bank_question_from_import,
@@ -13,6 +14,7 @@ from app.import_services import (
     clear_standardize_cache,
     detect_severe_latex_issues,
     find_bank_question_index_for_import,
+    import_task_image_library,
     normalize_display_math_blocks,
     normalize_sub_questions,
     recover_stale_glued_section_questions,
@@ -54,6 +56,190 @@ $$\left\{\begin{array}{l l}{\displaystyle${\frac{5 x - 1}{6}$} + 2$\geq$ \displa
 
 
 class ImportServicesTest(unittest.TestCase):
+    def test_task_image_library_indexes_nested_subquestion_images(self):
+        task = {
+            "questions": [
+                {
+                    "id": "q37",
+                    "number": 37,
+                    "images": [],
+                    "subQuestions": [
+                        {
+                            "id": "q37_sub_3",
+                            "label": "(3)",
+                            "images": [
+                                {"name": "q37-a.png", "path": "images/q37-a.png", "url": "/q37-a.png"},
+                                {"name": "q37-b.png", "path": "images/q37-b.png", "url": "/q37-b.png"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        library = import_task_image_library(task)
+
+        self.assertEqual(2, len(library))
+        self.assertEqual(["subQuestion", "subQuestion"], [item["ownerKind"] for item in library])
+        self.assertEqual(["q37_sub_3", "q37_sub_3"], [item["ownerId"] for item in library])
+        self.assertEqual(["(3)", "(3)"], [item["ownerLabel"] for item in library])
+
+    def test_auto_standardize_preserves_nested_subquestion_image_ownership(self):
+        child = {
+            "id": "q37_sub_3",
+            "label": "(3)",
+            "type": "solution",
+            "stemMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+            "manualMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+            "images": [
+                {"name": "q37-a.png", "path": "images/q37-a.png", "url": "/q37-a.png", "label": "图1"},
+                {"name": "q37-b.png", "path": "images/q37-b.png", "url": "/q37-b.png", "label": "图2"},
+            ],
+            "imagePlacements": [
+                {"imageKey": "images/q37-a.png", "target": "stem"},
+                {"imageKey": "images/q37-b.png", "target": "stem"},
+            ],
+        }
+        question = {
+            "id": "q37",
+            "number": 37,
+            "type": "solution",
+            "stemMarkdown": "某物理兴趣小组设计了装置。求：",
+            "manualMarkdown": "某物理兴趣小组设计了装置。求：",
+            "images": [],
+            "subQuestions": [child],
+            "children": [child],
+        }
+        response = {
+            "markdown": "某物理兴趣小组设计了装置，求：",
+            "subQuestions": [
+                {
+                    "id": "q37_sub_3",
+                    "label": "(3)",
+                    "stemMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+                    "manualMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+                }
+            ],
+            "standardizer": {
+                "source": "ai",
+                "provider": "mock",
+                "model": "mock-model",
+                "confidence": "high",
+                "warnings": [],
+                "fixes": [],
+            },
+        }
+
+        metadata = apply_auto_standardize_result(
+            question,
+            response,
+            "某物理兴趣小组设计了装置。求：",
+            "risky",
+            ["render-risk"],
+        )
+
+        self.assertEqual("applied", metadata["status"])
+        updated_child = question["subQuestions"][0]
+        self.assertEqual(
+            ["images/q37-a.png", "images/q37-b.png"],
+            [image["path"] for image in updated_child["images"]],
+        )
+        self.assertEqual(2, len(updated_child["imagePlacements"]))
+        self.assertIn("![](图1)", updated_child["manualMarkdown"])
+        self.assertIn("![](图2)", updated_child["manualMarkdown"])
+
+    def test_auto_standardize_blocks_nested_subquestion_candidate_that_drops_refs(self):
+        child = {
+            "id": "q37_sub_3",
+            "label": "(3)",
+            "type": "solution",
+            "stemMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+            "manualMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+            "images": [
+                {"name": "q37-a.png", "path": "images/q37-a.png", "url": "/q37-a.png", "label": "图1"},
+                {"name": "q37-b.png", "path": "images/q37-b.png", "url": "/q37-b.png", "label": "图2"},
+            ],
+        }
+        question = {
+            "id": "q37",
+            "type": "solution",
+            "stemMarkdown": "某物理兴趣小组设计了装置。求：",
+            "manualMarkdown": "某物理兴趣小组设计了装置。求：",
+            "images": [],
+            "subQuestions": [child],
+            "children": [child],
+        }
+        response = {
+            "markdown": "某物理兴趣小组设计了装置，求：",
+            "subQuestions": [
+                {
+                    "id": "q37_sub_3",
+                    "label": "(3)",
+                    "stemMarkdown": "A 和 B 的重力。",
+                    "manualMarkdown": "A 和 B 的重力。",
+                }
+            ],
+            "standardizer": {"source": "ai", "confidence": "high", "warnings": [], "fixes": []},
+        }
+
+        metadata = apply_auto_standardize_result(
+            question,
+            response,
+            "某物理兴趣小组设计了装置。求：",
+            "risky",
+            ["render-risk"],
+        )
+
+        self.assertEqual("blocked", metadata["status"])
+        self.assertIn("candidate-dropped-subquestion-images", " ".join(metadata["validation"]["errors"]))
+        self.assertIn("![](图1)", question["subQuestions"][0]["manualMarkdown"])
+        self.assertIn("![](图2)", question["subQuestions"][0]["manualMarkdown"])
+
+    def test_auto_standardize_blocks_nested_subquestion_candidate_that_changes_assets(self):
+        child = {
+            "id": "q37_sub_3",
+            "label": "(3)",
+            "type": "solution",
+            "stemMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+            "manualMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+            "images": [
+                {"name": "q37-a.png", "path": "images/q37-a.png", "url": "/q37-a.png", "label": "图1"},
+                {"name": "q37-b.png", "path": "images/q37-b.png", "url": "/q37-b.png", "label": "图2"},
+            ],
+        }
+        question = {
+            "id": "q37",
+            "type": "solution",
+            "stemMarkdown": "某物理兴趣小组设计了装置。求：",
+            "manualMarkdown": "某物理兴趣小组设计了装置。求：",
+            "images": [],
+            "subQuestions": [child],
+            "children": [child],
+        }
+        response = {
+            "markdown": "某物理兴趣小组设计了装置，求：",
+            "subQuestions": [
+                {
+                    "id": "q37_sub_3",
+                    "label": "(3)",
+                    "manualMarkdown": "A 和 B 的重力。\n\n![](图1)\n\n![](图2)",
+                    "images": [{"name": "wrong.png", "path": "images/wrong.png", "url": "/wrong.png"}],
+                }
+            ],
+            "standardizer": {"source": "ai", "confidence": "high", "warnings": [], "fixes": []},
+        }
+
+        metadata = apply_auto_standardize_result(
+            question,
+            response,
+            "某物理兴趣小组设计了装置。求：",
+            "risky",
+            ["render-risk"],
+        )
+
+        self.assertEqual("blocked", metadata["status"])
+        self.assertIn("candidate-changed-subquestion-images", " ".join(metadata["validation"]["errors"]))
+
     def setUp(self):
         clear_standardize_cache()
 

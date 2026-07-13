@@ -894,7 +894,10 @@ def ensure_question_images_in_markdown(question: dict[str, Any]) -> bool:
                 question["manualMarkdown"] = next_manual_markdown
                 changed = True
 
-    for child in question.get("children", []):
+    children = question.get("subQuestions")
+    if not isinstance(children, list):
+        children = question.get("children") if isinstance(question.get("children"), list) else []
+    for child in children:
         if isinstance(child, dict):
             changed = ensure_question_images_in_markdown(child) or changed
     return changed

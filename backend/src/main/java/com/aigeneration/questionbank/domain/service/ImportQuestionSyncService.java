@@ -117,7 +117,9 @@ public class ImportQuestionSyncService {
     public List<ImportQuestionImageEntity> listImages(String questionId) {
         return imageMapper.selectList(new QueryWrapper<ImportQuestionImageEntity>()
                 .eq("question_id", questionId)
-                .orderByAsc("image_index"));
+                .orderByAsc("image_index")).stream()
+                .filter(image -> !"subQuestion".equals(text(json.readMap(image.getRawJson()).get("ownerKind"))))
+                .toList();
     }
 
     /**
@@ -212,9 +214,13 @@ public class ImportQuestionSyncService {
         question.setRawJson(json.write(raw));
         question.setUpdatedAt(LocalDateTime.now());
         questionMapper.updateById(question);
-        if (!responseImages.isEmpty()) {
-            syncImages(taskId, questionId, responseImages, question.getUpdatedAt());
-        }
+        syncImageTree(
+                taskId,
+                questionId,
+                json.readList(question.getImagesJson()),
+                children,
+                question.getUpdatedAt()
+        );
         return question;
     }
 
@@ -254,6 +260,13 @@ public class ImportQuestionSyncService {
         question.setRawJson(json.write(raw));
         question.setUpdatedAt(LocalDateTime.now());
         questionMapper.updateById(question);
+        syncImageTree(
+                taskId,
+                questionId,
+                json.readList(question.getImagesJson()),
+                children,
+                question.getUpdatedAt()
+        );
         return question;
     }
 
@@ -275,7 +288,7 @@ public class ImportQuestionSyncService {
         }
         Map<String, Object> raw = json.readMap(question.getRawJson());
         LocalDateTime now = LocalDateTime.now();
-        boolean imagesChanged = false;
+        boolean imageTreeChanged = false;
 
         if (payload.containsKey("type")) {
             question.setType(text(payload.get("type")));
@@ -310,7 +323,7 @@ public class ImportQuestionSyncService {
         }
         if (payload.containsKey("images")) {
             question.setImagesJson(json.write(payload.get("images")));
-            imagesChanged = true;
+            imageTreeChanged = true;
         }
         if (payload.containsKey("imagePlacements")) {
             question.setImagePlacementsJson(json.write(payload.get("imagePlacements")));
@@ -324,6 +337,7 @@ public class ImportQuestionSyncService {
         if (payload.containsKey("subQuestions") || payload.containsKey("children")) {
             Object children = payload.containsKey("subQuestions") ? payload.get("subQuestions") : payload.get("children");
             question.setChildrenJson(json.write(children));
+            imageTreeChanged = true;
             if (!listValue(children).isEmpty()) {
                 question.setAnswer("");
                 question.setAnalysis("");
@@ -337,8 +351,14 @@ public class ImportQuestionSyncService {
         mergeRawQuestionFields(raw, question);
         question.setRawJson(json.write(raw));
         questionMapper.updateById(question);
-        if (imagesChanged) {
-            syncImages(taskId, questionId, payload.get("images"), now);
+        if (imageTreeChanged) {
+            syncImageTree(
+                    taskId,
+                    questionId,
+                    json.readList(question.getImagesJson()),
+                    json.readList(question.getChildrenJson()),
+                    now
+            );
         }
         return question;
     }
@@ -401,30 +421,35 @@ public class ImportQuestionSyncService {
         } else {
             questionMapper.updateById(entity);
         }
-        syncImages(taskId, id, raw.get("images"), entity.getUpdatedAt());
+        syncImageTree(taskId, id, raw.get("images"), children, entity.getUpdatedAt());
     }
 
     /**
-     * 重建题目对应的题图快照。
+     * 重建父题及其小问对应的题图索引。
      *
      * @param taskId 任务 ID
-     * @param questionId 题目 ID
-     * @param value 原始题图列表
+     * @param questionId 父题 ID
+     * @param parentImages 父题题图列表
+     * @param children 小问列表
      * @param updatedAt 题目更新时间
      */
-    private void syncImages(String taskId, String questionId, Object value, LocalDateTime updatedAt) {
+    private void syncImageTree(
+            String taskId,
+            String questionId,
+            Object parentImages,
+            Object children,
+            LocalDateTime updatedAt
+    ) {
         imageMapper.delete(new QueryWrapper<ImportQuestionImageEntity>().eq("question_id", questionId));
-        if (!(value instanceof List<?> images)) {
-            return;
-        }
+        Map<String, Map<String, Object>> indexedImages = new LinkedHashMap<>();
+        collectIndexedImages(parentImages, questionId, "question", questionId, "", "question", indexedImages);
+        collectChildImages(children, questionId, "subQuestions", indexedImages);
         LocalDateTime now = updatedAt == null ? LocalDateTime.now() : updatedAt;
-        for (int index = 0; index < images.size(); index++) {
-            Object item = images.get(index);
-            if (!(item instanceof Map<?, ?> raw)) {
-                continue;
-            }
+        int index = 0;
+        for (Map.Entry<String, Map<String, Object>> entry : indexedImages.entrySet()) {
+            Map<String, Object> raw = entry.getValue();
             ImportQuestionImageEntity image = new ImportQuestionImageEntity();
-            image.setId(imageId(taskId, questionId, index));
+            image.setId(imageId(taskId, questionId, entry.getKey()));
             image.setTaskId(taskId);
             image.setQuestionId(questionId);
             image.setImageIndex(index);
@@ -435,6 +460,88 @@ public class ImportQuestionSyncService {
             image.setCreatedAt(now);
             image.setUpdatedAt(now);
             imageMapper.insert(image);
+            index++;
+        }
+    }
+
+    /**
+     * 递归收集小问题图，并记录其真实归属。
+     */
+    private void collectChildImages(
+            Object value,
+            String questionId,
+            String ownerPath,
+            Map<String, Map<String, Object>> indexedImages
+    ) {
+        List<Object> children = listValue(value);
+        for (int index = 0; index < children.size(); index++) {
+            Map<String, Object> child = mapValue(children.get(index));
+            if (child.isEmpty()) {
+                continue;
+            }
+            String childId = firstText(child.get("id"), child.get("childId"), questionId + "_sub_" + (index + 1));
+            String childLabel = firstText(child.get("label"), "(" + (index + 1) + ")");
+            String childPath = ownerPath + "[" + index + "]";
+            collectIndexedImages(
+                    child.get("images"),
+                    questionId,
+                    "subQuestion",
+                    childId,
+                    childLabel,
+                    childPath,
+                    indexedImages
+            );
+            Object nested = child.containsKey("subQuestions") ? child.get("subQuestions") : child.get("children");
+            collectChildImages(nested, questionId, childPath + ".subQuestions", indexedImages);
+        }
+    }
+
+    /**
+     * 将一层题图加入物理资源去重索引，并聚合所有归属。
+     */
+    @SuppressWarnings("unchecked")
+    private void collectIndexedImages(
+            Object value,
+            String questionId,
+            String ownerKind,
+            String ownerId,
+            String ownerLabel,
+            String ownerPath,
+            Map<String, Map<String, Object>> indexedImages
+    ) {
+        for (Object item : listValue(value)) {
+            Map<String, Object> raw = mapValue(item);
+            String key = firstText(raw.get("storageFileId"), raw.get("url"), raw.get("path"), raw.get("name"));
+            if (raw.isEmpty() || key.isBlank()) {
+                continue;
+            }
+            Map<String, Object> owner = new LinkedHashMap<>();
+            owner.put("kind", ownerKind);
+            owner.put("questionId", questionId);
+            owner.put("id", ownerId);
+            owner.put("label", ownerLabel);
+            owner.put("path", ownerPath);
+
+            Map<String, Object> indexed = indexedImages.get(key);
+            if (indexed == null) {
+                indexed = new LinkedHashMap<>(raw);
+                indexed.put("ownerKind", ownerKind);
+                indexed.put("ownerQuestionId", questionId);
+                indexed.put("ownerId", ownerId);
+                indexed.put("ownerLabel", ownerLabel);
+                indexed.put("ownerPath", ownerPath);
+                indexed.put("owners", new ArrayList<>(List.of(owner)));
+                indexedImages.put(key, indexed);
+                continue;
+            }
+            Object ownersValue = indexed.get("owners");
+            List<Map<String, Object>> owners = ownersValue instanceof List<?> list
+                    ? (List<Map<String, Object>>) list
+                    : new ArrayList<>();
+            if (!owners.contains(owner)) {
+                owners.add(owner);
+            }
+            indexed.put("owners", owners);
         }
     }
 
@@ -452,7 +559,13 @@ public class ImportQuestionSyncService {
         question.setRawJson(json.write(raw));
         question.setUpdatedAt(now);
         questionMapper.updateById(question);
-        syncImages(question.getTaskId(), question.getId(), images, now);
+        syncImageTree(
+                question.getTaskId(),
+                question.getId(),
+                images,
+                json.readList(question.getChildrenJson()),
+                now
+        );
     }
 
     /**
@@ -580,11 +693,11 @@ public class ImportQuestionSyncService {
      *
      * @param taskId 任务 ID
      * @param questionId 题目 ID
-     * @param index 题图序号
+     * @param assetKey 物理题图去重键
      * @return 题图 ID
      */
-    private String imageId(String taskId, String questionId, int index) {
-        String raw = taskId + "|" + questionId + "|" + index;
+    private String imageId(String taskId, String questionId, String assetKey) {
+        String raw = taskId + "|" + questionId + "|" + assetKey;
         return "iqi_" + UUID.nameUUIDFromBytes(raw.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -697,7 +810,7 @@ public class ImportQuestionSyncService {
     private void mergeSubQuestionFields(Map<String, Object> target, Map<String, Object> source) {
         for (String field : List.of(
                 "stem", "stemMarkdown", "manualMarkdown", "answer", "analysis",
-                "type", "difficulty", "score", "knowledgePointIds", "knowledgePoints", "options", "images",
+                "type", "difficulty", "score", "knowledgePointIds", "knowledgePoints", "options",
                 "contextMatched", "answerEvidence", "analysisEvidence", "warnings", "aiMetadata")) {
             Object value = source.get(field);
             if (hasValue(value)) {

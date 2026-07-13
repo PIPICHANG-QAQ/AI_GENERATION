@@ -15,6 +15,18 @@ export interface QuestionImage {
   type?: string;
   storageFileId?: string;
   questionId?: string;
+  ownerKind?: string;
+  ownerQuestionId?: string;
+  ownerId?: string;
+  ownerLabel?: string;
+  ownerPath?: string;
+  owners?: Array<{
+    kind?: string;
+    questionId?: string;
+    id?: string;
+    label?: string;
+    path?: string;
+  }>;
   raw?: Record<string, unknown>;
 }
 
@@ -97,7 +109,7 @@ export function questionImageSrc(value?: string | null): string {
 }
 
 export function getImageKey(img: QuestionImage): string {
-  return String(img.storageFileId || img.imageId || img.id || img.url || img.path || img.name || "").trim();
+  return String(img.storageFileId || img.url || img.path || img.imageId || img.id || img.name || "").trim();
 }
 
 function safeDecode(value: string): string {
@@ -692,6 +704,47 @@ export function subQuestionEditorForm(sub: any, index: number, parent?: any): an
     analysisEvidence: String(sub?.analysisEvidence ?? sub?.aiMetadata?.analysisEvidence ?? ""),
     warnings: Array.isArray(sub?.warnings) ? sub.warnings : Array.isArray(sub?.aiMetadata?.warnings) ? sub.aiMetadata.warnings : [],
     aiMetadata: sub?.aiMetadata,
+    imagePlacements: Array.isArray(sub?.imagePlacements) ? sub.imagePlacements : [],
+  };
+}
+
+export function updateSubQuestionImages(sub: any, nextImages: QuestionImage[]): any {
+  const previousImages = ensureQuestionImageLabels(Array.isArray(sub?.images) ? sub.images : []);
+  const labeledNextImages = ensureQuestionImageLabels(nextImages, previousImages);
+  const removedImages = getRemovedQuestionImages(previousImages, labeledNextImages);
+  const answer = removeQuestionImageRefsFromMarkdown(sub?.answer || "", removedImages);
+  const analysis = removeQuestionImageRefsFromMarkdown(sub?.analysis || "", removedImages);
+  const options = removeQuestionImageRefsFromOptions(sub?.options, removedImages);
+  const markdown = appendNewImageRefs(
+    removeQuestionImageRefsFromMarkdown(sub?.markdown || "", removedImages),
+    previousImages,
+    labeledNextImages,
+    [answer, analysis, ...options.map((option) => option.content)],
+  );
+  const removedKeys = new Set(
+    removedImages.flatMap((image, index) =>
+      [getImageKey(image), image.url, image.path, image.name, getQuestionImageLabel(image, index)]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const imagePlacements = Array.isArray(sub?.imagePlacements)
+    ? sub.imagePlacements.filter((placement: any) => {
+        const key = String(
+          placement?.imageKey || placement?.storageFileId || placement?.imageId || placement?.url || placement?.path || placement?.name || placement?.label || "",
+        ).trim();
+        return !key || !removedKeys.has(key);
+      })
+    : [];
+
+  return {
+    ...sub,
+    markdown,
+    answer,
+    analysis,
+    options,
+    images: labeledNextImages,
+    imagePlacements,
   };
 }
 

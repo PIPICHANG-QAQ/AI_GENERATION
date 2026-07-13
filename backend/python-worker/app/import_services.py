@@ -1944,7 +1944,12 @@ def apply_auto_standardize_result(
     if response.get("options"):
         question["options"] = normalize_question_options_image_refs(response.get("options"), question.get("images"))
     if response.get("subQuestions"):
-        sub_questions = normalize_sub_questions(response.get("subQuestions"))
+        current_sub_questions = question.get("subQuestions") or question.get("children") or []
+        sub_questions = (
+            normalize_sub_questions(current_sub_questions, response.get("subQuestions"))
+            if current_sub_questions
+            else normalize_sub_questions(response.get("subQuestions"))
+        )
         question["subQuestions"] = sub_questions
         question["children"] = sub_questions
     if not (question.get("subQuestions") or question.get("children")):
@@ -2007,6 +2012,7 @@ def validate_auto_standardize_candidate(
 
     if question.get("subQuestions") and response.get("subQuestions") == [] and re.search(r"[（(]\s*1\s*[）)]", before_markdown):
         errors.append("candidate-dropped-subquestions")
+    errors.extend(nested_subquestion_image_candidate_errors(question, response))
 
     return {
         "valid": not errors,
@@ -2017,6 +2023,78 @@ def validate_auto_standardize_candidate(
         "afterOptionCount": len(effective_options),
         "requiredImageLabels": sorted(required_labels),
         "candidateImageLabels": sorted(candidate_labels),
+    }
+
+
+def nested_subquestion_image_candidate_errors(question: dict[str, Any], response: dict[str, Any]) -> list[str]:
+    """校验 AI 小问候选没有删除图片引用或更换图片资产。"""
+    current_children = question.get("subQuestions") or question.get("children") or []
+    incoming_children = response.get("subQuestions") or response.get("children") or []
+    if not isinstance(current_children, list) or not isinstance(incoming_children, list):
+        return []
+
+    errors: list[str] = []
+    for index, current in enumerate(current_children, start=1):
+        if not isinstance(current, dict):
+            continue
+        current_images = normalize_question_images(current.get("images"))
+        if not current_images:
+            continue
+        incoming = match_sub_question_enrichment(current, incoming_children, index)
+        if not incoming:
+            continue
+
+        current_markdown = question_to_edit_markdown(current)
+        required_labels = required_question_image_labels(current, current_markdown)
+        incoming_markdown = str(
+            incoming.get("manualMarkdown")
+            or incoming.get("stemMarkdown")
+            or incoming.get("stem")
+            or ""
+        ).strip()
+        if incoming_markdown:
+            incoming_options = normalize_question_options_image_refs(incoming.get("options"), current_images)
+            incoming_context = "\n".join(
+                [
+                    incoming_markdown,
+                    *[str(option.get("content") or "") for option in incoming_options],
+                    str(incoming.get("answer") or ""),
+                    str(incoming.get("analysis") or ""),
+                ]
+            )
+            candidate_labels = markdown_referenced_image_labels(incoming_context, current_images)
+            missing_labels = sorted(required_labels - candidate_labels)
+            if missing_labels:
+                child_id = str(current.get("id") or current.get("label") or index)
+                errors.append(f"candidate-dropped-subquestion-images:{child_id}:{','.join(missing_labels)}")
+
+        incoming_images = normalize_question_images(incoming.get("images"))
+        if incoming_images and image_asset_keys(incoming_images) != image_asset_keys(current_images):
+            child_id = str(current.get("id") or current.get("label") or index)
+            errors.append(f"candidate-changed-subquestion-images:{child_id}")
+
+    return errors
+
+
+def image_asset_keys(images: Any) -> set[str]:
+    """返回用于比较题图物理资源的稳定键集合。"""
+    return {
+        str(
+            image.get("storageFileId")
+            or image.get("url")
+            or image.get("path")
+            or image.get("name")
+            or ""
+        ).strip()
+        for image in normalize_question_images(images)
+        if isinstance(image, dict)
+        and str(
+            image.get("storageFileId")
+            or image.get("url")
+            or image.get("path")
+            or image.get("name")
+            or ""
+        ).strip()
     }
 
 
@@ -2237,28 +2315,68 @@ def bank_question_duplicate_reason(
 def import_task_image_library(task: dict[str, Any]) -> list[dict[str, Any]]:
     """汇总导入任务下可复用的题图资源。"""
     images: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    indexed: dict[str, dict[str, Any]] = {}
 
-    def append_asset(asset: dict[str, Any], source: str) -> None:
+    def append_asset(asset: dict[str, Any], source: str, owner: dict[str, Any] | None = None) -> None:
         """执行 append asset 逻辑。"""
         url = str(asset.get("url") or "").strip()
         path = str(asset.get("path") or asset.get("name") or url).strip()
         if not url and not path:
             return
         key = url or path
-        if key in seen:
+        existing = indexed.get(key)
+        if existing is not None:
+            if owner:
+                owners = existing.setdefault("owners", [])
+                if owner not in owners:
+                    owners.append(owner)
+                if not existing.get("ownerKind"):
+                    existing.update(
+                        ownerKind=owner["kind"],
+                        ownerQuestionId=owner["questionId"],
+                        ownerId=owner["id"],
+                        ownerLabel=owner["label"],
+                        ownerPath=owner["path"],
+                    )
             return
-        seen.add(key)
-        images.append(
-            {
-                "name": str(asset.get("name") or Path(path).name or "题图"),
-                "path": path,
-                "url": url,
-                "source": source,
-                "size": asset.get("size", 0),
-                "type": asset.get("type") or Path(path).suffix.lower().lstrip(".") or "image",
-            }
-        )
+        item = {
+            "name": str(asset.get("name") or Path(path).name or "题图"),
+            "path": path,
+            "url": url,
+            "source": source,
+            "size": asset.get("size", 0),
+            "type": asset.get("type") or Path(path).suffix.lower().lstrip(".") or "image",
+        }
+        if owner:
+            item.update(
+                ownerKind=owner["kind"],
+                ownerQuestionId=owner["questionId"],
+                ownerId=owner["id"],
+                ownerLabel=owner["label"],
+                ownerPath=owner["path"],
+                owners=[owner],
+            )
+        indexed[key] = item
+        images.append(item)
+
+    def append_question_images(question: dict[str, Any], root_question_id: str, owner_path: str, owner_kind: str) -> None:
+        owner_id = str(question.get("id") or root_question_id)
+        owner = {
+            "kind": owner_kind,
+            "questionId": root_question_id,
+            "id": owner_id,
+            "label": str(question.get("label") or ""),
+            "path": owner_path,
+        }
+        for image in question.get("images") or []:
+            if isinstance(image, dict):
+                append_asset(image, str(image.get("source") or "题目结构"), owner)
+        children = question.get("subQuestions")
+        if not isinstance(children, list):
+            children = question.get("children") if isinstance(question.get("children"), list) else []
+        for index, child in enumerate(children):
+            if isinstance(child, dict):
+                append_question_images(child, root_question_id, f"{owner_path}.subQuestions[{index}]", "subQuestion")
 
     for source, job_key in (("试卷 OCR", "paperOcrJobId"), ("答案 OCR", "answerOcrJobId")):
         job = safe_read_job(task.get(job_key))
@@ -2270,6 +2388,10 @@ def import_task_image_library(task: dict[str, Any]) -> list[dict[str, Any]]:
     for image in task.get("imageLibrary") or []:
         if isinstance(image, dict):
             append_asset(image, str(image.get("source") or "本地上传"))
+    for question in task.get("questions") or []:
+        if isinstance(question, dict):
+            question_id = str(question.get("id") or "")
+            append_question_images(question, question_id, "question", "question")
     return images
 
 
