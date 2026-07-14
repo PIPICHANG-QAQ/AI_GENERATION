@@ -114,7 +114,7 @@ class OcrProcessingTest(unittest.TestCase):
         self.assertEqual(125, metrics["totalDurationMs"])
 
     def test_collect_outputs_keeps_layout_read_only_for_question_extraction(self):
-        collect_outputs_source = inspect.getsource(ocr_processing.collect_outputs)
+        collect_outputs_source = inspect.getsource(ocr_processing.collect_outputs_impl)
         detect_boundaries_source = inspect.getsource(question_boundary.detect_local_boundaries)
 
         self.assertFalse(hasattr(ocr_processing, "question_image_refs_by_layout"))

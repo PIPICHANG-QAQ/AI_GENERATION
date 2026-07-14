@@ -25,6 +25,7 @@ from app.question_boundary import (
 from app.image_placement import reconcile_structure_image_placements
 from app.question_layout import load_image_placement_evidence
 from app.visual_repair import apply_visual_repairs, prepare_visual_repair_context
+from app.ocr.postprocess_pipeline import OcrPostProcessingPipeline
 
 
 def structure_candidate_quality(structured: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -252,7 +253,7 @@ def parse_structured_questions_legacy(markdown: str, output_dir: Path, assets: l
     return {"sections": sections, "questions": questions}
 
 
-def collect_outputs(job_id: str) -> dict[str, Any]:
+def collect_outputs_impl(job_id: str) -> dict[str, Any]:
     """收集 OCR job 输出文件、结构化题目和数学校验结果。"""
     current_step = "collect-outputs"
     job = read_job(job_id)
@@ -541,6 +542,14 @@ def collect_outputs(job_id: str) -> dict[str, Any]:
         "autoSemanticRepair": auto_semantic_repair,
         "llmMetrics": llm_metrics,
     }
+
+
+DEFAULT_OCR_POSTPROCESSING_PIPELINE = OcrPostProcessingPipeline()
+
+
+def collect_outputs(job_id: str) -> dict[str, Any]:
+    """Compatibility façade for the single OCR post-processing pipeline."""
+    return DEFAULT_OCR_POSTPROCESSING_PIPELINE.run(job_id)
 
 
 def append_llm_calls(target: list[dict[str, Any]], source: Any) -> None:
