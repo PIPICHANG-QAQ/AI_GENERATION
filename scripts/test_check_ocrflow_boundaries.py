@@ -143,6 +143,25 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
 
         self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
 
+    def test_rejects_python_worker_uri_built_from_if_branch_constants(self):
+        self.write_source(
+            "backend/python-worker/app/branch_constants.py",
+            '\n'.join(
+                [
+                    "def route(enabled):",
+                    "    if enabled:",
+                    '        prefix = "/api/"',
+                    '        bank = "question-bank"',
+                    '        return prefix + bank + "/questions"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
+
     def test_python_function_reassignment_uses_latest_string_value(self):
         self.write_source(
             "backend/python-worker/app/reassigned_route.py",
@@ -455,6 +474,26 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
                     "    from importlib import import_module as load",
                     '    legacy = "app.legacy.foo"',
                     "    return load(legacy)",
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(algorithm_path in failure and "app.legacy.foo" in failure for failure in failures), failures)
+
+    def test_resolves_if_branch_constant_in_aliased_legacy_import(self):
+        algorithm_path = "backend/python-worker/app/branch_dynamic_algorithm.py"
+        self.write_source(
+            algorithm_path,
+            '\n'.join(
+                [
+                    "def load_legacy(enabled):",
+                    "    from importlib import import_module as load",
+                    "    if enabled:",
+                    '        module_name = "app.legacy.foo"',
+                    "        return load(module_name)",
                     "",
                 ]
             ),

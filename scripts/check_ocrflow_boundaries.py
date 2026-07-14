@@ -191,20 +191,6 @@ def _python_target_names(target: ast.AST) -> set[str]:
     return _python_assigned_names(target)
 
 
-def _python_direct_legacy_imports(node: ast.AST) -> Iterable[str]:
-    for child in ast.walk(node):
-        if isinstance(child, ast.Import):
-            for alias in child.names:
-                if "legacy" in alias.name.split("."):
-                    yield alias.name
-        elif isinstance(child, ast.ImportFrom):
-            module = "." * child.level + (child.module or "")
-            for alias in child.names:
-                imported = f"{module}.{alias.name}" if module else alias.name
-                if "legacy" in imported.lstrip(".").split("."):
-                    yield imported
-
-
 class _PythonScopeScanner:
     """Track only deterministic string assignments within one lexical scope."""
 
@@ -301,6 +287,48 @@ class _PythonScopeScanner:
         constants.pop(statement.name, None)
         import_module_names.discard(statement.name)
 
+    def _scan_control_flow(
+        self,
+        statement: ast.stmt,
+        constants: dict[str, str],
+        import_module_names: set[str],
+    ) -> None:
+        if isinstance(statement, (ast.If, ast.While)):
+            self._scan_expression(statement.test, constants, import_module_names)
+        elif isinstance(statement, (ast.For, ast.AsyncFor)):
+            self._scan_expression(statement.iter, constants, import_module_names)
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            for item in statement.items:
+                self._scan_expression(item.context_expr, constants, import_module_names)
+        elif isinstance(statement, ast.Match):
+            self._scan_expression(statement.subject, constants, import_module_names)
+
+        changed_names = _python_assigned_names(statement)
+        branch_constants = dict(constants)
+        branch_import_names = set(import_module_names)
+        for name in changed_names:
+            branch_constants.pop(name, None)
+            branch_import_names.discard(name)
+
+        blocks = [
+            getattr(statement, field)
+            for field in ("body", "orelse", "finalbody")
+            if getattr(statement, field, None)
+        ]
+        for handler in getattr(statement, "handlers", []):
+            self._scan_expression(handler.type, branch_constants, branch_import_names)
+            blocks.append(handler.body)
+        for case in getattr(statement, "cases", []):
+            self._scan_expression(case.pattern, branch_constants, branch_import_names)
+            self._scan_expression(case.guard, branch_constants, branch_import_names)
+            blocks.append(case.body)
+        for block in blocks:
+            self._scan_statements(block, dict(branch_constants), set(branch_import_names))
+
+        for name in changed_names:
+            constants.pop(name, None)
+            import_module_names.discard(name)
+
     def _scan_statement(
         self,
         statement: ast.stmt,
@@ -348,11 +376,7 @@ class _PythonScopeScanner:
             constants.pop(statement.name, None)
             import_module_names.discard(statement.name)
         elif isinstance(statement, self._CONTROL_FLOW_TYPES):
-            for name in _python_assigned_names(statement):
-                constants.pop(name, None)
-                import_module_names.discard(name)
-            self.legacy_imports.extend(_python_direct_legacy_imports(statement))
-            self._scan_expression(statement, constants, import_module_names)
+            self._scan_control_flow(statement, constants, import_module_names)
         else:
             self._scan_expression(statement, constants, import_module_names)
 
