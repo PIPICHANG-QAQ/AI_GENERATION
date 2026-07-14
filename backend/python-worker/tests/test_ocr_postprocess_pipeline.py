@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from app import ocr_processing
+from app.ocr.contracts import CanonicalOcrBundle
 from app.ocr.postprocess_pipeline import OcrPostProcessingPipeline
 
 
@@ -14,11 +15,37 @@ def test_collect_outputs_facade_delegates_to_single_pipeline_instance() -> None:
     run.assert_called_once_with("job-1")
 
 
-def test_pipeline_run_preserves_existing_collect_outputs_implementation() -> None:
+def test_pipeline_run_adapts_legacy_job_before_running_bundle() -> None:
+    bundle = CanonicalOcrBundle(
+        document_id="job-2",
+        input_sha256="sha",
+        canonical_markdown="1. 兼容题目",
+    )
     expected = {"questions": [{"id": "q1"}]}
 
-    with patch("app.ocr_processing.collect_outputs_impl", return_value=expected) as implementation:
+    with patch("app.ocr.mineru_adapter.MineruOcrBundleAdapter.from_job", return_value=bundle) as adapter, patch.object(
+        OcrPostProcessingPipeline,
+        "run_bundle",
+        return_value=expected,
+    ) as run_bundle:
         result = OcrPostProcessingPipeline().run("job-2")
 
     assert result is expected
-    implementation.assert_called_once_with("job-2")
+    adapter.assert_called_once_with("job-2")
+    run_bundle.assert_called_once_with(bundle)
+
+
+def test_pipeline_runs_explicit_canonical_bundle_without_provider_name() -> None:
+    bundle = CanonicalOcrBundle(
+        document_id="external-ocr-job",
+        input_sha256="sha",
+        canonical_markdown="1. 外部 OCR 题目",
+        artifact_root="/tmp/external-ocr-job",
+    )
+    expected = {"questions": [{"id": "q_1"}]}
+
+    with patch("app.ocr_processing.collect_outputs_impl", return_value=expected) as implementation:
+        result = OcrPostProcessingPipeline().run_bundle(bundle)
+
+    assert result is expected
+    implementation.assert_called_once_with("external-ocr-job", bundle=bundle)

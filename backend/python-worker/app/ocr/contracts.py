@@ -78,6 +78,8 @@ class OcrLayoutBlock:
     image_ref: str = ""
     source_order: int = 0
     coordinate_source: str = ""
+    markdown_start: int | None = None
+    markdown_end: int | None = None
 
     def __post_init__(self) -> None:
         if not self.block_id.strip():
@@ -108,6 +110,10 @@ class OcrLayoutBlock:
         if self.page_width is not None and self.page_height is not None:
             payload["pageWidth"] = self.page_width
             payload["pageHeight"] = self.page_height
+        if self.markdown_start is not None:
+            payload["markdownStart"] = self.markdown_start
+        if self.markdown_end is not None:
+            payload["markdownEnd"] = self.markdown_end
         if self.coordinate_source:
             payload["coordinateSource"] = self.coordinate_source
         return payload

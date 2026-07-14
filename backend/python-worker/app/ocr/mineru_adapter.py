@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.ocr.contracts import CanonicalOcrBundle, OcrAsset, OcrLayoutBlock, OcrPage, SourceDocumentRef
-from app.question_layout import load_question_layout_items
+from app.question_layout import index_layout_items, load_question_layout_items
 
 
 class MineruOcrBundleAdapter:
@@ -47,7 +47,8 @@ class MineruOcrBundleAdapter:
         json_path = json_files[0] if json_files else None
         json_content = self._read_json(json_path) if json_path else None
         assets = tuple(self._asset(job_id, output_dir, path) for path in image_files)
-        layout_blocks = tuple(self._layout_block(item) for item in load_question_layout_items(output_dir))
+        layout_items = index_layout_items(load_question_layout_items(output_dir), markdown)
+        layout_blocks = tuple(self._layout_block(item) for item in layout_items)
         pages = tuple(self._pages(layout_blocks))
         source_ref = self._source_ref(job)
         capabilities = {"markdown"}
@@ -119,6 +120,8 @@ class MineruOcrBundleAdapter:
             image_ref=str(item.get("imageRef") or ""),
             source_order=int(item.get("sourceOrder") or 0),
             coordinate_source=str(item.get("coordinateSource") or ""),
+            markdown_start=int(item["start"]) if isinstance(item.get("start"), int) else None,
+            markdown_end=int(item["end"]) if isinstance(item.get("end"), int) else None,
         )
 
     @staticmethod

@@ -52,6 +52,7 @@ def test_adapter_builds_l2_bundle_from_mineru_artifacts(tmp_path: Path) -> None:
     assert bundle.assets[0].path == "images/figure.png"
     assert bundle.layout_blocks[0].page_width == 1000
     assert bundle.layout_blocks[0].coordinate_source == "middle"
+    assert bundle.layout_blocks[0].markdown_start == bundle.canonical_markdown.index("images/figure.png")
     assert bundle.pages[0].height == 1400
     assert bundle.source_document_ref is not None
     assert bundle.source_document_ref.path == str(source)

@@ -25,6 +25,35 @@ from app.question_boundary import (
 from app.image_placement import reconcile_structure_image_placements
 from app.question_layout import load_image_placement_evidence
 from app.visual_repair import apply_visual_repairs, prepare_visual_repair_context
+from app.ocr.contracts import CanonicalOcrBundle
+
+
+def build_postprocess_input(bundle: CanonicalOcrBundle) -> dict[str, Any]:
+    """Convert provider-neutral evidence into the unchanged algorithm input shape."""
+    if not bundle.artifact_root:
+        raise ValueError("artifactRoot is required by the current visual-repair compatibility mode")
+    output_dir = Path(bundle.artifact_root)
+    markdown_path = output_dir / bundle.markdown_artifact_path if bundle.markdown_artifact_path else None
+    json_path = output_dir / bundle.json_artifact_path if bundle.json_artifact_path else None
+    return {
+        "outputDir": output_dir,
+        "markdown": bundle.canonical_markdown,
+        "markdownFiles": [markdown_path] if markdown_path and markdown_path.is_file() else [],
+        "jsonFiles": [json_path] if json_path and json_path.is_file() else [],
+        "jsonContent": bundle.json_content,
+        "assets": [
+            {
+                "name": asset.name,
+                "path": asset.path,
+                "url": asset.url,
+                "size": asset.size_bytes,
+                "type": asset.media_type.split("/", 1)[-1],
+            }
+            for asset in bundle.assets
+        ],
+        "layoutItems": [block.to_dict() for block in bundle.layout_blocks],
+        "uploadPath": bundle.source_document_ref.path if bundle.source_document_ref else "",
+    }
 from app.ocr.postprocess_pipeline import OcrPostProcessingPipeline
 
 
@@ -253,8 +282,8 @@ def parse_structured_questions_legacy(markdown: str, output_dir: Path, assets: l
     return {"sections": sections, "questions": questions}
 
 
-def collect_outputs_impl(job_id: str) -> dict[str, Any]:
-    """收集 OCR job 输出文件、结构化题目和数学校验结果。"""
+def collect_outputs_impl(job_id: str, bundle: CanonicalOcrBundle | None = None) -> dict[str, Any]:
+    """收集统一 OCR 证据并执行既有的题目后处理算法。"""
     current_step = "collect-outputs"
     job = read_job(job_id)
     mark_ocr_flow_step(job, current_step, "running", "正在读取 OCR 输出文件")
@@ -262,38 +291,51 @@ def collect_outputs_impl(job_id: str) -> dict[str, Any]:
     visual_context_executor: ThreadPoolExecutor | None = None
     visual_context_future = None
     try:
-        output_dir = OUTPUT_ROOT / job_id
-        markdown_files = sorted(
-            [path for path in output_dir.rglob("*") if path.suffix.lower() in MARKDOWN_EXTENSIONS],
-            key=lambda path: path.stat().st_size,
-            reverse=True,
-        )
-        json_files = sorted(output_dir.rglob("*.json"), key=lambda path: path.stat().st_size, reverse=True)
-        image_files = sorted(
-            [path for path in output_dir.rglob("*") if path.suffix.lower() in IMAGE_EXTENSIONS],
-            key=lambda path: path.as_posix(),
-        )
+        if bundle is not None:
+            explicit_input = build_postprocess_input(bundle)
+            output_dir = explicit_input["outputDir"]
+            markdown_files = explicit_input["markdownFiles"]
+            json_files = explicit_input["jsonFiles"]
+            markdown = explicit_input["markdown"]
+            json_content = explicit_input["jsonContent"]
+            assets = explicit_input["assets"]
+            placement_layout_items = explicit_input["layoutItems"]
+            upload_path = explicit_input["uploadPath"]
+        else:
+            output_dir = OUTPUT_ROOT / job_id
+            markdown_files = sorted(
+                [path for path in output_dir.rglob("*") if path.suffix.lower() in MARKDOWN_EXTENSIONS],
+                key=lambda path: path.stat().st_size,
+                reverse=True,
+            )
+            json_files = sorted(output_dir.rglob("*.json"), key=lambda path: path.stat().st_size, reverse=True)
+            image_files = sorted(
+                [path for path in output_dir.rglob("*") if path.suffix.lower() in IMAGE_EXTENSIONS],
+                key=lambda path: path.as_posix(),
+            )
 
-        markdown = markdown_files[0].read_text(encoding="utf-8", errors="replace") if markdown_files else ""
-        json_content: Any = None
-        json_path = json_files[0] if json_files else None
-        if json_path:
-            raw_json = json_path.read_text(encoding="utf-8", errors="replace")
-            try:
-                json_content = json.loads(raw_json)
-            except json.JSONDecodeError:
-                json_content = raw_json
+            markdown = markdown_files[0].read_text(encoding="utf-8", errors="replace") if markdown_files else ""
+            json_content: Any = None
+            json_path = json_files[0] if json_files else None
+            if json_path:
+                raw_json = json_path.read_text(encoding="utf-8", errors="replace")
+                try:
+                    json_content = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    json_content = raw_json
 
-        assets = [
-            {
-                "name": path.name,
-                "path": path.relative_to(output_dir).as_posix(),
-                "url": relative_file_url(job_id, path),
-                "size": path.stat().st_size,
-                "type": path.suffix.lower().lstrip("."),
-            }
-            for path in image_files
-        ]
+            assets = [
+                {
+                    "name": path.name,
+                    "path": path.relative_to(output_dir).as_posix(),
+                    "url": relative_file_url(job_id, path),
+                    "size": path.stat().st_size,
+                    "type": path.suffix.lower().lstrip("."),
+                }
+                for path in image_files
+            ]
+            placement_layout_items = None
+            upload_path = job.get("uploadPath")
 
         job = read_job(job_id)
         mark_ocr_flow_step(job, current_step, "success", f"已收集 {len(markdown_files)} 个 Markdown、{len(json_files)} 个 JSON、{len(assets)} 个图片资源")
@@ -308,7 +350,7 @@ def collect_outputs_impl(job_id: str) -> dict[str, Any]:
         visual_context_future = visual_context_executor.submit(
             prepare_visual_repair_context,
             output_dir,
-            job.get("uploadPath"),
+            upload_path,
         )
         job = read_job(job_id)
         mark_ocr_flow_step(
@@ -394,7 +436,8 @@ def collect_outputs_impl(job_id: str) -> dict[str, Any]:
         structured = build_structure_from_boundaries(markdown, boundary_source, assets)
         merge_legacy_images(structured, legacy_structured)
         try:
-            placement_layout_items = load_image_placement_evidence(output_dir, markdown)
+            if placement_layout_items is None:
+                placement_layout_items = load_image_placement_evidence(output_dir, markdown)
             layout_image_realign = reconcile_structure_image_placements(structured, placement_layout_items)
             layout_image_realign["reason"] = "layout-read-only-reconciliation"
         except Exception as exc:
@@ -443,7 +486,7 @@ def collect_outputs_impl(job_id: str) -> dict[str, Any]:
                     visual_context_executor.shutdown(wait=False)
                     visual_context_executor = None
 
-        visual_repair = apply_visual_repairs(structured, output_dir, job.get("uploadPath"), job_id, visual_repair_context)
+        visual_repair = apply_visual_repairs(structured, output_dir, upload_path, job_id, visual_repair_context)
         visual_status = "success" if visual_repair.get("enabled", True) else "skipped"
         preprocessed = visual_repair.get("preprocessed") or {}
         visual_message = (
@@ -529,7 +572,7 @@ def collect_outputs_impl(job_id: str) -> dict[str, Any]:
         "markdown": markdown,
         "json": json_content,
         "markdownFile": relative_file_url(job_id, markdown_files[0]) if markdown_files else None,
-        "jsonFile": relative_file_url(job_id, json_path) if json_path else None,
+        "jsonFile": relative_file_url(job_id, json_files[0]) if json_files else None,
         "assets": assets,
         "sections": structured["sections"],
         "questions": structured["questions"],
