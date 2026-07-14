@@ -4,12 +4,14 @@ import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import BackgroundTasks, HTTPException
 from starlette.datastructures import Headers, UploadFile
 
-from app.ocr_flow import MineruOcrProvider, OcrFlowRuntime
+from app.ocr.contracts import CanonicalOcrBundle
+from app.ocr_flow import MineruOcrProvider, OcrProviderRequest, OcrProviderResult
+from app import ocr_execution
 from app import worker_base
 
 
@@ -59,27 +61,123 @@ class MineruOcrProviderTest(unittest.TestCase):
             app_root = Path(tmp)
             command_path = self._write_local_mineru(app_root, "#!/bin/sh\nexit 0\n")
             provider = MineruOcrProvider(app_root, 1)
-            job = {"id": "job-1", "status": "pending"}
-            runtime = OcrFlowRuntime(
-                output_root=app_root / "outputs",
+            request = OcrProviderRequest(
+                document_id="job-1",
+                input_path="paper.pdf",
+                output_dir=app_root / "outputs" / "job-1",
                 timeout_seconds=30,
-                now_iso=lambda: "2026-07-08T00:00:00+00:00",
-                read_job=lambda _job_id: job,
-                write_job=lambda _job: None,
-                collect_outputs=lambda _job_id: {"questions": []},
-                mark_step=lambda current, *_args: current,
             )
+            request.output_dir.mkdir(parents=True)
+            (request.output_dir / "paper.md").write_text("1. 题目", encoding="utf-8")
 
             with patch.dict(os.environ, {"MINERU_API_URL": "http://127.0.0.1:8002"}), patch(
                 "app.ocr_flow.subprocess.run",
                 return_value=subprocess.CompletedProcess([str(command_path)], 0, "", ""),
             ) as run:
-                provider.run("job-1", "paper.pdf", runtime)
+                result = provider.run(request)
 
         mineru_cmd = run.call_args.args[0]
         self.assertIn("--api-url", mineru_cmd)
         self.assertIn("http://127.0.0.1:8002", mineru_cmd)
-        self.assertEqual("http://127.0.0.1:8002", job["mineruApiUrl"])
+        self.assertEqual("http://127.0.0.1:8002", result.metadata["mineruApiUrl"])
+        self.assertTrue(result.success)
+        self.assertIsNotNone(result.bundle)
+
+    def test_provider_success_only_generates_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path = self._write_local_mineru(app_root, "#!/bin/sh\nexit 0\n")
+            provider = MineruOcrProvider(app_root, 1)
+            request = OcrProviderRequest(
+                document_id="job-1",
+                input_path="paper.pdf",
+                output_dir=app_root / "outputs" / "job-1",
+                timeout_seconds=30,
+            )
+            request.output_dir.mkdir(parents=True)
+            (request.output_dir / "paper.md").write_text("1. 题目", encoding="utf-8")
+
+            with patch(
+                "app.ocr_flow.subprocess.run",
+                return_value=subprocess.CompletedProcess([str(command_path)], 0, "", ""),
+            ):
+                result = provider.run(request)
+
+        self.assertTrue(result.success)
+        self.assertEqual("mineru", result.metadata["ocrProvider"])
+        self.assertIsInstance(result.bundle, CanonicalOcrBundle)
+
+    def test_orchestrator_runs_postprocess_after_provider_artifacts_exist(self):
+        job = {"id": "job-1", "status": "running"}
+        provider = Mock()
+        bundle = CanonicalOcrBundle(document_id="job-1", input_sha256="sha", canonical_markdown="1. 题目")
+        provider.run.return_value = OcrProviderResult(success=True, bundle=bundle, metadata={"ocrProvider": "external"})
+        written_jobs: list[dict] = []
+
+        with patch.object(ocr_execution, "read_job", side_effect=lambda _job_id: job), \
+                patch.object(ocr_execution, "selected_provider_name", return_value="mineru"), \
+                patch.object(ocr_execution, "selected_ocr_provider", return_value=provider), \
+                patch.object(ocr_execution, "run_postprocess_bundle", return_value={"questions": [{"id": "1"}]}) as postprocess, \
+                patch.object(ocr_execution, "write_job", side_effect=lambda current: written_jobs.append(dict(current))):
+            ocr_execution.run_ocr_provider_job("job-1", "paper.pdf")
+
+        request = provider.run.call_args.args[0]
+        self.assertEqual("job-1", request.document_id)
+        self.assertEqual("paper.pdf", request.input_path)
+        self.assertEqual("external", job["ocrProvider"])
+        postprocess.assert_called_once_with(bundle)
+        self.assertEqual("success", job["status"])
+        self.assertEqual({"questions": [{"id": "1"}]}, job["outputs"])
+        self.assertTrue(written_jobs)
+
+    def test_orchestrator_marks_job_failed_when_postprocess_rejects_artifacts(self):
+        job = {"id": "job-1", "status": "running"}
+        provider = Mock()
+        bundle = CanonicalOcrBundle(document_id="job-1", input_sha256="sha", canonical_markdown="1. 题目")
+        provider.run.return_value = OcrProviderResult(success=True, bundle=bundle)
+
+        with patch.object(ocr_execution, "read_job", side_effect=lambda _job_id: job), \
+                patch.object(ocr_execution, "selected_provider_name", return_value="mineru"), \
+                patch.object(ocr_execution, "selected_ocr_provider", return_value=provider), \
+                patch.object(ocr_execution, "run_postprocess_bundle", side_effect=ValueError("invalid OCR bundle")), \
+                patch.object(ocr_execution, "write_job") as write:
+            ocr_execution.run_ocr_provider_job("job-1", "paper.pdf")
+
+        self.assertEqual("failed", job["status"])
+        self.assertEqual("invalid OCR bundle", job["error"])
+        self.assertGreaterEqual(write.call_count, 1)
+        self.assertEqual(job, write.call_args.args[0])
+
+    def test_orchestrator_marks_job_failed_when_provider_raises(self):
+        job = {"id": "job-1", "status": "running"}
+        provider = Mock()
+        provider.run.side_effect = RuntimeError("provider crashed")
+
+        with patch.object(ocr_execution, "read_job", side_effect=lambda _job_id: job), \
+                patch.object(ocr_execution, "selected_provider_name", return_value="external"), \
+                patch.object(ocr_execution, "selected_ocr_provider", return_value=provider), \
+                patch.object(ocr_execution, "write_job"):
+            ocr_execution.run_ocr_provider_job("job-1", "paper.pdf")
+
+        self.assertEqual("failed", job["status"])
+        self.assertEqual("provider crashed", job["error"])
+
+    def test_orchestrator_rejects_bundle_for_another_job(self):
+        job = {"id": "job-1", "status": "running"}
+        provider = Mock()
+        wrong_bundle = CanonicalOcrBundle(document_id="job-2", input_sha256="sha", canonical_markdown="1. 错题")
+        provider.run.return_value = OcrProviderResult(success=True, bundle=wrong_bundle)
+
+        with patch.object(ocr_execution, "read_job", side_effect=lambda _job_id: job), \
+                patch.object(ocr_execution, "selected_provider_name", return_value="external"), \
+                patch.object(ocr_execution, "selected_ocr_provider", return_value=provider), \
+                patch.object(ocr_execution, "run_postprocess_bundle") as postprocess, \
+                patch.object(ocr_execution, "write_job"):
+            ocr_execution.run_ocr_provider_job("job-1", "paper.pdf")
+
+        postprocess.assert_not_called()
+        self.assertEqual("failed", job["status"])
+        self.assertIn("does not match", job["error"])
 
     def test_pdf_job_fails_before_persisting_when_provider_is_unavailable(self):
         class MissingProvider:

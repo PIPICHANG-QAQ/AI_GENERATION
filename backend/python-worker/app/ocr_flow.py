@@ -1,7 +1,7 @@
 """OCR-Flow provider 抽象。
 
-默认 provider 是 MinerU。后续替换其它开源 OCR/版面解析项目时，应实现新的
-OcrProvider，并保持输出目录、Markdown、JSON 和图片资源结构兼容上层 worker。
+Provider 只负责把输入文件转换为 OCR 工件。题库后处理由执行编排层在 Provider
+成功后统一调用，因此新增 Provider 不需要依赖题库题目解析实现。
 """
 
 from __future__ import annotations
@@ -11,25 +11,38 @@ import shlex
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Mapping
+
+from app.ocr.contracts import CanonicalOcrBundle
 
 
 DEFAULT_OCR_PROVIDER = "mineru"
 
 
 @dataclass(frozen=True)
-class OcrFlowRuntime:
-    """OCR-Flow runtime 描述模型。"""
-    output_root: Path
+class OcrProviderRequest:
+    """Provider 执行所需的输入；不携带平台任务状态或后处理回调。"""
+    document_id: str
+    input_path: str
+    output_dir: Path
     timeout_seconds: int
-    now_iso: Callable[[], str]
-    read_job: Callable[[str], dict[str, Any]]
-    write_job: Callable[[dict[str, Any]], None]
-    collect_outputs: Callable[[str], dict[str, Any]]
-    mark_step: Callable[[dict[str, Any], str, str, str | None, str | None], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class OcrProviderResult:
+    """Provider 的归一化执行结果，成功时必须交付可后处理的 Bundle。"""
+    success: bool
+    bundle: CanonicalOcrBundle | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+    def __post_init__(self) -> None:
+        if self.success and self.bundle is None:
+            raise ValueError("successful OCR provider result requires canonical bundle")
+        object.__setattr__(self, "metadata", dict(self.metadata))
 
 
 @dataclass(frozen=True)
@@ -53,8 +66,8 @@ class OcrProvider:
         """执行 status 逻辑。"""
         raise NotImplementedError
 
-    def run(self, job_id: str, upload_path: str, runtime: OcrFlowRuntime) -> None:
-        """执行 run 逻辑。"""
+    def run(self, request: OcrProviderRequest) -> OcrProviderResult:
+        """生成并验证标准 OCR Bundle，不读取或修改平台任务状态。"""
         raise NotImplementedError
 
 
@@ -271,81 +284,65 @@ class MineruOcrProvider(OcrProvider):
         }
         return status
 
-    def run(self, job_id: str, upload_path: str, runtime: OcrFlowRuntime) -> None:
-        """执行 run 逻辑。"""
-        job = runtime.read_job(job_id)
-        runtime.mark_step(job, "ocr-provider", "running", "解析 OCR provider 配置", None)
-        runtime.write_job(job)
+    def run(self, request: OcrProviderRequest) -> OcrProviderResult:
+        """调用 MinerU 并把工件归一为 Bundle，不执行题库后处理或状态写入。"""
         command, resolution = self.resolve_command()
         if not command:
-            runtime.mark_step(job, "ocr-provider", "failed", resolution.get("error") or "OCR provider 不可用", None)
-            job.update(
-                {
-                    "status": "failed",
-                    "finishedAt": runtime.now_iso(),
+            return OcrProviderResult(
+                success=False,
+                metadata={
                     "ocrFlowProvider": self.name,
                     "ocrProvider": self.name,
                     "ocrFlowProviderResolution": resolution,
-                    "error": resolution.get("error") or "MinerU CLI is not installed or not available.",
-                }
+                },
+                error=resolution.get("error") or "MinerU CLI is not installed or not available.",
             )
-            runtime.write_job(job)
-            return
 
-        output_dir = runtime.output_root / job_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-        job.update(
-            {
-                "status": "running",
-                "startedAt": runtime.now_iso(),
-                "ocrFlowProvider": self.name,
-                "ocrProvider": self.name,
-                "ocrFlowProviderCommand": command.display,
-                "ocrFlowProviderCommandSource": command.source,
-                "ocrFlowProviderResolution": resolution,
-                "mineruCommand": command.display,
-                "mineruApiUrl": self._api_url(),
-            }
-        )
-        runtime.mark_step(job, "ocr-provider", "running", "正在调用 MinerU 识别文件", None)
-        runtime.write_job(job)
-
-        cmd = [*command.args, "-p", upload_path, "-o", str(output_dir), "-b", "pipeline"]
+        request.output_dir.mkdir(parents=True, exist_ok=True)
         api_url = self._api_url()
+        provider_metadata = {
+            "ocrFlowProvider": self.name,
+            "ocrProvider": self.name,
+            "ocrFlowProviderCommand": command.display,
+            "ocrFlowProviderCommandSource": command.source,
+            "ocrFlowProviderResolution": resolution,
+            "mineruCommand": command.display,
+            "mineruApiUrl": api_url,
+        }
+
+        cmd = [*command.args, "-p", request.input_path, "-o", str(request.output_dir), "-b", "pipeline"]
         if api_url:
             cmd.extend(["--api-url", api_url])
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=runtime.timeout_seconds)
-            job["mineruStdout"] = result.stdout[-8000:]
-            job["mineruStderr"] = result.stderr[-8000:]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=request.timeout_seconds)
+            provider_metadata.update({"mineruStdout": result.stdout[-8000:], "mineruStderr": result.stderr[-8000:]})
             if result.returncode != 0:
-                runtime.mark_step(job, "ocr-provider", "failed", f"MinerU exited with code {result.returncode}.", None)
-                job.update(
-                    {
-                        "status": "failed",
-                        "finishedAt": runtime.now_iso(),
-                        "error": f"MinerU exited with code {result.returncode}.",
-                    }
+                return OcrProviderResult(
+                    success=False,
+                    metadata=provider_metadata,
+                    error=f"MinerU exited with code {result.returncode}.",
                 )
-            else:
-                runtime.mark_step(job, "ocr-provider", "success", "MinerU 输出已生成", None)
-                runtime.write_job(job)
-                outputs = runtime.collect_outputs(job_id)
-                job = runtime.read_job(job_id)
-                job.update({"status": "success", "finishedAt": runtime.now_iso(), "outputs": outputs})
-        except subprocess.TimeoutExpired:
-            runtime.mark_step(job, "ocr-provider", "failed", f"MinerU timed out after {runtime.timeout_seconds} seconds.", None)
-            job.update(
+            # 延迟导入避免 provider 基础抽象与布局适配器的历史 worker 依赖形成循环。
+            from app.ocr.mineru_adapter import MineruOcrBundleAdapter
+
+            bundle = MineruOcrBundleAdapter().from_output(
                 {
-                    "status": "failed",
-                    "finishedAt": runtime.now_iso(),
-                    "error": f"MinerU timed out after {runtime.timeout_seconds} seconds.",
-                }
+                    "jobId": request.document_id,
+                    "uploadPath": request.input_path,
+                    "ocrFlowProvider": self.name,
+                    "ocrProvider": self.name,
+                },
+                request.output_dir,
+            )
+            return OcrProviderResult(success=True, bundle=bundle, metadata=provider_metadata)
+        except subprocess.TimeoutExpired:
+            return OcrProviderResult(
+                success=False,
+                metadata=provider_metadata,
+                error=f"MinerU timed out after {request.timeout_seconds} seconds.",
             )
         except Exception as exc:  # pragma: no cover - background worker safety
-            runtime.mark_step(job, "ocr-provider", "failed", str(exc), None)
-            job.update({"status": "failed", "finishedAt": runtime.now_iso(), "error": str(exc)})
-        runtime.write_job(job)
+            return OcrProviderResult(success=False, metadata=provider_metadata, error=str(exc))
 
 
 def parse_extensions(value: str | None, fallback: set[str]) -> set[str]:

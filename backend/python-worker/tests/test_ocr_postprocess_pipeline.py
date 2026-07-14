@@ -23,7 +23,7 @@ def test_pipeline_run_adapts_legacy_job_before_running_bundle() -> None:
     )
     expected = {"questions": [{"id": "q1"}]}
 
-    with patch("app.ocr.mineru_adapter.MineruOcrBundleAdapter.from_job", return_value=bundle) as adapter, patch.object(
+    with patch("app.worker_base.read_job", return_value={}), patch("app.ocr.mineru_adapter.MineruOcrBundleAdapter.from_job", return_value=bundle) as adapter, patch.object(
         OcrPostProcessingPipeline,
         "run_bundle",
         return_value=expected,
@@ -32,6 +32,27 @@ def test_pipeline_run_adapts_legacy_job_before_running_bundle() -> None:
 
     assert result is expected
     adapter.assert_called_once_with("job-2")
+    run_bundle.assert_called_once_with(bundle)
+
+
+def test_pipeline_run_reuses_persisted_canonical_bundle_before_legacy_adapter(tmp_path) -> None:
+    (tmp_path / "paper.md").write_text("1. 外部题目", encoding="utf-8")
+    bundle = CanonicalOcrBundle(
+        document_id="external-job",
+        input_sha256="sha",
+        canonical_markdown="1. 外部题目",
+        artifact_root=str(tmp_path),
+        markdown_artifact_path="paper.md",
+    )
+    expected = {"questions": [{"id": "q1"}]}
+
+    with patch("app.worker_base.read_job", return_value={"canonicalOcrBundle": bundle.to_persisted_manifest()}), patch(
+        "app.ocr.mineru_adapter.MineruOcrBundleAdapter.from_job"
+    ) as adapter, patch.object(OcrPostProcessingPipeline, "run_bundle", return_value=expected) as run_bundle:
+        result = OcrPostProcessingPipeline().run("external-job")
+
+    assert result is expected
+    adapter.assert_not_called()
     run_bundle.assert_called_once_with(bundle)
 
 

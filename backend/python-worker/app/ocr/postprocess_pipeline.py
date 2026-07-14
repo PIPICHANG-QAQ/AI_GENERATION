@@ -17,9 +17,16 @@ class OcrPostProcessingPipeline:
     """Run the existing OCR post-processing implementation unchanged."""
 
     def run(self, job_id: str) -> dict[str, Any]:
-        """Compatibility entry point for existing MinerU-backed jobs."""
+        """Refresh from persisted canonical evidence, or adapt legacy MinerU jobs."""
+        from app.worker_base import read_job
         from app.ocr.mineru_adapter import MineruOcrBundleAdapter
 
+        persisted = read_job(job_id).get("canonicalOcrBundle")
+        if isinstance(persisted, dict):
+            bundle = CanonicalOcrBundle.from_persisted_manifest(persisted)
+            if bundle.document_id != job_id:
+                raise ValueError("persisted canonical bundle documentId does not match jobId")
+            return self.run_bundle(bundle)
         return self.run_bundle(MineruOcrBundleAdapter().from_job(job_id))
 
     def run_bundle(self, bundle: CanonicalOcrBundle) -> dict[str, Any]:

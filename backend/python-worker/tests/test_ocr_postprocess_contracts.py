@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.ocr.contracts import (
@@ -45,12 +47,14 @@ def test_l2_bundle_serializes_layout_assets_and_source_reference() -> None:
     )
 
     payload = bundle.to_dict()
+    restored = CanonicalOcrBundle.from_dict(payload)
 
     assert payload["schemaVersion"] == "canonical-ocr-bundle.v1"
     assert payload["assets"][0]["assetId"] == "asset-figure"
     assert payload["layoutBlocks"][0]["pageWidth"] == 1000
     assert payload["sourceDocumentRef"]["path"] == "/tmp/source.pdf"
     assert bundle.capability_level == "L2"
+    assert restored == bundle
 
 
 @pytest.mark.parametrize(
@@ -85,3 +89,24 @@ def test_bundle_rejects_invalid_layout_bbox() -> None:
             page_height=100,
             order=0,
         )
+
+
+def test_persisted_manifest_avoids_duplicate_markdown_and_json(tmp_path) -> None:
+    (tmp_path / "paper.md").write_text("1. 外部题目", encoding="utf-8")
+    (tmp_path / "paper.json").write_text(json.dumps({"pages": [1]}), encoding="utf-8")
+    bundle = CanonicalOcrBundle(
+        document_id="job-1",
+        input_sha256="input-sha",
+        canonical_markdown="1. 外部题目",
+        artifact_root=str(tmp_path),
+        markdown_artifact_path="paper.md",
+        json_artifact_path="paper.json",
+        json_content={"pages": [1]},
+    )
+
+    manifest = bundle.to_persisted_manifest()
+    restored = CanonicalOcrBundle.from_persisted_manifest(manifest)
+
+    assert "canonicalMarkdown" not in manifest
+    assert "json" not in manifest
+    assert restored == bundle

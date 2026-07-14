@@ -51,9 +51,9 @@
 - Modify: `backend/python-worker/tests/test_ocr_processing.py`
 - Test: `backend/python-worker/tests/test_ocr_postprocess_contracts.py`
 
-- [ ] 写失败测试：provider runtime 只负责扫描并把 postprocess 调度给统一 pipeline；显式 bundle 不需要 provider 名称或输出目录扫描。
+- [ ] 写失败测试：provider runtime 只负责生成 OCR 工件；执行编排层在工件成功后调用统一 pipeline；显式 bundle 不需要 provider 名称或目录扫描。
 - [ ] 运行失败测试。
-- [ ] 只作调用边界改动，保留 `OcrFlowRuntime.collect_outputs` 兼容签名与 job 状态。
+- [ ] 只作调用边界改动，移除 `OcrFlowRuntime.collect_outputs`，保留最终 job 状态和 `outputs` 外观。
 - [ ] 运行 Python 全量、golden replay 和 benchmark compare；提交。
 
 ### Task 5: 文档与交接

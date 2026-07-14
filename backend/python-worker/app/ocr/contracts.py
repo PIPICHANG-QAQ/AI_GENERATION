@@ -8,7 +8,9 @@ legacy artifact root so existing image and visual-repair I/O remains unchanged.
 from __future__ import annotations
 
 import re
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -43,7 +45,6 @@ class OcrAsset:
             "sizeBytes": self.size_bytes,
             "mediaType": self.media_type,
         }
-
 
 @dataclass(frozen=True)
 class OcrPage:
@@ -195,6 +196,117 @@ class CanonicalOcrBundle:
             "capabilityLevel": self.capability_level,
             "json": self.json_content,
         }
+
+    def to_persisted_manifest(self) -> dict[str, Any]:
+        """Serialize refresh evidence without duplicating large Markdown/JSON in the job record."""
+        payload = self.to_dict()
+        payload.pop("canonicalMarkdown", None)
+        payload.pop("json", None)
+        return payload
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "CanonicalOcrBundle":
+        """Restore a persisted bundle for output refresh without selecting a provider."""
+        assets = tuple(
+            OcrAsset(
+                asset_id=str(item.get("assetId") or ""),
+                name=str(item.get("name") or ""),
+                path=str(item.get("path") or ""),
+                url=str(item.get("url") or ""),
+                size_bytes=int(item.get("sizeBytes") or 0),
+                media_type=str(item.get("mediaType") or "application/octet-stream"),
+            )
+            for item in payload.get("assets") or []
+            if isinstance(item, Mapping)
+        )
+        pages = tuple(
+            OcrPage(
+                page_index=int(item.get("pageIndex") or 0),
+                width=float(item.get("width") or 0),
+                height=float(item.get("height") or 0),
+                render_ref=str(item.get("renderRef") or ""),
+            )
+            for item in payload.get("pages") or []
+            if isinstance(item, Mapping)
+        )
+        layout_blocks = tuple(
+            OcrLayoutBlock(
+                block_id=str(item.get("blockId") or ""),
+                block_type=str(item.get("type") or "unknown"),
+                page_index=int(item.get("pageIndex") or 0),
+                bbox=tuple(float(value) for value in (item.get("bbox") or [])),  # type: ignore[arg-type]
+                page_width=float(item["pageWidth"]) if item.get("pageWidth") is not None else None,
+                page_height=float(item["pageHeight"]) if item.get("pageHeight") is not None else None,
+                order=int(item.get("order") or 0),
+                text=str(item.get("text") or ""),
+                image_ref=str(item.get("imageRef") or ""),
+                source_order=int(item.get("sourceOrder") or 0),
+                coordinate_source=str(item.get("coordinateSource") or ""),
+                markdown_start=int(item["markdownStart"]) if item.get("markdownStart") is not None else None,
+                markdown_end=int(item["markdownEnd"]) if item.get("markdownEnd") is not None else None,
+            )
+            for item in payload.get("layoutBlocks") or []
+            if isinstance(item, Mapping)
+        )
+        source_payload = payload.get("sourceDocumentRef")
+        source_ref = (
+            SourceDocumentRef(path=str(source_payload.get("path") or ""), uri=str(source_payload.get("uri") or ""))
+            if isinstance(source_payload, Mapping)
+            else None
+        )
+        return cls(
+            document_id=str(payload.get("documentId") or ""),
+            input_sha256=str(payload.get("inputSha256") or ""),
+            canonical_markdown=str(payload.get("canonicalMarkdown") or ""),
+            assets=assets,
+            pages=pages,
+            layout_blocks=layout_blocks,
+            source_document_ref=source_ref,
+            artifact_root=str(payload.get("artifactRoot") or ""),
+            markdown_artifact_path=str(payload.get("markdownArtifactPath") or ""),
+            json_artifact_path=str(payload.get("jsonArtifactPath") or ""),
+            producer=dict(payload.get("producer") or {}),
+            native_artifacts=tuple(
+                dict(item) for item in payload.get("nativeArtifacts") or [] if isinstance(item, Mapping)
+            ),
+            capabilities=frozenset(str(item) for item in payload.get("capabilities") or []),
+            json_content=payload.get("json"),
+            schema_version=str(payload.get("schemaVersion") or ""),
+        )
+
+    @classmethod
+    def from_persisted_manifest(cls, payload: Mapping[str, Any]) -> "CanonicalOcrBundle":
+        """Restore a lightweight job manifest by reading its declared OCR artifacts."""
+        if payload.get("canonicalMarkdown") is not None:
+            return cls.from_dict(payload)
+        artifact_root = str(payload.get("artifactRoot") or "")
+        markdown_artifact_path = str(payload.get("markdownArtifactPath") or "")
+        if not artifact_root or not markdown_artifact_path:
+            raise CanonicalOcrBundleError("persisted bundle manifest requires artifactRoot and markdownArtifactPath")
+        root = Path(artifact_root).resolve()
+        markdown_path = cls._resolve_artifact_path(root, markdown_artifact_path)
+        restored = dict(payload)
+        restored["canonicalMarkdown"] = markdown_path.read_text(encoding="utf-8", errors="replace")
+        json_artifact_path = str(payload.get("jsonArtifactPath") or "")
+        if json_artifact_path:
+            json_path = cls._resolve_artifact_path(root, json_artifact_path)
+            raw_json = json_path.read_text(encoding="utf-8", errors="replace")
+            try:
+                restored["json"] = json.loads(raw_json)
+            except json.JSONDecodeError:
+                restored["json"] = raw_json
+        return cls.from_dict(restored)
+
+    @staticmethod
+    def _resolve_artifact_path(root: Path, relative_path: str) -> Path:
+        path = (root / relative_path).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise CanonicalOcrBundleError("persisted artifact path escapes artifactRoot") from exc
+        if not path.is_file():
+            raise CanonicalOcrBundleError(f"persisted artifact is unavailable: {relative_path}")
+        return path
 
     def _markdown_image_refs(self) -> list[str]:
         return [match.strip().strip("<>") for match in _MARKDOWN_IMAGE_RE.findall(self.canonical_markdown)]

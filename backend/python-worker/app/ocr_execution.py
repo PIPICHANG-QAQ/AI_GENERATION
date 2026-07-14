@@ -5,6 +5,8 @@
 
 from app.worker_base import *
 from app.ocr_processing import *
+from app.ocr.contracts import CanonicalOcrBundle
+from app.ocr_flow import OcrProviderRequest
 
 def run_ocr_job(job_id: str, upload_path: str) -> None:
     """按上传文件类型调度 OCR job 执行流程。"""
@@ -140,8 +142,70 @@ def run_doc_conversion_job(job_id: str, upload_path: str) -> None:
         write_job(job)
 
 
+def run_postprocess_bundle(bundle: CanonicalOcrBundle) -> dict:
+    """统一后处理入口，显式消费 Provider 已归一化的 OCR Bundle。"""
+    return DEFAULT_OCR_POSTPROCESSING_PIPELINE.run_bundle(bundle)
+
+
+def _run_provider_then_postprocess(job_id: str, upload_path: str, provider) -> None:
+    """编排 Provider 执行、状态写入和统一 Bundle 后处理。"""
+    job = read_job(job_id)
+    job.update({"status": "running", "startedAt": job.get("startedAt") or now_iso()})
+    mark_ocr_flow_step(job, "ocr-provider", "running", "正在调用 OCR provider 识别文件")
+    write_job(job)
+    try:
+        result = provider.run(
+            OcrProviderRequest(
+                document_id=job_id,
+                input_path=upload_path,
+                output_dir=OUTPUT_ROOT / job_id,
+                timeout_seconds=OCR_PROVIDER_TIMEOUT_SECONDS,
+            )
+        )
+    except Exception as exc:  # pragma: no cover - defensive boundary for third-party providers
+        job = read_job(job_id)
+        mark_ocr_flow_step(job, "ocr-provider", "failed", str(exc))
+        job.update({"status": "failed", "finishedAt": now_iso(), "error": str(exc)})
+        write_job(job)
+        return
+    job = read_job(job_id)
+    job.update(dict(result.metadata))
+    if not result.success:
+        mark_ocr_flow_step(job, "ocr-provider", "failed", result.error or "OCR provider 未生成可用工件")
+        job.update({"status": "failed", "finishedAt": now_iso(), "error": result.error or "OCR provider failed."})
+        write_job(job)
+        return
+    if result.bundle is None:  # defensive contract guard; OcrProviderResult also validates this invariant.
+        mark_ocr_flow_step(job, "ocr-provider", "failed", "OCR provider 未返回标准化证据包")
+        job.update({"status": "failed", "finishedAt": now_iso(), "error": "OCR provider returned no canonical bundle."})
+        write_job(job)
+        return
+    if result.bundle.document_id != job_id:
+        mark_ocr_flow_step(job, "ocr-provider", "failed", "OCR 证据包任务标识不一致")
+        job.update(
+            {
+                "status": "failed",
+                "finishedAt": now_iso(),
+                "error": "OCR provider bundle documentId does not match current jobId.",
+            }
+        )
+        write_job(job)
+        return
+    mark_ocr_flow_step(job, "ocr-provider", "success", "OCR 输出已生成并完成标准证据归一化")
+    job["canonicalOcrBundle"] = result.bundle.to_persisted_manifest()
+    write_job(job)
+    try:
+        outputs = run_postprocess_bundle(result.bundle)
+        job = read_job(job_id)
+        job.update({"status": "success", "finishedAt": now_iso(), "outputs": outputs})
+    except Exception as exc:  # pragma: no cover - background worker safety
+        job = read_job(job_id)
+        job.update({"status": "failed", "finishedAt": now_iso(), "error": str(exc)})
+    write_job(job)
+
+
 def run_ocr_provider_job(job_id: str, upload_path: str) -> None:
-    """调用当前 OCR provider 处理上传文件并收集输出。"""
+    """调用已配置 Provider 生成工件，再由统一编排层执行题库后处理。"""
     job = read_job(job_id)
     selected = selected_provider_name()
     provider = selected_ocr_provider()
@@ -158,9 +222,10 @@ def run_ocr_provider_job(job_id: str, upload_path: str) -> None:
         )
         write_job(job)
         return
-    provider.run(job_id, upload_path, ocr_flow_runtime())
+    _run_provider_then_postprocess(job_id, upload_path, provider)
 
 
 def run_mineru_job(job_id: str, upload_path: str) -> None:
     """兼容旧入口，按 MinerU provider 执行 OCR。"""
-    providers(APP_ROOT, MINERU_VERSION_TIMEOUT_SECONDS)["mineru"].run(job_id, upload_path, ocr_flow_runtime())
+    provider = providers(APP_ROOT, MINERU_VERSION_TIMEOUT_SECONDS)["mineru"]
+    _run_provider_then_postprocess(job_id, upload_path, provider)

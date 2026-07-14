@@ -33,7 +33,7 @@ from app.llm_splitter import (
     standardize_markdown_with_llm,
 )
 from app.math_normalizer import normalize_math_markdown, normalize_structured_math
-from app.ocr_flow import OcrFlowRuntime, parse_extensions, providers, selected_provider_name
+from app.ocr_flow import parse_extensions, providers, selected_provider_name
 from app.runtime.ocr_flow_state import (
     OCR_FLOW_STEP_DEFINITIONS,
     OCR_FLOW_TERMINAL_STATUSES,
@@ -71,6 +71,7 @@ DOC_CONVERT_EXTENSIONS = {".doc"}
 ALLOWED_EXTENSIONS = OCR_PROVIDER_EXTENSIONS | MARKDOWN_EXTENSIONS | DOC_CONVERT_EXTENSIONS
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 MINERU_TIMEOUT_SECONDS = int(os.getenv("MINERU_TIMEOUT_SECONDS", "1800"))
+OCR_PROVIDER_TIMEOUT_SECONDS = int(os.getenv("OCR_PROVIDER_TIMEOUT_SECONDS", str(MINERU_TIMEOUT_SECONDS)))
 MINERU_VERSION_TIMEOUT_SECONDS = int(os.getenv("MINERU_VERSION_TIMEOUT_SECONDS", "3"))
 QUESTION_RE = re.compile(r"^\s*(\d{1,3})[\.．、]\s*(.*)", re.S)
 TASK_STATUSES = {"处理中", "待校验", "部分完成", "已完成"}
@@ -101,6 +102,7 @@ OCR_PROVIDER_EXTENSIONS = parse_extensions(os.getenv("OCR_FLOW_EXTENSIONS"), DEF
 MINERU_EXTENSIONS = OCR_PROVIDER_EXTENSIONS
 ALLOWED_EXTENSIONS = OCR_PROVIDER_EXTENSIONS | MARKDOWN_EXTENSIONS | DOC_CONVERT_EXTENSIONS
 MINERU_TIMEOUT_SECONDS = int(os.getenv("MINERU_TIMEOUT_SECONDS", str(MINERU_TIMEOUT_SECONDS)))
+OCR_PROVIDER_TIMEOUT_SECONDS = int(os.getenv("OCR_PROVIDER_TIMEOUT_SECONDS", str(MINERU_TIMEOUT_SECONDS)))
 MINERU_VERSION_TIMEOUT_SECONDS = int(os.getenv("MINERU_VERSION_TIMEOUT_SECONDS", str(MINERU_VERSION_TIMEOUT_SECONDS)))
 
 
@@ -437,22 +439,6 @@ def selected_ocr_provider() -> Any | None:
     return ocr_flow_providers().get(selected_provider_name())
 
 
-def ocr_flow_runtime() -> OcrFlowRuntime:
-    """返回 OCR-Flow 的 runtime 诊断信息。"""
-    # collect_outputs 位于 OCR 处理模块，运行时再导入以保持模块边界清晰。
-    from app.ocr_processing import collect_outputs
-
-    return OcrFlowRuntime(
-        output_root=OUTPUT_ROOT,
-        timeout_seconds=MINERU_TIMEOUT_SECONDS,
-        now_iso=now_iso,
-        read_job=read_job,
-        write_job=write_job,
-        collect_outputs=collect_outputs,
-        mark_step=mark_ocr_flow_step,
-    )
-
-
 def ocr_flow_status() -> dict[str, Any]:
     """返回 OCR-Flow 状态 Map。"""
     available_providers = ocr_flow_providers()
@@ -468,12 +454,12 @@ def ocr_flow_status() -> dict[str, Any]:
         "docConvertExtensions": sorted(DOC_CONVERT_EXTENSIONS),
         "ocrProviderExtensions": sorted(OCR_PROVIDER_EXTENSIONS),
         "allowedExtensions": sorted(ALLOWED_EXTENSIONS),
-        "timeoutSeconds": MINERU_TIMEOUT_SECONDS,
+        "timeoutSeconds": OCR_PROVIDER_TIMEOUT_SECONDS,
         "configKeys": {
             "provider": "OCR_FLOW_PROVIDER",
             "extensions": "OCR_FLOW_EXTENSIONS",
             "mineruCommand": "MINERU_COMMAND",
-            "timeout": "MINERU_TIMEOUT_SECONDS",
+            "timeout": "OCR_PROVIDER_TIMEOUT_SECONDS (defaults to MINERU_TIMEOUT_SECONDS)",
         },
         "flowSteps": OCR_FLOW_STEP_DEFINITIONS,
     }
