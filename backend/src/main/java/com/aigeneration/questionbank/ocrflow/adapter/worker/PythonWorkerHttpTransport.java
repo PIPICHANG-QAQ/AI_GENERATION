@@ -41,11 +41,11 @@ public final class PythonWorkerHttpTransport {
     }
 
     public Response postJson(String path, Object payload) {
-        return execute("POST", path, jsonBody(payload));
+        return execute("POST", path, payload == null ? null : jsonBody(payload));
     }
 
     public Response putJson(String path, Object payload) {
-        return execute("PUT", path, jsonBody(payload));
+        return execute("PUT", path, payload == null ? null : jsonBody(payload));
     }
 
     public Response deleteJson(String path) {
