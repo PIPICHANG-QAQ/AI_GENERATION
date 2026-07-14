@@ -1,0 +1,347 @@
+openapi: 3.1.0
+info:
+  title: Question Engine Worker API
+  version: 1.0.0
+  description: Additive, versioned transport contract for OCR and post-processing workers.
+servers:
+  - url: /
+paths:
+  /worker/v1/capabilities:
+    get:
+      operationId: getWorkerCapabilities
+      responses:
+        '200':
+          description: Supported worker operations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkerCapabilities'
+  /worker/v1/ocr:
+    post:
+      operationId: createOcrJob
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Accepted OCR job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OcrJobAccepted'
+  /worker/v1/ocr/{jobId}:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    get:
+      operationId: getOcrJob
+      responses:
+        '200':
+          description: OCR job snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OcrJobSnapshot'
+  /worker/v1/ocr/{jobId}/result:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    get:
+      operationId: getOcrResult
+      responses:
+        '200':
+          description: OCR result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OcrResult'
+  /worker/v1/ocr/{jobId}/retry:
+    parameters:
+      - $ref: '#/components/parameters/JobId'
+    post:
+      operationId: retryOcrJob
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryRequest'
+      responses:
+        '200':
+          description: Restarted OCR job
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OcrJobSnapshot'
+  /worker/v1/canonicalization/preview:
+    post:
+      operationId: previewCanonicalization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CanonicalizationRequest'
+      responses:
+        '200':
+          description: Canonicalization preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CanonicalizationResponse'
+  /worker/v1/standardize:
+    post:
+      operationId: standardizeMarkdown
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StandardizationRequest'
+      responses:
+        '200':
+          description: Standardized Markdown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardizationResponse'
+  /worker/v1/analysis:
+    post:
+      operationId: generateAnalysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnalysisRequest'
+      responses:
+        '200':
+          description: Generated analysis
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalysisResponse'
+  /worker/v1/export/render:
+    post:
+      operationId: renderExport
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Rendered export file
+          content:
+            application/octet-stream: {}
+components:
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    WorkerCapabilities:
+      type: object
+      required: [schemaVersion, operations]
+      properties:
+        schemaVersion:
+          type: string
+          const: worker-capabilities.v1
+        workerVersion:
+          type: string
+        operations:
+          type: array
+          items: {type: string}
+        questionAssembly:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+    WorkerRequestEnvelope:
+      type: object
+      required: [requestId, pipelineVersion, payload]
+      properties:
+        schemaVersion: {type: string, const: worker-request.v1}
+        requestId: {type: string}
+        traceId: {type: string}
+        jobId: {type: string}
+        attemptId: {type: string}
+        attemptNo: {type: integer, minimum: 0}
+        idempotencyKey: {type: string}
+        inputSha256: {type: string}
+        pipelineVersion: {type: string}
+        payload: {type: object, additionalProperties: true}
+      additionalProperties: true
+    WorkerResponseEnvelope:
+      type: object
+      properties:
+        schemaVersion: {type: string, const: worker-response.v1}
+        requestId: {type: string}
+        traceId: {type: string}
+        jobId: {type: string}
+        attemptId: {type: string}
+        attemptNo: {type: integer, minimum: 0}
+        pipelineVersion: {type: string}
+        payload: {type: object, additionalProperties: true}
+        error: {$ref: '#/components/schemas/WorkerError'}
+      additionalProperties: true
+    WorkerError:
+      type: object
+      required: [code, message, stage, retryable, requestId, jobId, attemptId, provider, details]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        stage: {type: string}
+        retryable: {type: boolean}
+        requestId: {type: string}
+        jobId: {type: string}
+        attemptId: {type: string}
+        provider: {type: string}
+        details: {type: object, additionalProperties: true}
+      additionalProperties: true
+    OcrCreateRequest:
+      type: object
+      properties:
+        fileName: {type: string}
+        contentType: {type: string}
+        inputSha256: {type: string}
+        pipelineVersion: {type: string, default: ocrflow.v1}
+        idempotencyKey: {type: string}
+        sourcePath: {type: string}
+        metadata: {type: object, additionalProperties: true}
+      additionalProperties: true
+    OcrJobAccepted:
+      type: object
+      required: [schemaVersion, jobId, status]
+      properties:
+        schemaVersion: {type: string, const: worker-ocr-accepted.v1}
+        jobId: {type: string}
+        status: {type: string}
+        requestId: {type: string}
+        traceId: {type: string}
+        attemptId: {type: string}
+        attemptNo: {type: integer}
+        pipelineVersion: {type: string}
+        acceptedAt: {type: string}
+        pollUrl: {type: string}
+      additionalProperties: true
+    OcrJobSnapshot:
+      type: object
+      required: [schemaVersion, jobId, status]
+      properties:
+        schemaVersion: {type: string, const: worker-ocr-job.v1}
+        jobId: {type: string}
+        status: {type: string}
+        requestId: {type: string}
+        traceId: {type: string}
+        attemptId: {type: string}
+        attemptNo: {type: integer}
+        pipelineVersion: {type: string}
+        resultUrl: {type: string}
+        error: {$ref: '#/components/schemas/WorkerError'}
+      additionalProperties: true
+    OcrResult:
+      type: object
+      required: [schemaVersion, jobId, status]
+      properties:
+        schemaVersion: {type: string, const: worker-ocr-result.v1}
+        jobId: {type: string}
+        status: {type: string}
+        pipelineVersion: {type: string}
+        outputs: {type: object, additionalProperties: true}
+        artifacts:
+          type: array
+          items: {$ref: '#/components/schemas/ArtifactManifest'}
+      additionalProperties: true
+    RetryRequest:
+      type: object
+      properties:
+        reason: {type: string}
+        idempotencyKey: {type: string}
+        attemptNo: {type: integer, minimum: 0}
+      additionalProperties: true
+    QuestionAssemblyRequest:
+      type: object
+      properties:
+        jobId: {type: string}
+        source: {type: object, additionalProperties: true}
+        pipelineVersion: {type: string, default: question-assembly.v1}
+      additionalProperties: true
+    QuestionAssemblyResponse:
+      type: object
+      properties:
+        jobId: {type: string}
+        questions: {type: array, items: {type: object, additionalProperties: true}}
+        pipelineVersion: {type: string, default: question-assembly.v1}
+      additionalProperties: true
+    StandardizationRequest:
+      type: object
+      properties:
+        markdown: {type: string}
+        rawOcrContext: {type: string}
+        structuredHints: {type: object, additionalProperties: true}
+        pipelineVersion: {type: string}
+        inputSha256: {type: string}
+        requestSource: {type: string}
+      additionalProperties: true
+    StandardizationResponse:
+      type: object
+      properties:
+        markdown: {type: string}
+        standardizer: {type: object, additionalProperties: true}
+        answer: {type: string}
+        analysis: {type: string}
+      additionalProperties: true
+    AnalysisRequest:
+      type: object
+      additionalProperties: true
+      properties:
+        manualMarkdown: {type: string}
+        type: {type: string}
+        answer: {type: string}
+        knowledgePoints: {type: array, items: {type: string}}
+        images: {type: array, items: {type: object, additionalProperties: true}}
+        subQuestions: {type: array, items: {type: object, additionalProperties: true}}
+    AnalysisResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        analysis: {type: string}
+        answer: {type: string}
+        suggestedAnswer: {type: string}
+        subQuestions: {type: array, items: {type: object, additionalProperties: true}}
+        metadata: {type: object, additionalProperties: true}
+    CanonicalizationRequest:
+      type: object
+      properties:
+        task: {type: object, additionalProperties: true}
+        pipelineVersion: {type: string}
+      additionalProperties: true
+    CanonicalizationResponse:
+      type: object
+      properties:
+        questions: {type: array, items: {type: object, additionalProperties: true}}
+        canonicalization: {type: object, additionalProperties: true}
+        paperLayout: {type: object, additionalProperties: true}
+      additionalProperties: true
+    ArtifactManifest:
+      type: object
+      properties:
+        artifactId: {type: string}
+        kind: {type: string}
+        sha256: {type: string}
+        uri: {type: string}
+        sizeBytes: {type: integer, minimum: 0}
+        contentType: {type: string}
+        metadata: {type: object, additionalProperties: true}
+      additionalProperties: true
