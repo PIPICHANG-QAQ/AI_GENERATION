@@ -309,9 +309,33 @@ class _PythonScopeScanner:
 
         blocks = [
             getattr(statement, field)
-            for field in ("body", "orelse", "finalbody")
+            for field in ("orelse", "finalbody")
             if getattr(statement, field, None)
         ]
+        if isinstance(statement, (ast.For, ast.AsyncFor)):
+            target_names = _python_target_names(statement.target)
+            elements = statement.iter.elts if isinstance(statement.iter, (ast.List, ast.Tuple)) else None
+            values = (
+                [_static_python_string(element, constants) for element in elements]
+                if elements is not None
+                else None
+            )
+            if isinstance(statement.target, ast.Name) and values is not None and all(value is not None for value in values):
+                for value in values:
+                    loop_constants = dict(branch_constants)
+                    loop_constants[statement.target.id] = value
+                    loop_import_names = set(branch_import_names)
+                    loop_import_names.discard(statement.target.id)
+                    self._scan_statements(statement.body, loop_constants, loop_import_names)
+            else:
+                loop_constants = dict(branch_constants)
+                loop_import_names = set(branch_import_names)
+                for name in target_names:
+                    loop_constants.pop(name, None)
+                    loop_import_names.discard(name)
+                self._scan_statements(statement.body, loop_constants, loop_import_names)
+        elif getattr(statement, "body", None):
+            blocks.insert(0, statement.body)
         for handler in getattr(statement, "handlers", []):
             self._scan_expression(handler.type, branch_constants, branch_import_names)
             blocks.append(handler.body)

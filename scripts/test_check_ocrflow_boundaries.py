@@ -182,6 +182,23 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
 
         self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
 
+    def test_for_body_binds_static_list_route_values(self):
+        self.write_source(
+            "backend/python-worker/app/static_loop_route.py",
+            '\n'.join(
+                [
+                    "def routes():",
+                    '    for prefix in ["/api/"]:',
+                    '        yield prefix + "question-bank/questions"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
+
     def test_python_function_reassignment_uses_latest_string_value(self):
         self.write_source(
             "backend/python-worker/app/reassigned_route.py",
@@ -536,6 +553,25 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
                     "        return load(module_name)",
                     "    else:",
                     '        module_name = "app.safe.foo"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(algorithm_path in failure and "app.legacy.foo" in failure for failure in failures), failures)
+
+    def test_for_body_binds_static_tuple_legacy_module_values(self):
+        algorithm_path = "backend/python-worker/app/static_loop_dynamic_algorithm.py"
+        self.write_source(
+            algorithm_path,
+            '\n'.join(
+                [
+                    "def load_legacy_modules():",
+                    "    from importlib import import_module as load",
+                    '    for module_name in ("app.legacy.foo",):',
+                    "        yield load(module_name)",
                     "",
                 ]
             ),
