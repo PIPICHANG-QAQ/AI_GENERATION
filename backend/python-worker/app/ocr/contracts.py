@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import json
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -160,7 +161,7 @@ class CanonicalOcrBundle:
         asset_refs = {asset.path for asset in self.assets}
         asset_refs.update(asset.name for asset in self.assets)
         asset_refs.update(asset.url for asset in self.assets if asset.url)
-        missing = [ref for ref in self._markdown_image_refs() if ref not in asset_refs]
+        missing = [ref for ref in self._markdown_image_refs() if not self._has_asset_reference(ref, asset_refs)]
         if missing:
             raise CanonicalOcrBundleError(f"markdown image reference has no asset: {missing[0]}")
 
@@ -176,6 +177,15 @@ class CanonicalOcrBundle:
         if {"markdown", "embedded-images"}.issubset(capabilities):
             return "L1"
         return "L0"
+
+    def _has_asset_reference(self, reference: str, asset_refs: set[str]) -> bool:
+        if reference in asset_refs:
+            return True
+        if not self.markdown_artifact_path or reference.startswith("/") or "://" in reference:
+            return False
+        markdown_parent = posixpath.dirname(self.markdown_artifact_path)
+        resolved = posixpath.normpath(posixpath.join(markdown_parent, reference))
+        return resolved in asset_refs
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -47,7 +47,7 @@ def build_postprocess_input(bundle: CanonicalOcrBundle) -> dict[str, Any]:
                 "path": asset.path,
                 "url": asset.url,
                 "size": asset.size_bytes,
-                "type": asset.media_type.split("/", 1)[-1],
+                "type": Path(asset.path).suffix.lower().lstrip(".") or asset.media_type.split("/", 1)[-1],
             }
             for asset in bundle.assets
         ],

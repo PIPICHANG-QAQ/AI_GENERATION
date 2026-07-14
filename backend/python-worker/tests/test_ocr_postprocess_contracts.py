@@ -78,6 +78,28 @@ def test_bundle_rejects_missing_required_markdown_evidence(kwargs: dict[str, str
         CanonicalOcrBundle(**{**defaults, **kwargs})
 
 
+def test_bundle_accepts_image_path_relative_to_markdown_artifact() -> None:
+    bundle = CanonicalOcrBundle(
+        document_id="job-relative-image",
+        input_sha256="input-sha",
+        canonical_markdown="1. 如图 ![](images/figure.png)",
+        artifact_root="/tmp/provider-output",
+        markdown_artifact_path="auto/paper.md",
+        assets=(
+            OcrAsset(
+                asset_id="image-1",
+                name="figure.png",
+                path="auto/images/figure.png",
+                url="/files/figure.png",
+                size_bytes=3,
+                media_type="image/png",
+            ),
+        ),
+    )
+
+    assert bundle.assets[0].path == "auto/images/figure.png"
+
+
 def test_bundle_rejects_invalid_layout_bbox() -> None:
     with pytest.raises(CanonicalOcrBundleError, match="bbox must be ordered"):
         OcrLayoutBlock(

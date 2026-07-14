@@ -29,6 +29,19 @@ class OcrProcessingTest(unittest.TestCase):
         self.assertEqual("layout-a", postprocess_input["layoutItems"][0]["blockId"])
         self.assertEqual("/tmp/paper.pdf", postprocess_input["uploadPath"])
 
+    def test_bundle_input_preserves_legacy_jpg_extension_for_asset_type(self):
+        bundle = CanonicalOcrBundle(
+            document_id="external-job",
+            input_sha256="sha",
+            canonical_markdown="1. 如图 ![](images/a.jpg)",
+            assets=(OcrAsset("asset-a", "a.jpg", "images/a.jpg", "/files/a.jpg", 3, "image/jpeg"),),
+            artifact_root="/tmp/artifacts",
+        )
+
+        postprocess_input = build_postprocess_input(bundle)
+
+        self.assertEqual("jpg", postprocess_input["assets"][0]["type"])
+
     def test_invalid_fallback_does_not_replace_better_primary_candidate(self):
         primary = {
             "questions": [
