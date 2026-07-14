@@ -306,9 +306,6 @@ class _PythonScopeScanner:
         changed_names = _python_assigned_names(statement)
         branch_constants = dict(constants)
         branch_import_names = set(import_module_names)
-        for name in changed_names:
-            branch_constants.pop(name, None)
-            branch_import_names.discard(name)
 
         blocks = [
             getattr(statement, field)

@@ -162,6 +162,26 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
 
         self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
 
+    def test_if_branch_keeps_entry_route_constant_when_else_reassigns_it(self):
+        self.write_source(
+            "backend/python-worker/app/branch_entry_constant.py",
+            '\n'.join(
+                [
+                    "def route(enabled):",
+                    '    prefix = "/api/"',
+                    "    if enabled:",
+                    '        return prefix + "question-bank/questions"',
+                    "    else:",
+                    '        prefix = "/worker/v1/"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
+
     def test_python_function_reassignment_uses_latest_string_value(self):
         self.write_source(
             "backend/python-worker/app/reassigned_route.py",
@@ -494,6 +514,28 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
                     "    if enabled:",
                     '        module_name = "app.legacy.foo"',
                     "        return load(module_name)",
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(algorithm_path in failure and "app.legacy.foo" in failure for failure in failures), failures)
+
+    def test_if_branch_keeps_entry_legacy_constant_when_else_reassigns_it(self):
+        algorithm_path = "backend/python-worker/app/branch_entry_dynamic_algorithm.py"
+        self.write_source(
+            algorithm_path,
+            '\n'.join(
+                [
+                    "def load_legacy(enabled):",
+                    "    from importlib import import_module as load",
+                    '    module_name = "app.legacy.foo"',
+                    "    if enabled:",
+                    "        return load(module_name)",
+                    "    else:",
+                    '        module_name = "app.safe.foo"',
                     "",
                 ]
             ),
