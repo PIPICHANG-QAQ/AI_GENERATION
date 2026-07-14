@@ -4,7 +4,7 @@
     "maxDifferencesPerCase": 0
   },
   "performance": {
-    "status": "pending-task-2",
+    "status": "active",
     "metrics": [
       "p50Ms",
       "p95Ms",
@@ -14,6 +14,17 @@
       "llmProviderCalls",
       "cacheHits"
     ],
-    "thresholds": {}
+    "warning": {
+      "p50RatioMax": 1.02,
+      "p95RatioMax": 1.00,
+      "throughputRatioMin": 1.00
+    },
+    "failure": {
+      "p95RatioMax": 1.03,
+      "throughputRatioMin": 0.97,
+      "peakRssRatioMax": 1.05
+    },
+    "providerCallDeltaMax": 0,
+    "normalizedContentDiffMax": 0
   }
 }

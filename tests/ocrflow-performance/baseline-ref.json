@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "ocrflow-baseline-ref.v1",
+  "status": "pending-controlled-baseline",
+  "artifactId": "",
+  "sha256": "",
+  "artifact": "",
+  "goldenManifestSha256": "",
+  "note": "Populate only by benchmark_ocrflow.py archive from a reviewed baseline artifact. Do not record a live baseline during release."
+}
