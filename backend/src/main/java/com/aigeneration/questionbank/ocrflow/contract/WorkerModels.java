@@ -170,6 +170,30 @@ public final class WorkerModels {
                                            Map<String, Object> paperLayout) {
     }
 
+    public record SourceRenderRequest(Map<String, Object> payload) {
+        public SourceRenderRequest {
+            payload = payload == null ? new LinkedHashMap<>() : payload;
+        }
+    }
+
+    public record BinaryResponse(byte[] body, String contentType, String contentDisposition, long contentLength) {
+        public BinaryResponse {
+            body = body == null ? new byte[0] : body.clone();
+            contentType = contentType == null ? "application/octet-stream" : contentType;
+            contentDisposition = contentDisposition == null ? "" : contentDisposition;
+            contentLength = contentLength < 0 ? body.length : contentLength;
+        }
+    }
+
+    public record WorkerCapabilities(String schemaVersion, String workerVersion,
+                                     List<String> capabilities, Map<String, Object> metadata) {
+        public WorkerCapabilities {
+            schemaVersion = schemaVersion == null || schemaVersion.isBlank() ? "worker-capabilities.v1" : schemaVersion;
+            capabilities = capabilities == null ? new ArrayList<>() : capabilities;
+            metadata = metadata == null ? new LinkedHashMap<>() : metadata;
+        }
+    }
+
     public record WorkerError(String code, String message, String stage, boolean retryable,
                               String requestId, String jobId, String attemptId, String provider,
                               Map<String, Object> details) {
