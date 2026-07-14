@@ -557,6 +557,13 @@ def _is_java_worker_transport_context(relative_path: str, source: str) -> bool:
     )
 
 
+def _is_allowed_transport_dynamic_chain(relative_path: str, pattern: str) -> bool:
+    """Allow only the transport's variable request path; keep all static paths scanned."""
+    if relative_path != "backend/src/main/java/com/aigeneration/questionbank/ocrflow/adapter/worker/PythonWorkerHttpTransport.java":
+        return False
+    return pattern == "dynamic URI chain: .path(requestPath)"
+
+
 def _discover_java_ocrflow_apis(root: Path, violations: Counter[tuple[str, str, str]], failures: list[str]) -> None:
     for relative_path, path in _relative_files(root, "backend/src/main/java", {".java"}):
         if "/ocrflow/" not in f"/{relative_path}":
@@ -574,6 +581,8 @@ def _discover_java_ocrflow_apis(root: Path, violations: Counter[tuple[str, str, 
             if pattern is not None:
                 _record(violations, "java-ocrflow-python-api", relative_path, pattern)
         for pattern in _java_segmented_api_paths(source, constants):
+            if _is_allowed_transport_dynamic_chain(relative_path, pattern):
+                continue
             _record(violations, "java-ocrflow-python-api", relative_path, pattern)
 
 

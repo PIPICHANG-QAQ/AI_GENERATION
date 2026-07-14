@@ -388,6 +388,38 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
 
         self.assertTrue(any(transport_path in failure and "dynamic URI" in failure for failure in failures), failures)
 
+    def test_transport_allows_only_request_path_variable_and_keeps_static_api_scan(self):
+        transport_path = (
+            "backend/src/main/java/com/aigeneration/questionbank/ocrflow/adapter/worker/PythonWorkerHttpTransport.java"
+        )
+        self.write_source(
+            transport_path,
+            '\n'.join(
+                [
+                    "class PythonWorkerHttpTransport {",
+                    '  Object staticRoute = builder.path("/api/ocr/jobs");',
+                    '  Object dynamicRoute = builder.path(requestPath);',
+                    "}",
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(transport_path in failure and "/api/ocr/jobs" in failure for failure in failures), failures)
+        self.assertFalse(any(transport_path in failure and "dynamic URI chain" in failure for failure in failures), failures)
+
+    def test_other_transport_dynamic_paths_remain_boundary_violations(self):
+        transport_path = (
+            "backend/src/main/java/com/aigeneration/questionbank/ocrflow/adapter/worker/OtherTransport.java"
+        )
+        self.write_source(transport_path, "class OtherTransport { Object route = builder.path(requestPath); }\n")
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(transport_path in failure and "dynamic URI chain" in failure for failure in failures), failures)
+
     def test_rejects_review_core_react_and_dom_dependencies(self):
         self.write_source(
             "question-engine/review-core/src/review.ts",
