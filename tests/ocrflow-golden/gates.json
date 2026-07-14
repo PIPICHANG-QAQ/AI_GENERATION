@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "ocrflow-gates.v1",
+  "accuracy": {
+    "maxDifferencesPerCase": 0
+  },
+  "performance": {
+    "status": "pending-task-2",
+    "metrics": [
+      "p50Ms",
+      "p95Ms",
+      "throughputPerMinute",
+      "peakRssMb",
+      "ocrProviderCalls",
+      "llmProviderCalls",
+      "cacheHits"
+    ],
+    "thresholds": {}
+  }
+}

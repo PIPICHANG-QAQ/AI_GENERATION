@@ -1,0 +1,178 @@
+{
+  "packageVersion": "question-package.v1",
+  "capability": "question-processing",
+  "job": {
+    "jobId": "import_task_golden_001",
+    "title": "脱敏数学样卷",
+    "stage": "高中",
+    "subject": "数学",
+    "grade": "高一",
+    "region": "示例",
+    "year": "2026",
+    "status": "待校验",
+    "processingStatus": "WAITING_REVIEW",
+    "failureReason": "",
+    "questionCount": 1,
+    "sourceFiles": [
+      {
+        "kind": "paper",
+        "filename": "paper.md",
+        "previewUrl": "/api/import-tasks/import_task_golden_001/source/paper"
+      },
+      {
+        "kind": "answer",
+        "filename": "answer.md",
+        "previewUrl": "/api/import-tasks/import_task_golden_001/source/answer"
+      }
+    ],
+    "paperOcr": {
+      "kind": "paper",
+      "jobId": "paper_job_golden_001",
+      "status": "completed",
+      "raw": {
+        "id": "paper_job_golden_001",
+        "filename": "paper.md",
+        "status": "completed",
+        "traceId": "trace-paper-golden",
+        "startedAt": "2026-07-14T08:00:00",
+        "finishedAt": "2026-07-14T08:01:00"
+      }
+    },
+    "answerOcr": {
+      "kind": "answer",
+      "jobId": "answer_job_golden_001",
+      "status": "completed",
+      "raw": {
+        "id": "answer_job_golden_001",
+        "filename": "answer.md",
+        "status": "completed",
+        "traceId": "trace-answer-golden",
+        "startedAt": "2026-07-14T08:02:00",
+        "finishedAt": "2026-07-14T08:03:00"
+      }
+    },
+    "createdAt": "2026-07-14T09:00:00",
+    "updatedAt": "2026-07-14T09:05:00"
+  },
+  "questions": [
+    {
+      "questionId": "question_golden_001",
+      "sourceQuestionId": "raw_1",
+      "number": 1,
+      "status": "待校验",
+      "type": "single_choice",
+      "stemMarkdown": "已知 $x+1=2$，求 $x$。",
+      "originalStemMarkdown": "已知 $x+1=2$，求 $x$。",
+      "answer": "B",
+      "analysis": "由 $x+1=2$ 得 $x=1$。",
+      "options": [
+        {
+          "label": "A",
+          "contentMarkdown": "0",
+          "raw": {
+            "label": "A",
+            "contentMarkdown": "0"
+          }
+        },
+        {
+          "label": "B",
+          "contentMarkdown": "1",
+          "raw": {
+            "label": "B",
+            "contentMarkdown": "1"
+          }
+        }
+      ],
+      "children": [],
+      "images": [
+        {
+          "id": "image_golden_001",
+          "index": 0,
+          "name": "option-a.png",
+          "path": "questions/question_golden_001/option-a.png",
+          "url": "/api/import-tasks/import_task_golden_001/images/image_golden_001",
+          "raw": {
+            "source": "ocr",
+            "placement": "option"
+          }
+        }
+      ],
+      "imagePlacements": [
+        {
+          "imageId": "image_golden_001",
+          "target": {
+            "kind": "option",
+            "optionLabel": "A"
+          }
+        }
+      ],
+      "knowledgePointIdCandidates": [
+        "kp-linear-equation"
+      ],
+      "knowledgePointCandidates": [
+        "一元一次方程"
+      ],
+      "difficultyCandidate": "easy",
+      "scoreCandidate": 5.0,
+      "mathValidation": {
+        "status": "review",
+        "summary": "公式需复核",
+        "issues": [
+          {
+            "code": "LATEX_SPACING",
+            "severity": "warning",
+            "message": "检查空格",
+            "field": "stemMarkdown"
+          }
+        ],
+        "raw": {
+          "status": "review",
+          "summary": "公式需复核",
+          "issues": [
+            {
+              "code": "LATEX_SPACING",
+              "severity": "warning",
+              "message": "检查空格",
+              "field": "stemMarkdown"
+            }
+          ]
+        }
+      },
+      "warnings": [
+        {
+          "code": "MATH_VALIDATION_REVIEW",
+          "message": "公式或 LaTeX 校验提示需要平台或人工复核。",
+          "targetId": "question_golden_001"
+        }
+      ],
+      "sourceEvidence": {
+        "processingJobId": "import_task_golden_001",
+        "sourceQuestionId": "raw_1",
+        "answerEvidence": {
+          "source": "answer.md",
+          "line": 3
+        },
+        "analysisEvidence": null,
+        "rawOcrContextUsed": true,
+        "raw": {
+          "processingJobId": "import_task_golden_001",
+          "sourceQuestionId": "raw_1",
+          "answerEvidence": {
+            "source": "answer.md",
+            "line": 3
+          },
+          "rawOcrContextUsed": true
+        }
+      },
+      "raw": {
+        "sourceQuestionId": "raw_1",
+        "answerEvidence": {
+          "source": "answer.md",
+          "line": 3
+        },
+        "rawOcrContextUsed": true
+      }
+    }
+  ],
+  "warnings": []
+}
