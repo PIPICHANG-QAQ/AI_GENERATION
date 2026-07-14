@@ -57,9 +57,9 @@ ENTRY_KEYS = ("rule", "path", "pattern")
 
 
 class _PythonStringCollector(ast.NodeVisitor):
-    def __init__(self) -> None:
+    def __init__(self, constants: Mapping[str, str] | None = None) -> None:
         self.values: list[str] = []
-        self.constants: dict[str, str] = {}
+        self.constants = dict(constants or {})
 
     def visit_Constant(self, node: ast.Constant) -> None:
         if isinstance(node.value, str):
@@ -84,26 +84,6 @@ class _PythonStringCollector(ast.NodeVisitor):
         else:
             self.generic_visit(node)
 
-    def visit_Assign(self, node: ast.Assign) -> None:
-        value = _static_python_string(node.value, self.constants)
-        if value is None:
-            self.generic_visit(node)
-            return
-        self.values.append(value)
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                self.constants[target.id] = value
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        value = _static_python_string(node.value, self.constants) if node.value is not None else None
-        if value is None:
-            self.generic_visit(node)
-            return
-        self.values.append(value)
-        if isinstance(node.target, ast.Name):
-            self.constants[node.target.id] = value
-
-
 def _static_python_string(node: ast.AST, constants: Mapping[str, str] | None = None) -> str | None:
     if isinstance(node, ast.Name) and constants is not None:
         return constants.get(node.id)
@@ -115,7 +95,8 @@ def _static_python_string(node: ast.AST, constants: Mapping[str, str] | None = N
             if isinstance(value, ast.Constant) and isinstance(value.value, str):
                 parts.append(value.value)
             elif isinstance(value, ast.FormattedValue):
-                parts.append("{" + ast.unparse(value.value) + "}")
+                resolved = _static_python_string(value.value, constants)
+                parts.append(resolved if resolved is not None else "{" + ast.unparse(value.value) + "}")
         return "".join(parts)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left = _static_python_string(node.left, constants)
@@ -126,14 +107,23 @@ def _static_python_string(node: ast.AST, constants: Mapping[str, str] | None = N
         if template is None:
             return None
         try:
-            args = [ast.literal_eval(argument) for argument in node.args]
-            kwargs = {keyword.arg: ast.literal_eval(keyword.value) for keyword in node.keywords if keyword.arg}
+            args = [_static_python_format_value(argument, constants) for argument in node.args]
+            kwargs = {
+                keyword.arg: _static_python_format_value(keyword.value, constants)
+                for keyword in node.keywords
+                if keyword.arg
+            }
             if len(kwargs) != len(node.keywords):
                 return None
             return template.format(*args, **kwargs)
         except (ValueError, TypeError, KeyError, IndexError, AttributeError):
             return None
     return None
+
+
+def _static_python_format_value(node: ast.AST, constants: Mapping[str, str] | None) -> object:
+    resolved = _static_python_string(node, constants)
+    return resolved if resolved is not None else ast.literal_eval(node)
 
 
 def _relative_files(root: Path, directory: str, suffixes: set[str]) -> Iterable[tuple[str, Path]]:
@@ -169,7 +159,7 @@ def _discover_python_worker_apis(root: Path, violations: Counter[tuple[str, str,
         except (OSError, SyntaxError, UnicodeDecodeError) as exc:
             failures.append(f"boundary scan could not parse {relative_path}: {exc}")
             continue
-        collector = _PythonStringCollector()
+        collector = _PythonStringCollector(_python_module_string_constants(tree))
         collector.visit(tree)
         for value in collector.values:
             pattern = _normalized_api_suffix(value, PYTHON_WORKER_API_PREFIXES)
@@ -180,10 +170,18 @@ def _discover_python_worker_apis(root: Path, violations: Counter[tuple[str, str,
 JAVA_STRING_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
 JAVA_STATIC_CONCAT_RE = re.compile(r'"(?:\\.|[^"\\])*"(?:\s*\+\s*"(?:\\.|[^"\\])*")+')
 JAVA_STRING_SOURCE = r'"(?:\\.|[^"\\])*"'
-JAVA_SEGMENT_CALL_SOURCE = (
-    rf'\.(?:resolve|path|pathSegment|segment)\(\s*{JAVA_STRING_SOURCE}'
-    rf'(?:\s*,\s*{JAVA_STRING_SOURCE})*\s*\)'
+JAVA_IDENTIFIER_SOURCE = r"[A-Za-z_$][A-Za-z0-9_$]*"
+JAVA_STATIC_TOKEN_SOURCE = rf"(?:{JAVA_STRING_SOURCE}|{JAVA_IDENTIFIER_SOURCE})"
+JAVA_STATIC_TOKEN_RE = re.compile(JAVA_STATIC_TOKEN_SOURCE)
+JAVA_STATIC_EXPRESSION_RE = re.compile(rf"\s*{JAVA_STATIC_TOKEN_SOURCE}(?:\s*\+\s*{JAVA_STATIC_TOKEN_SOURCE})*\s*\Z")
+JAVA_STRING_DECLARATION_RE = re.compile(
+    rf"\b(?:static\s+)?(?:final\s+)?String\s+({JAVA_IDENTIFIER_SOURCE})\s*=\s*([^;]+);"
 )
+JAVA_SEGMENT_CALL_SOURCE = (
+    rf'\.(?:resolve|path|pathSegment|segment)\(\s*({JAVA_STATIC_TOKEN_SOURCE}'
+    rf'(?:\s*,\s*{JAVA_STATIC_TOKEN_SOURCE})*)\s*\)'
+)
+JAVA_SEGMENT_CALL_RE = re.compile(JAVA_SEGMENT_CALL_SOURCE)
 JAVA_SEGMENT_CHAIN_RE = re.compile(rf'(?:{JAVA_SEGMENT_CALL_SOURCE}\s*)+')
 
 
@@ -192,6 +190,41 @@ def _java_string_value(raw_value: str) -> str:
         return json.loads(f'"{raw_value}"')
     except json.JSONDecodeError:
         return raw_value
+
+
+def _java_static_value(expression: str, constants: Mapping[str, str]) -> str | None:
+    if JAVA_STATIC_EXPRESSION_RE.fullmatch(expression) is None:
+        return None
+    values: list[str] = []
+    for match in JAVA_STATIC_TOKEN_RE.finditer(expression):
+        token = match.group(0)
+        if token.startswith('"'):
+            string_match = JAVA_STRING_RE.fullmatch(token)
+            if string_match is None:
+                return None
+            values.append(_java_string_value(string_match.group(1)))
+        elif token in constants:
+            values.append(constants[token])
+        else:
+            return None
+    return "".join(values)
+
+
+def _java_string_constants(source: str) -> dict[str, str]:
+    declarations = JAVA_STRING_DECLARATION_RE.findall(source)
+    constants: dict[str, str] = {}
+    for _ in range(len(declarations)):
+        changed = False
+        for name, expression in declarations:
+            if name in constants:
+                continue
+            value = _java_static_value(expression, constants)
+            if value is not None:
+                constants[name] = value
+                changed = True
+        if not changed:
+            break
+    return constants
 
 
 def _java_static_strings(source: str) -> Iterable[str]:
@@ -205,9 +238,21 @@ def _java_static_strings(source: str) -> Iterable[str]:
         yield _java_string_value(match.group(1))
 
 
-def _java_segmented_api_paths(source: str) -> Iterable[str]:
+def _java_segmented_api_paths(source: str, constants: Mapping[str, str]) -> Iterable[str]:
     for chain_match in JAVA_SEGMENT_CHAIN_RE.finditer(source):
-        values = [_java_string_value(match.group(1)) for match in JAVA_STRING_RE.finditer(chain_match.group(0))]
+        values: list[str] = []
+        unresolved = False
+        for call_match in JAVA_SEGMENT_CALL_RE.finditer(chain_match.group(0)):
+            for token_match in JAVA_STATIC_TOKEN_RE.finditer(call_match.group(1)):
+                value = _java_static_value(token_match.group(0), constants)
+                if value is None:
+                    unresolved = True
+                    break
+                values.append(value)
+            if unresolved:
+                break
+        if unresolved:
+            continue
         if any(_normalized_api_suffix(value) is not None for value in values):
             continue
         path = "/" + "/".join(value.strip("/") for value in values if value.strip("/"))
@@ -238,11 +283,12 @@ def _discover_java_ocrflow_apis(root: Path, violations: Counter[tuple[str, str, 
             continue
         if not _is_java_worker_transport_context(relative_path, source):
             continue
+        constants = _java_string_constants(source)
         for value in _java_static_strings(source):
             pattern = _normalized_api_suffix(value)
             if pattern is not None:
                 _record(violations, "java-ocrflow-python-api", relative_path, pattern)
-        for pattern in _java_segmented_api_paths(source):
+        for pattern in _java_segmented_api_paths(source, constants):
             _record(violations, "java-ocrflow-python-api", relative_path, pattern)
 
 
@@ -339,7 +385,36 @@ def _is_worker_algorithm_path(relative_path: str) -> bool:
     return nested_path not in WORKER_NON_ALGORITHM_FILES
 
 
+def _python_module_string_constants(tree: ast.AST) -> dict[str, str]:
+    if not isinstance(tree, ast.Module):
+        return {}
+    assignments: list[tuple[list[str], ast.AST]] = []
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            names = [target.id for target in statement.targets if isinstance(target, ast.Name)]
+            if names:
+                assignments.append((names, statement.value))
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name) and statement.value is not None:
+            assignments.append(([statement.target.id], statement.value))
+    constants: dict[str, str] = {}
+    for _ in range(len(assignments)):
+        changed = False
+        for names, expression in assignments:
+            if all(name in constants for name in names):
+                continue
+            value = _static_python_string(expression, constants)
+            if value is None:
+                continue
+            for name in names:
+                constants[name] = value
+            changed = True
+        if not changed:
+            break
+    return constants
+
+
 def _legacy_import_patterns(tree: ast.AST) -> Iterable[str]:
+    constants = _python_module_string_constants(tree)
     import_module_names = {"import_module"}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "importlib":
@@ -365,7 +440,7 @@ def _legacy_import_patterns(tree: ast.AST) -> Iterable[str]:
                 is_dynamic_import = node.func.attr == "import_module"
             if not is_dynamic_import:
                 continue
-            imported = _static_python_string(node.args[0])
+            imported = _static_python_string(node.args[0], constants)
             if imported and "legacy" in imported.lstrip(".").split("."):
                 yield imported
 

@@ -106,6 +106,50 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
 
         self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
 
+    def test_resolves_python_constants_inside_fstrings_and_format_arguments(self):
+        self.write_source(
+            "backend/python-worker/app/formatted_named_routes.py",
+            '\n'.join(
+                [
+                    'API_PREFIX = "/api"',
+                    'BANK = "question-bank"',
+                    'FSTRING_ROUTE = f"{API_PREFIX}/{BANK}/questions"',
+                    'FORMAT_ROUTE = "/api/{}/questions".format(BANK)',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
+        self.assertTrue(any("found 2" in failure for failure in failures), failures)
+
+    def test_function_local_strings_remain_stable_fstring_placeholders(self):
+        allowed = {
+            "rule": "python-worker-business-api",
+            "path": "backend/python-worker/app/local_route.py",
+            "pattern": "/api/question-bank/questions?v={version}",
+            "count": 1,
+        }
+        self.write_config([allowed], [allowed])
+        self.write_baseline([allowed])
+        self.write_source(
+            allowed["path"],
+            '\n'.join(
+                [
+                    "def route():",
+                    '    version = "v1"',
+                    '    return f"/api/question-bank/questions?v={version}"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertEqual([], failures)
+
     def test_rejects_java_ocrflow_call_to_python_api(self):
         self.write_source(
             "backend/src/main/java/com/aigeneration/questionbank/ocrflow/adapter/WorkerClient.java",
@@ -171,6 +215,27 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
             any(transport_path in failure and "/api/question-bank/questions" in failure for failure in failures),
             failures,
         )
+
+    def test_resolves_java_string_constants_in_segmented_transport_chains(self):
+        transport_path = (
+            "backend/src/main/java/com/aigeneration/questionbank/ocrflow/adapter/worker/ConstantTransport.java"
+        )
+        self.write_source(
+            transport_path,
+            '\n'.join(
+                [
+                    "class ConstantTransport {",
+                    '  static final String API = "api";',
+                    '  Object route = base.resolve(API).resolve("ocr/jobs");',
+                    "}",
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(transport_path in failure and "/api/ocr/jobs" in failure for failure in failures), failures)
 
     def test_rejects_review_core_react_and_dom_dependencies(self):
         self.write_source(
@@ -278,6 +343,24 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
         self.write_source(
             algorithm_path,
             'from importlib import import_module as load\nmodule = load("app.legacy.foo")\n',
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(algorithm_path in failure and "app.legacy.foo" in failure for failure in failures), failures)
+
+    def test_resolves_module_string_constant_in_aliased_legacy_import(self):
+        algorithm_path = "backend/python-worker/app/constant_dynamic_algorithm.py"
+        self.write_source(
+            algorithm_path,
+            '\n'.join(
+                [
+                    "from importlib import import_module as load",
+                    'LEGACY = "app.legacy.foo"',
+                    "module = load(LEGACY)",
+                    "",
+                ]
+            ),
         )
 
         failures = self.check_boundaries()
