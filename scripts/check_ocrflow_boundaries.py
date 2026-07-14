@@ -61,27 +61,34 @@ class _PythonStringCollector(ast.NodeVisitor):
         self.values: list[str] = []
         self.constants = dict(constants or {})
 
+    def _append_static_value(self, node: ast.AST) -> bool:
+        raw_value = _static_python_string(node, {})
+        value = _static_python_string(node, self.constants)
+        if value is None:
+            return False
+        if raw_value is not None and _normalized_api_suffix(raw_value, PYTHON_WORKER_API_PREFIXES) is not None:
+            self.values.append(raw_value)
+        else:
+            self.values.append(value)
+        return True
+
     def visit_Constant(self, node: ast.Constant) -> None:
         if isinstance(node.value, str):
             self.values.append(node.value)
 
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, ast.Load):
+            self._append_static_value(node)
+
     def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
-        value = _static_python_string(node, self.constants)
-        if value is not None:
-            self.values.append(value)
+        self._append_static_value(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
-        value = _static_python_string(node, self.constants)
-        if value is not None:
-            self.values.append(value)
-        else:
+        if not self._append_static_value(node):
             self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        value = _static_python_string(node, self.constants)
-        if value is not None:
-            self.values.append(value)
-        else:
+        if not self._append_static_value(node):
             self.generic_visit(node)
 
 def _static_python_string(node: ast.AST, constants: Mapping[str, str] | None = None) -> str | None:
@@ -126,6 +133,230 @@ def _static_python_format_value(node: ast.AST, constants: Mapping[str, str] | No
     return resolved if resolved is not None else ast.literal_eval(node)
 
 
+class _PythonLegacyCallCollector(ast.NodeVisitor):
+    def __init__(self, constants: Mapping[str, str], import_module_names: set[str]) -> None:
+        self.patterns: list[str] = []
+        self.constants = constants
+        self.import_module_names = import_module_names
+
+    def visit_Call(self, node: ast.Call) -> None:
+        is_dynamic_import = False
+        if isinstance(node.func, ast.Name):
+            is_dynamic_import = node.func.id == "__import__" or node.func.id in self.import_module_names
+        elif isinstance(node.func, ast.Attribute):
+            is_dynamic_import = node.func.attr == "import_module"
+        if is_dynamic_import and node.args:
+            imported = _static_python_string(node.args[0], self.constants)
+            if imported and "legacy" in imported.lstrip(".").split("."):
+                self.patterns.append(imported)
+        self.generic_visit(node)
+
+
+class _PythonAssignedNameCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.add(node.id)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name.split(".", 1)[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.names.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.names.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.names.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+
+def _python_assigned_names(node: ast.AST) -> set[str]:
+    collector = _PythonAssignedNameCollector()
+    collector.visit(node)
+    return collector.names
+
+
+def _python_target_names(target: ast.AST) -> set[str]:
+    return _python_assigned_names(target)
+
+
+def _python_direct_legacy_imports(node: ast.AST) -> Iterable[str]:
+    for child in ast.walk(node):
+        if isinstance(child, ast.Import):
+            for alias in child.names:
+                if "legacy" in alias.name.split("."):
+                    yield alias.name
+        elif isinstance(child, ast.ImportFrom):
+            module = "." * child.level + (child.module or "")
+            for alias in child.names:
+                imported = f"{module}.{alias.name}" if module else alias.name
+                if "legacy" in imported.lstrip(".").split("."):
+                    yield imported
+
+
+class _PythonScopeScanner:
+    """Track only deterministic string assignments within one lexical scope."""
+
+    _CONTROL_FLOW_TYPES = (
+        ast.If,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.Try,
+        ast.With,
+        ast.AsyncWith,
+        ast.Match,
+    ) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
+
+    def __init__(self) -> None:
+        self.string_values: list[str] = []
+        self.legacy_imports: list[str] = []
+
+    def scan(self, tree: ast.AST) -> None:
+        if isinstance(tree, ast.Module):
+            self._scan_statements(tree.body, {}, {"import_module"})
+
+    def _scan_expression(
+        self,
+        node: ast.AST | None,
+        constants: Mapping[str, str],
+        import_module_names: set[str],
+    ) -> None:
+        if node is None:
+            return
+        string_collector = _PythonStringCollector(constants)
+        string_collector.visit(node)
+        self.string_values.extend(string_collector.values)
+        legacy_collector = _PythonLegacyCallCollector(constants, import_module_names)
+        legacy_collector.visit(node)
+        self.legacy_imports.extend(legacy_collector.patterns)
+
+    def _scan_statements(
+        self,
+        statements: list[ast.stmt],
+        constants: dict[str, str],
+        import_module_names: set[str],
+    ) -> None:
+        for statement in statements:
+            self._scan_statement(statement, constants, import_module_names)
+
+    def _update_assignment(
+        self,
+        targets: list[ast.AST],
+        value_node: ast.AST,
+        constants: dict[str, str],
+        import_module_names: set[str],
+    ) -> None:
+        self._scan_expression(value_node, constants, import_module_names)
+        value = _static_python_string(value_node, constants)
+        names: set[str] = set()
+        simple_targets = True
+        for target in targets:
+            target_names = _python_target_names(target)
+            names.update(target_names)
+            simple_targets = simple_targets and isinstance(target, ast.Name)
+        for name in names:
+            import_module_names.discard(name)
+            if value is not None and simple_targets:
+                constants[name] = value
+            else:
+                constants.pop(name, None)
+
+    def _scan_function(
+        self,
+        statement: ast.FunctionDef | ast.AsyncFunctionDef,
+        constants: dict[str, str],
+        import_module_names: set[str],
+    ) -> None:
+        for expression in [*statement.decorator_list, *statement.args.defaults, *statement.args.kw_defaults]:
+            self._scan_expression(expression, constants, import_module_names)
+        if statement.returns is not None:
+            self._scan_expression(statement.returns, constants, import_module_names)
+        local_constants = dict(constants)
+        local_import_names = set(import_module_names)
+        arguments = [
+            *statement.args.posonlyargs,
+            *statement.args.args,
+            *statement.args.kwonlyargs,
+        ]
+        if statement.args.vararg is not None:
+            arguments.append(statement.args.vararg)
+        if statement.args.kwarg is not None:
+            arguments.append(statement.args.kwarg)
+        for argument in arguments:
+            local_constants.pop(argument.arg, None)
+            local_import_names.discard(argument.arg)
+        self._scan_statements(statement.body, local_constants, local_import_names)
+        constants.pop(statement.name, None)
+        import_module_names.discard(statement.name)
+
+    def _scan_statement(
+        self,
+        statement: ast.stmt,
+        constants: dict[str, str],
+        import_module_names: set[str],
+    ) -> None:
+        if isinstance(statement, ast.Assign):
+            self._update_assignment(statement.targets, statement.value, constants, import_module_names)
+        elif isinstance(statement, ast.AnnAssign):
+            if statement.value is not None:
+                self._update_assignment([statement.target], statement.value, constants, import_module_names)
+            else:
+                for name in _python_target_names(statement.target):
+                    constants.pop(name, None)
+                    import_module_names.discard(name)
+        elif isinstance(statement, (ast.AugAssign, ast.Delete)):
+            self._scan_expression(getattr(statement, "value", None), constants, import_module_names)
+            for name in _python_assigned_names(statement):
+                constants.pop(name, None)
+                import_module_names.discard(name)
+        elif isinstance(statement, ast.Import):
+            for alias in statement.names:
+                if "legacy" in alias.name.split("."):
+                    self.legacy_imports.append(alias.name)
+                assigned = alias.asname or alias.name.split(".", 1)[0]
+                constants.pop(assigned, None)
+                import_module_names.discard(assigned)
+        elif isinstance(statement, ast.ImportFrom):
+            module = "." * statement.level + (statement.module or "")
+            for alias in statement.names:
+                imported = f"{module}.{alias.name}" if module else alias.name
+                if "legacy" in imported.lstrip(".").split("."):
+                    self.legacy_imports.append(imported)
+                assigned = alias.asname or alias.name
+                constants.pop(assigned, None)
+                import_module_names.discard(assigned)
+                if statement.module == "importlib" and alias.name == "import_module":
+                    import_module_names.add(assigned)
+        elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            self._scan_function(statement, constants, import_module_names)
+        elif isinstance(statement, ast.ClassDef):
+            for expression in [*statement.decorator_list, *statement.bases, *[keyword.value for keyword in statement.keywords]]:
+                self._scan_expression(expression, constants, import_module_names)
+            self._scan_statements(statement.body, dict(constants), set(import_module_names))
+            constants.pop(statement.name, None)
+            import_module_names.discard(statement.name)
+        elif isinstance(statement, self._CONTROL_FLOW_TYPES):
+            for name in _python_assigned_names(statement):
+                constants.pop(name, None)
+                import_module_names.discard(name)
+            self.legacy_imports.extend(_python_direct_legacy_imports(statement))
+            self._scan_expression(statement, constants, import_module_names)
+        else:
+            self._scan_expression(statement, constants, import_module_names)
+
+
 def _relative_files(root: Path, directory: str, suffixes: set[str]) -> Iterable[tuple[str, Path]]:
     source_root = root / directory
     if not source_root.is_dir():
@@ -159,9 +390,9 @@ def _discover_python_worker_apis(root: Path, violations: Counter[tuple[str, str,
         except (OSError, SyntaxError, UnicodeDecodeError) as exc:
             failures.append(f"boundary scan could not parse {relative_path}: {exc}")
             continue
-        collector = _PythonStringCollector(_python_module_string_constants(tree))
-        collector.visit(tree)
-        for value in collector.values:
+        scanner = _PythonScopeScanner()
+        scanner.scan(tree)
+        for value in scanner.string_values:
             pattern = _normalized_api_suffix(value, PYTHON_WORKER_API_PREFIXES)
             if pattern is not None:
                 _record(violations, "python-worker-business-api", relative_path, pattern)
@@ -174,8 +405,9 @@ JAVA_IDENTIFIER_SOURCE = r"[A-Za-z_$][A-Za-z0-9_$]*"
 JAVA_STATIC_TOKEN_SOURCE = rf"(?:{JAVA_STRING_SOURCE}|{JAVA_IDENTIFIER_SOURCE})"
 JAVA_STATIC_TOKEN_RE = re.compile(JAVA_STATIC_TOKEN_SOURCE)
 JAVA_STATIC_EXPRESSION_RE = re.compile(rf"\s*{JAVA_STATIC_TOKEN_SOURCE}(?:\s*\+\s*{JAVA_STATIC_TOKEN_SOURCE})*\s*\Z")
-JAVA_STRING_DECLARATION_RE = re.compile(
-    rf"\b(?:static\s+)?(?:final\s+)?String\s+({JAVA_IDENTIFIER_SOURCE})\s*=\s*([^;]+);"
+JAVA_FINAL_STRING_DECLARATION_RE = re.compile(
+    rf"\b(?:(?:public|protected|private)\s+)?(?:static\s+)?final\s+String\s+"
+    rf"({JAVA_IDENTIFIER_SOURCE})\s*=\s*([^;]+);"
 )
 JAVA_SEGMENT_CALL_SOURCE = (
     rf'\.(?:resolve|path|pathSegment|segment)\(\s*({JAVA_STATIC_TOKEN_SOURCE}'
@@ -211,7 +443,11 @@ def _java_static_value(expression: str, constants: Mapping[str, str]) -> str | N
 
 
 def _java_string_constants(source: str) -> dict[str, str]:
-    declarations = JAVA_STRING_DECLARATION_RE.findall(source)
+    declarations = [
+        (name, expression)
+        for name, expression in JAVA_FINAL_STRING_DECLARATION_RE.findall(source)
+        if len(re.findall(rf"\b{re.escape(name)}\s*=(?!=)", source)) == 1
+    ]
     constants: dict[str, str] = {}
     for _ in range(len(declarations)):
         changed = False
@@ -252,6 +488,8 @@ def _java_segmented_api_paths(source: str, constants: Mapping[str, str]) -> Iter
             if unresolved:
                 break
         if unresolved:
+            compact_chain = re.sub(r"\s+", " ", chain_match.group(0)).strip()
+            yield f"dynamic URI chain: {compact_chain}"
             continue
         if any(_normalized_api_suffix(value) is not None for value in values):
             continue
@@ -385,64 +623,10 @@ def _is_worker_algorithm_path(relative_path: str) -> bool:
     return nested_path not in WORKER_NON_ALGORITHM_FILES
 
 
-def _python_module_string_constants(tree: ast.AST) -> dict[str, str]:
-    if not isinstance(tree, ast.Module):
-        return {}
-    assignments: list[tuple[list[str], ast.AST]] = []
-    for statement in tree.body:
-        if isinstance(statement, ast.Assign):
-            names = [target.id for target in statement.targets if isinstance(target, ast.Name)]
-            if names:
-                assignments.append((names, statement.value))
-        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name) and statement.value is not None:
-            assignments.append(([statement.target.id], statement.value))
-    constants: dict[str, str] = {}
-    for _ in range(len(assignments)):
-        changed = False
-        for names, expression in assignments:
-            if all(name in constants for name in names):
-                continue
-            value = _static_python_string(expression, constants)
-            if value is None:
-                continue
-            for name in names:
-                constants[name] = value
-            changed = True
-        if not changed:
-            break
-    return constants
-
-
 def _legacy_import_patterns(tree: ast.AST) -> Iterable[str]:
-    constants = _python_module_string_constants(tree)
-    import_module_names = {"import_module"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "importlib":
-            for alias in node.names:
-                if alias.name == "import_module":
-                    import_module_names.add(alias.asname or alias.name)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if "legacy" in alias.name.split("."):
-                    yield alias.name
-        elif isinstance(node, ast.ImportFrom):
-            module = "." * node.level + (node.module or "")
-            for alias in node.names:
-                imported = f"{module}.{alias.name}" if module else alias.name
-                if "legacy" in imported.lstrip(".").split("."):
-                    yield imported
-        elif isinstance(node, ast.Call) and node.args:
-            is_dynamic_import = False
-            if isinstance(node.func, ast.Name):
-                is_dynamic_import = node.func.id == "__import__" or node.func.id in import_module_names
-            elif isinstance(node.func, ast.Attribute):
-                is_dynamic_import = node.func.attr == "import_module"
-            if not is_dynamic_import:
-                continue
-            imported = _static_python_string(node.args[0], constants)
-            if imported and "legacy" in imported.lstrip(".").split("."):
-                yield imported
+    scanner = _PythonScopeScanner()
+    scanner.scan(tree)
+    yield from scanner.legacy_imports
 
 
 def _discover_worker_legacy_imports(

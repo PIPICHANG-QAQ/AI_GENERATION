@@ -125,6 +125,60 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
         self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
         self.assertTrue(any("found 2" in failure for failure in failures), failures)
 
+    def test_rejects_python_worker_uri_built_from_function_local_constants(self):
+        self.write_source(
+            "backend/python-worker/app/local_constants.py",
+            '\n'.join(
+                [
+                    "def route():",
+                    '    prefix = "/api/"',
+                    '    bank = "question-bank"',
+                    '    return prefix + bank + "/questions"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
+
+    def test_python_function_reassignment_uses_latest_string_value(self):
+        self.write_source(
+            "backend/python-worker/app/reassigned_route.py",
+            '\n'.join(
+                [
+                    "def route():",
+                    '    prefix = "/worker/v1/"',
+                    '    prefix = "/api/"',
+                    '    return prefix + "question-bank/questions"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
+
+    def test_python_function_reassignment_does_not_retain_stale_api_value(self):
+        self.write_source(
+            "backend/python-worker/app/reassigned_safe_route.py",
+            '\n'.join(
+                [
+                    "def route():",
+                    '    prefix = "/api/"',
+                    '    prefix = "/worker/v1/"',
+                    '    return prefix + "question-bank/questions"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertEqual([], failures)
+
     def test_function_local_strings_remain_stable_fstring_placeholders(self):
         allowed = {
             "rule": "python-worker-business-api",
@@ -236,6 +290,30 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
         failures = self.check_boundaries()
 
         self.assertTrue(any(transport_path in failure and "/api/ocr/jobs" in failure for failure in failures), failures)
+
+    def test_java_reassigned_nonfinal_string_is_a_dynamic_uri_boundary_violation(self):
+        transport_path = (
+            "backend/src/main/java/com/aigeneration/questionbank/ocrflow/adapter/worker/ReassignedTransport.java"
+        )
+        self.write_source(
+            transport_path,
+            '\n'.join(
+                [
+                    "class ReassignedTransport {",
+                    '  String api = "worker";',
+                    "  void route() {",
+                    '    api = "api";',
+                    '    Object value = base.resolve(api).resolve("ocr/jobs");',
+                    "  }",
+                    "}",
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(transport_path in failure and "dynamic URI" in failure for failure in failures), failures)
 
     def test_rejects_review_core_react_and_dom_dependencies(self):
         self.write_source(
@@ -358,6 +436,25 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
                     "from importlib import import_module as load",
                     'LEGACY = "app.legacy.foo"',
                     "module = load(LEGACY)",
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(algorithm_path in failure and "app.legacy.foo" in failure for failure in failures), failures)
+
+    def test_resolves_function_local_constant_in_aliased_legacy_import(self):
+        algorithm_path = "backend/python-worker/app/local_dynamic_algorithm.py"
+        self.write_source(
+            algorithm_path,
+            '\n'.join(
+                [
+                    "def load_legacy():",
+                    "    from importlib import import_module as load",
+                    '    legacy = "app.legacy.foo"',
+                    "    return load(legacy)",
                     "",
                 ]
             ),
