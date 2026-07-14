@@ -199,6 +199,23 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
 
         self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
 
+    def test_for_body_retains_known_route_value_from_mixed_list(self):
+        self.write_source(
+            "backend/python-worker/app/mixed_loop_route.py",
+            '\n'.join(
+                [
+                    "def routes(dynamic_prefix):",
+                    '    for prefix in [dynamic_prefix, "/api/"]:',
+                    '        yield prefix + "question-bank/questions"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
+
     def test_python_function_reassignment_uses_latest_string_value(self):
         self.write_source(
             "backend/python-worker/app/reassigned_route.py",
@@ -571,6 +588,25 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
                     "def load_legacy_modules():",
                     "    from importlib import import_module as load",
                     '    for module_name in ("app.legacy.foo",):',
+                    "        yield load(module_name)",
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(algorithm_path in failure and "app.legacy.foo" in failure for failure in failures), failures)
+
+    def test_for_body_retains_known_legacy_value_from_mixed_tuple(self):
+        algorithm_path = "backend/python-worker/app/mixed_loop_dynamic_algorithm.py"
+        self.write_source(
+            algorithm_path,
+            '\n'.join(
+                [
+                    "def load_legacy_modules(dynamic_module):",
+                    "    from importlib import import_module as load",
+                    '    for module_name in (dynamic_module, "app.legacy.foo"):',
                     "        yield load(module_name)",
                     "",
                 ]

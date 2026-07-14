@@ -320,14 +320,16 @@ class _PythonScopeScanner:
                 if elements is not None
                 else None
             )
-            if isinstance(statement.target, ast.Name) and values is not None and all(value is not None for value in values):
+            if isinstance(statement.target, ast.Name) and values is not None:
                 for value in values:
+                    if value is None:
+                        continue
                     loop_constants = dict(branch_constants)
                     loop_constants[statement.target.id] = value
                     loop_import_names = set(branch_import_names)
                     loop_import_names.discard(statement.target.id)
                     self._scan_statements(statement.body, loop_constants, loop_import_names)
-            else:
+            if not isinstance(statement.target, ast.Name) or values is None or any(value is None for value in values):
                 loop_constants = dict(branch_constants)
                 loop_import_names = set(branch_import_names)
                 for name in target_names:
