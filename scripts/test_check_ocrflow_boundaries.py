@@ -90,6 +90,22 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
         self.assertTrue(any("/api/question-bank/formatted" in failure for failure in failures), failures)
         self.assertTrue(any("/api/question-bank/fstring/{job_id}" in failure for failure in failures), failures)
 
+    def test_rejects_python_worker_uri_built_from_named_constants(self):
+        self.write_source(
+            "backend/python-worker/app/named_routes.py",
+            '\n'.join(
+                [
+                    'API_PREFIX = "/api/"',
+                    'ROUTE = API_PREFIX + "question-bank/questions"',
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any("/api/question-bank/questions" in failure for failure in failures), failures)
+
     def test_rejects_java_ocrflow_call_to_python_api(self):
         self.write_source(
             "backend/src/main/java/com/aigeneration/questionbank/ocrflow/adapter/WorkerClient.java",
@@ -131,6 +147,31 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
         )
         self.assertFalse(any(domain_path in failure for failure in failures), failures)
 
+    def test_normalizes_segmented_java_worker_transport_builder_chains(self):
+        transport_path = (
+            "backend/src/main/java/com/aigeneration/questionbank/ocrflow/adapter/worker/SegmentedTransport.java"
+        )
+        self.write_source(
+            transport_path,
+            '\n'.join(
+                [
+                    "class SegmentedTransport {",
+                    '  Object a = base.resolve("api").resolve("ocr/jobs");',
+                    '  Object b = builder.pathSegment("api", "question-bank", "questions");',
+                    "}",
+                    "",
+                ]
+            ),
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(transport_path in failure and "/api/ocr/jobs" in failure for failure in failures), failures)
+        self.assertTrue(
+            any(transport_path in failure and "/api/question-bank/questions" in failure for failure in failures),
+            failures,
+        )
+
     def test_rejects_review_core_react_and_dom_dependencies(self):
         self.write_source(
             "question-engine/review-core/src/review.ts",
@@ -169,6 +210,18 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
             any("template.ts" in failure and "DOM global: document" in failure for failure in failures),
             failures,
         )
+
+    def test_review_core_lexer_preserves_dom_after_url_string_and_template_expression(self):
+        source_path = "question-engine/review-core/src/url-and-template.ts"
+        self.write_source(
+            source_path,
+            'const endpoint = "http://worker"; document.title; const href = `${window.location}`;\n',
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(source_path in failure and "DOM global: document" in failure for failure in failures), failures)
+        self.assertTrue(any(source_path in failure and "DOM global: window" in failure for failure in failures), failures)
 
     def test_rejects_worker_algorithm_import_from_legacy(self):
         self.write_source(
@@ -219,6 +272,17 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
 
         self.assertTrue(any(algorithm_path in failure and "app.legacy.question_bank" in failure for failure in failures), failures)
         self.assertTrue(any(algorithm_path in failure and "app.legacy.papers" in failure for failure in failures), failures)
+
+    def test_rejects_aliased_importlib_legacy_import(self):
+        algorithm_path = "backend/python-worker/app/aliased_dynamic_algorithm.py"
+        self.write_source(
+            algorithm_path,
+            'from importlib import import_module as load\nmodule = load("app.legacy.foo")\n',
+        )
+
+        failures = self.check_boundaries()
+
+        self.assertTrue(any(algorithm_path in failure and "app.legacy.foo" in failure for failure in failures), failures)
 
     def test_exact_allowlist_entry_does_not_allow_new_pattern_in_same_file(self):
         allowed = {
@@ -419,6 +483,39 @@ class CheckOcrflowBoundariesTest(unittest.TestCase):
         failures = check_boundaries(self.repo_root, self.config_path)
 
         self.assertTrue(any("not present in protected baseline" in failure for failure in failures), failures)
+
+    def test_depth_one_clone_rejects_git_history_as_unprotected_baseline(self):
+        source_repo = self.repo_root / "source-repo"
+        source_repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=source_repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=source_repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=source_repo, check=True)
+        source_config = source_repo / "config" / "ocrflow-boundaries.json"
+        source_config.parent.mkdir(parents=True)
+        source_config.write_text(json.dumps({"version": 1, "allowlist": []}), encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=source_repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "add boundary baseline"], cwd=source_repo, check=True)
+
+        added = {
+            "rule": "python-worker-business-api",
+            "path": "backend/python-worker/app/worker_routes.py",
+            "pattern": "/api/question-bank/admin",
+            "count": 1,
+        }
+        source_config.write_text(json.dumps({"version": 1, "allowlist": [added]}), encoding="utf-8")
+        source_path = source_repo / added["path"]
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text('@app.get("/api/question-bank/admin")\ndef admin():\n    pass\n', encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=source_repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "expand boundary allowlist"], cwd=source_repo, check=True)
+
+        clone = self.repo_root / "depth-one-clone"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", source_repo.as_uri(), str(clone)], check=True)
+
+        failures = check_boundaries(clone, clone / "config" / "ocrflow-boundaries.json", environment={})
+
+        self.assertTrue(any("shallow repository" in failure for failure in failures), failures)
+        self.assertTrue(any("--baseline-config" in failure for failure in failures), failures)
 
     def test_portability_main_returns_failure_for_boundary_violation(self):
         with (

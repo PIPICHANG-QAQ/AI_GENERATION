@@ -59,32 +59,54 @@ ENTRY_KEYS = ("rule", "path", "pattern")
 class _PythonStringCollector(ast.NodeVisitor):
     def __init__(self) -> None:
         self.values: list[str] = []
+        self.constants: dict[str, str] = {}
 
     def visit_Constant(self, node: ast.Constant) -> None:
         if isinstance(node.value, str):
             self.values.append(node.value)
 
     def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
-        value = _static_python_string(node)
+        value = _static_python_string(node, self.constants)
         if value is not None:
             self.values.append(value)
 
     def visit_BinOp(self, node: ast.BinOp) -> None:
-        value = _static_python_string(node)
+        value = _static_python_string(node, self.constants)
         if value is not None:
             self.values.append(value)
         else:
             self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        value = _static_python_string(node)
+        value = _static_python_string(node, self.constants)
         if value is not None:
             self.values.append(value)
         else:
             self.generic_visit(node)
 
+    def visit_Assign(self, node: ast.Assign) -> None:
+        value = _static_python_string(node.value, self.constants)
+        if value is None:
+            self.generic_visit(node)
+            return
+        self.values.append(value)
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self.constants[target.id] = value
 
-def _static_python_string(node: ast.AST) -> str | None:
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        value = _static_python_string(node.value, self.constants) if node.value is not None else None
+        if value is None:
+            self.generic_visit(node)
+            return
+        self.values.append(value)
+        if isinstance(node.target, ast.Name):
+            self.constants[node.target.id] = value
+
+
+def _static_python_string(node: ast.AST, constants: Mapping[str, str] | None = None) -> str | None:
+    if isinstance(node, ast.Name) and constants is not None:
+        return constants.get(node.id)
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
@@ -96,11 +118,11 @@ def _static_python_string(node: ast.AST) -> str | None:
                 parts.append("{" + ast.unparse(value.value) + "}")
         return "".join(parts)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _static_python_string(node.left)
-        right = _static_python_string(node.right)
+        left = _static_python_string(node.left, constants)
+        right = _static_python_string(node.right, constants)
         return left + right if left is not None and right is not None else None
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
-        template = _static_python_string(node.func.value)
+        template = _static_python_string(node.func.value, constants)
         if template is None:
             return None
         try:
@@ -157,6 +179,12 @@ def _discover_python_worker_apis(root: Path, violations: Counter[tuple[str, str,
 
 JAVA_STRING_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
 JAVA_STATIC_CONCAT_RE = re.compile(r'"(?:\\.|[^"\\])*"(?:\s*\+\s*"(?:\\.|[^"\\])*")+')
+JAVA_STRING_SOURCE = r'"(?:\\.|[^"\\])*"'
+JAVA_SEGMENT_CALL_SOURCE = (
+    rf'\.(?:resolve|path|pathSegment|segment)\(\s*{JAVA_STRING_SOURCE}'
+    rf'(?:\s*,\s*{JAVA_STRING_SOURCE})*\s*\)'
+)
+JAVA_SEGMENT_CHAIN_RE = re.compile(rf'(?:{JAVA_SEGMENT_CALL_SOURCE}\s*)+')
 
 
 def _java_string_value(raw_value: str) -> str:
@@ -175,6 +203,16 @@ def _java_static_strings(source: str) -> Iterable[str]:
         if any(start <= match.start() and match.end() <= end for start, end in concatenated_spans):
             continue
         yield _java_string_value(match.group(1))
+
+
+def _java_segmented_api_paths(source: str) -> Iterable[str]:
+    for chain_match in JAVA_SEGMENT_CHAIN_RE.finditer(source):
+        values = [_java_string_value(match.group(1)) for match in JAVA_STRING_RE.finditer(chain_match.group(0))]
+        if any(_normalized_api_suffix(value) is not None for value in values):
+            continue
+        path = "/" + "/".join(value.strip("/") for value in values if value.strip("/"))
+        if path.startswith("/api/"):
+            yield path
 
 
 def _is_java_worker_transport_context(relative_path: str, source: str) -> bool:
@@ -204,6 +242,8 @@ def _discover_java_ocrflow_apis(root: Path, violations: Counter[tuple[str, str, 
             pattern = _normalized_api_suffix(value)
             if pattern is not None:
                 _record(violations, "java-ocrflow-python-api", relative_path, pattern)
+        for pattern in _java_segmented_api_paths(source):
+            _record(violations, "java-ocrflow-python-api", relative_path, pattern)
 
 
 JS_IMPORT_RES = (
@@ -211,8 +251,43 @@ JS_IMPORT_RES = (
     re.compile(r"\bimport\s*['\"]([^'\"]+)['\"]"),
     re.compile(r"\b(?:import|require)\s*\(\s*['\"]([^'\"]+)['\"]\s*\)"),
 )
-JS_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
-JS_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`", re.DOTALL)
+
+
+def _strip_js_literals_and_comments(source: str) -> str:
+    output: list[str] = []
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if character in {"'", '"', "`"}:
+            quote = character
+            index += 1
+            while index < len(source):
+                if source[index] == "\\":
+                    index += 2
+                    continue
+                if source[index] == quote:
+                    index += 1
+                    break
+                if source[index] == "\n":
+                    output.append("\n")
+                index += 1
+            continue
+        if source.startswith("//", index):
+            newline = source.find("\n", index + 2)
+            if newline < 0:
+                break
+            output.append("\n")
+            index = newline + 1
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            comment_end = len(source) if end < 0 else end + 2
+            output.extend("\n" for character in source[index:comment_end] if character == "\n")
+            index = comment_end
+            continue
+        output.append(character)
+        index += 1
+    return "".join(output)
 
 
 def _is_forbidden_review_module(module: str) -> bool:
@@ -237,8 +312,10 @@ def _discover_review_core_dependencies(
             pattern = f'DOM global: {match.group(1)}["{match.group(3)}"]'
             _record(violations, "review-core-ui-dependency", relative_path, pattern)
         template_expressions = TEMPLATE_EXPRESSION_RE.findall(source)
-        source_without_literals = JS_STRING_RE.sub("", JS_COMMENT_RE.sub("", source))
-        dom_source = source_without_literals + "\n" + "\n".join(template_expressions)
+        source_without_literals = _strip_js_literals_and_comments(source)
+        dom_source = source_without_literals + "\n" + "\n".join(
+            _strip_js_literals_and_comments(expression) for expression in template_expressions
+        )
         for identifier in REVIEW_CORE_DOM_GLOBALS:
             count = len(re.findall(rf"\b{re.escape(identifier)}\b", dom_source))
             if count:
@@ -263,6 +340,12 @@ def _is_worker_algorithm_path(relative_path: str) -> bool:
 
 
 def _legacy_import_patterns(tree: ast.AST) -> Iterable[str]:
+    import_module_names = {"import_module"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "importlib":
+            for alias in node.names:
+                if alias.name == "import_module":
+                    import_module_names.add(alias.asname or alias.name)
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -275,12 +358,12 @@ def _legacy_import_patterns(tree: ast.AST) -> Iterable[str]:
                 if "legacy" in imported.lstrip(".").split("."):
                     yield imported
         elif isinstance(node, ast.Call) and node.args:
-            function_name = ""
+            is_dynamic_import = False
             if isinstance(node.func, ast.Name):
-                function_name = node.func.id
+                is_dynamic_import = node.func.id == "__import__" or node.func.id in import_module_names
             elif isinstance(node.func, ast.Attribute):
-                function_name = node.func.attr
-            if function_name not in {"import_module", "__import__"}:
+                is_dynamic_import = node.func.attr == "import_module"
+            if not is_dynamic_import:
                 continue
             imported = _static_python_string(node.args[0])
             if imported and "legacy" in imported.lstrip(".").split("."):
@@ -432,6 +515,18 @@ def _load_protected_baseline(
         return _load_allowlist_file(configured_path, "protected baseline")
 
     selected_ref = baseline_ref or environment.get(BASELINE_REF_ENV)
+    if not selected_ref:
+        shallow_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+            capture_output=True,
+            text=True,
+        )
+        if shallow_result.returncode == 0 and shallow_result.stdout.strip() == "true":
+            return [], [
+                "protected baseline unavailable: shallow repository history cannot establish the config introduction "
+                f"commit. Supply --baseline-config PATH, {BASELINE_CONFIG_ENV}=PATH, --baseline-ref REF, or "
+                f"{BASELINE_REF_ENV}=REF"
+            ]
     payload, source, git_failures = _git_baseline_payload(root, selected_ref)
     if git_failures:
         guidance = (
