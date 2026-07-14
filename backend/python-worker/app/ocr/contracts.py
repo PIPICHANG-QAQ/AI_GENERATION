@@ -71,8 +71,8 @@ class OcrLayoutBlock:
     block_type: str
     page_index: int
     bbox: tuple[float, float, float, float]
-    page_width: float
-    page_height: float
+    page_width: float | None
+    page_height: float | None
     order: int
     text: str = ""
     image_ref: str = ""
@@ -84,7 +84,9 @@ class OcrLayoutBlock:
             raise CanonicalOcrBundleError("blockId is required")
         if self.page_index < 0:
             raise CanonicalOcrBundleError("pageIndex must not be negative")
-        if self.page_width <= 0 or self.page_height <= 0:
+        if (self.page_width is None) != (self.page_height is None):
+            raise CanonicalOcrBundleError("layout page dimensions must be supplied together")
+        if self.page_width is not None and (self.page_width <= 0 or self.page_height is None or self.page_height <= 0):
             raise CanonicalOcrBundleError("layout page dimensions must be positive")
         if len(self.bbox) != 4:
             raise CanonicalOcrBundleError("bbox must contain four coordinates")
@@ -100,11 +102,12 @@ class OcrLayoutBlock:
             "imageRef": self.image_ref,
             "pageIndex": self.page_index,
             "bbox": list(self.bbox),
-            "pageWidth": self.page_width,
-            "pageHeight": self.page_height,
             "order": self.order,
             "sourceOrder": self.source_order,
         }
+        if self.page_width is not None and self.page_height is not None:
+            payload["pageWidth"] = self.page_width
+            payload["pageHeight"] = self.page_height
         if self.coordinate_source:
             payload["coordinateSource"] = self.coordinate_source
         return payload
@@ -129,6 +132,8 @@ class CanonicalOcrBundle:
     layout_blocks: tuple[OcrLayoutBlock, ...] = ()
     source_document_ref: SourceDocumentRef | None = None
     artifact_root: str = ""
+    markdown_artifact_path: str = ""
+    json_artifact_path: str = ""
     producer: Mapping[str, Any] = field(default_factory=dict)
     native_artifacts: tuple[Mapping[str, Any], ...] = ()
     capabilities: frozenset[str] = field(default_factory=frozenset)
@@ -176,6 +181,8 @@ class CanonicalOcrBundle:
             "layoutBlocks": [block.to_dict() for block in self.layout_blocks],
             "sourceDocumentRef": self.source_document_ref.to_dict() if self.source_document_ref else None,
             "artifactRoot": self.artifact_root,
+            "markdownArtifactPath": self.markdown_artifact_path,
+            "jsonArtifactPath": self.json_artifact_path,
             "producer": dict(self.producer),
             "nativeArtifacts": [dict(artifact) for artifact in self.native_artifacts],
             "capabilities": sorted(self.capabilities),
