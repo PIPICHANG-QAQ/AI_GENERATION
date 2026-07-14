@@ -7,6 +7,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -36,10 +37,18 @@ REQUIRED_CONTROLLED_FEATURES = {
     "header-noise",
 }
 REPLAY_RUNNER = "java-question-processing"
+TOOL_ROOT = Path(__file__).resolve().parents[1]
+BUILTIN_MANIFEST = Path("tests/ocrflow-golden/manifest.json")
+DEFAULT_RUNNER_TIMEOUT_SECONDS = 120.0
+MAX_RUNNER_TIMEOUT_SECONDS = 3600.0
 RANDOM_ID_PATH_PATTERN = re.compile(
     r"[A-Za-z_][A-Za-z0-9_-]*(?:\[(?:\*|[0-9]+)\])*"
     r"(?:\.[A-Za-z_][A-Za-z0-9_-]*(?:\[(?:\*|[0-9]+)\])*)*"
 )
+
+
+class ReplayRunnerTimeout(RuntimeError):
+    """Raised when the deterministic Java replay exceeds its configured deadline."""
 
 
 def _path_matches(pattern: str, path: str) -> bool:
@@ -189,21 +198,13 @@ def _write_json(path: Path, payload: Any) -> None:
         handle.write("\n")
 
 
-def _repository_root(start: Path) -> Path | None:
-    for candidate in (start, *start.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return None
-
-
 def _resolve_manifest_path(manifest_path: Path, value: str) -> Path:
     supplied = Path(value)
     if supplied.is_absolute():
         return supplied
-    repository = _repository_root(manifest_path.resolve().parent)
-    if repository is not None and (repository / supplied).exists():
-        return repository / supplied
-    return manifest_path.resolve().parent / supplied
+    builtin_path = (TOOL_ROOT / BUILTIN_MANIFEST).resolve()
+    base = TOOL_ROOT if manifest_path.resolve() == builtin_path else manifest_path.resolve().parent
+    return base / supplied
 
 
 def _load_manifest(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
@@ -267,11 +268,13 @@ def _load_manifest(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
             if expected_path.is_file():
                 try:
                     expected_payload = _read_json(expected_path)
-                    _validate_random_id_leaf_paths(expected_payload, random_paths)
-                except ValueError as exc:
-                    errors.append(f"{prefix}.randomIdPaths: {exc}")
                 except json.JSONDecodeError:
                     pass
+                else:
+                    try:
+                        _validate_random_id_leaf_paths(expected_payload, random_paths)
+                    except ValueError as exc:
+                        errors.append(f"{prefix}.randomIdPaths: {exc}")
     return manifest, errors
 
 
@@ -363,9 +366,14 @@ def validate_controlled_corpus(
                     errors.append(f"{prefix}/case.json randomIdPaths: {syntax_error}")
             if expected_file.is_file():
                 try:
-                    _validate_random_id_leaf_paths(_read_json(expected_file), random_paths)
-                except (json.JSONDecodeError, ValueError) as exc:
-                    errors.append(f"{prefix}/case.json randomIdPaths: {exc}")
+                    expected_payload = _read_json(expected_file)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    try:
+                        _validate_random_id_leaf_paths(expected_payload, random_paths)
+                    except ValueError as exc:
+                        errors.append(f"{prefix}/case.json randomIdPaths: {exc}")
         case_features = metadata.get("features", [])
         if not isinstance(case_features, list) or not all(isinstance(item, str) for item in case_features):
             errors.append(f"{prefix}/case.json features must be an array of strings")
@@ -455,6 +463,25 @@ def _case_descriptors(path: Path, manifest: dict[str, Any]) -> list[dict[str, An
     return cases
 
 
+def _runner_timeout_seconds() -> float:
+    raw = os.environ.get(
+        "OCRFLOW_GOLDEN_RUNNER_TIMEOUT_SECONDS",
+        str(DEFAULT_RUNNER_TIMEOUT_SECONDS),
+    )
+    try:
+        timeout = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "OCRFLOW_GOLDEN_RUNNER_TIMEOUT_SECONDS must be a number"
+        ) from exc
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_RUNNER_TIMEOUT_SECONDS:
+        raise RuntimeError(
+            "OCRFLOW_GOLDEN_RUNNER_TIMEOUT_SECONDS must be greater than 0 "
+            f"and at most {MAX_RUNNER_TIMEOUT_SECONDS:g}"
+        )
+    return timeout
+
+
 def _run_replay_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
     repository = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="ocrflow-replay-") as directory:
@@ -483,13 +510,20 @@ def _run_replay_cases(cases: Sequence[dict[str, Any]]) -> dict[str, Any]:
             f"-Docrflow.replay.request={request_path}",
             "test",
         ]
-        completed = subprocess.run(
-            command,
-            cwd=repository,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        timeout = _runner_timeout_seconds()
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ReplayRunnerTimeout(
+                f"{REPLAY_RUNNER} exceeded {timeout:g} seconds"
+            ) from exc
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip()
             raise RuntimeError(
@@ -542,6 +576,13 @@ def _compare_manifest(path: Path, release: bool) -> tuple[int, dict[str, Any]]:
         }
     try:
         candidates = _run_replay_cases(cases)
+    except ReplayRunnerTimeout as exc:
+        return 2, {
+            "status": "runner_timeout",
+            "runner": REPLAY_RUNNER,
+            "message": str(exc),
+            "controlledCorpus": controlled,
+        }
     except Exception as exc:
         return 2, {
             "status": "runner_failed",
@@ -562,12 +603,21 @@ def _compare_manifest(path: Path, release: bool) -> tuple[int, dict[str, Any]]:
                 "controlledCorpus": controlled,
             }
         try:
+            if case["id"] not in candidates:
+                raise KeyError(f"candidate is missing for {case['id']}")
             differences = compare_payloads(
                 expected,
                 candidates[case["id"]],
                 case["randomIdPaths"],
             )
-        except (KeyError, ValueError) as exc:
+        except KeyError as exc:
+            return 2, {
+                "status": "candidate_invalid",
+                "caseId": case["id"],
+                "message": str(exc),
+                "controlledCorpus": controlled,
+            }
+        except ValueError as exc:
             return 2, {
                 "status": "normalization_invalid",
                 "caseId": case["id"],
@@ -616,44 +666,10 @@ def _capture_manifest(path: Path, output: Path, release: bool) -> tuple[int, dic
         }
     try:
         candidates = _run_replay_cases(descriptors)
-        if release:
-            release_reports = []
-            difference_count = 0
-            for case in descriptors:
-                expected = _read_json(Path(case["expected"]))
-                differences = compare_payloads(
-                    expected,
-                    candidates[case["id"]],
-                    case["randomIdPaths"],
-                )
-                difference_count += len(differences)
-                release_reports.append({
-                    "id": case["id"],
-                    "scope": case["scope"],
-                    "status": "equal" if not differences else "different",
-                    "differences": differences,
-                })
-            if difference_count:
-                return 1, {
-                    "status": "different",
-                    "mode": "release-capture-gate",
-                    "differenceCount": difference_count,
-                    "cases": release_reports,
-                    "controlledCorpus": controlled,
-                }
-        cases = [
-            {
-                "id": case["id"],
-                "scope": case["scope"],
-                "payload": _normalize_payload(
-                    candidates[case["id"]], case["randomIdPaths"]
-                ),
-            }
-            for case in descriptors
-        ]
-    except ValueError as exc:
+    except ReplayRunnerTimeout as exc:
         return 2, {
-            "status": "normalization_invalid",
+            "status": "runner_timeout",
+            "runner": REPLAY_RUNNER,
             "message": str(exc),
             "controlledCorpus": controlled,
         }
@@ -664,6 +680,80 @@ def _capture_manifest(path: Path, output: Path, release: bool) -> tuple[int, dic
             "message": str(exc),
             "controlledCorpus": controlled,
         }
+
+    if release:
+        release_reports = []
+        difference_count = 0
+        for case in descriptors:
+            try:
+                expected = _read_json(Path(case["expected"]))
+            except (OSError, json.JSONDecodeError) as exc:
+                return 2, {
+                    "status": "expected_invalid",
+                    "caseId": case["id"],
+                    "message": str(exc),
+                    "controlledCorpus": controlled,
+                }
+            if case["id"] not in candidates:
+                return 2, {
+                    "status": "candidate_invalid",
+                    "caseId": case["id"],
+                    "message": f"candidate is missing for {case['id']}",
+                    "controlledCorpus": controlled,
+                }
+            try:
+                differences = compare_payloads(
+                    expected,
+                    candidates[case["id"]],
+                    case["randomIdPaths"],
+                )
+            except ValueError as exc:
+                return 2, {
+                    "status": "normalization_invalid",
+                    "caseId": case["id"],
+                    "message": str(exc),
+                    "controlledCorpus": controlled,
+                }
+            difference_count += len(differences)
+            release_reports.append({
+                "id": case["id"],
+                "scope": case["scope"],
+                "status": "equal" if not differences else "different",
+                "differences": differences,
+            })
+        if difference_count:
+            return 1, {
+                "status": "different",
+                "mode": "release-capture-gate",
+                "differenceCount": difference_count,
+                "cases": release_reports,
+                "controlledCorpus": controlled,
+            }
+
+    cases = []
+    for case in descriptors:
+        if case["id"] not in candidates:
+            return 2, {
+                "status": "candidate_invalid",
+                "caseId": case["id"],
+                "message": f"candidate is missing for {case['id']}",
+                "controlledCorpus": controlled,
+            }
+        try:
+            payload = _normalize_payload(candidates[case["id"]], case["randomIdPaths"])
+        except ValueError as exc:
+            return 2, {
+                "status": "normalization_invalid",
+                "caseId": case["id"],
+                "message": str(exc),
+                "controlledCorpus": controlled,
+            }
+        cases.append({
+            "id": case["id"],
+            "scope": case["scope"],
+            "payload": payload,
+        })
+
     captured = {
         "schemaVersion": "ocrflow-golden-capture.v1",
         "mode": "replay",
@@ -673,7 +763,15 @@ def _capture_manifest(path: Path, output: Path, release: bool) -> tuple[int, dic
         },
         "cases": cases,
     }
-    _write_json(output, captured)
+    try:
+        _write_json(output, captured)
+    except OSError as exc:
+        return 2, {
+            "status": "output_write_failed",
+            "output": str(output),
+            "message": str(exc),
+            "controlledCorpus": controlled,
+        }
     return 0, {
         "status": "captured",
         "mode": "replay",

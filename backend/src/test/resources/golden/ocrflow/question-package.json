@@ -12,7 +12,7 @@
     "status": "待校验",
     "processingStatus": "WAITING_REVIEW",
     "failureReason": "",
-    "questionCount": 1,
+    "questionCount": 3,
     "sourceFiles": [
       {
         "kind": "paper",
@@ -185,6 +185,128 @@
         "answerEvidence": {
           "source": "answer.md",
           "line": 3
+        },
+        "rawOcrContextUsed": true
+      }
+    },
+    {
+      "questionId": "question_golden_002",
+      "sourceQuestionId": "raw_2",
+      "number": 2,
+      "status": "待校验",
+      "type": "short_answer",
+      "stemMarkdown": "已知 $y=2x$，当 $x=3$ 时，求 $y$。",
+      "originalStemMarkdown": "已知 $y=2x$，当 $x=3$ 时，求 $y$。",
+      "answer": "$y=6$",
+      "analysis": "由 $y=2x$ 且 $x=3$，得 $y=6$。",
+      "options": [],
+      "children": [],
+      "images": [],
+      "imagePlacements": [],
+      "knowledgePointIdCandidates": [
+        "kp-linear-function"
+      ],
+      "knowledgePointCandidates": [
+        "一次函数"
+      ],
+      "difficultyCandidate": "easy",
+      "scoreCandidate": 5.0,
+      "mathValidation": {
+        "status": "ok",
+        "summary": "",
+        "issues": [],
+        "raw": {
+          "status": "ok",
+          "summary": "",
+          "issues": []
+        }
+      },
+      "warnings": [],
+      "sourceEvidence": {
+        "processingJobId": "import_task_golden_001",
+        "sourceQuestionId": "raw_2",
+        "answerEvidence": {
+          "source": "answer.md",
+          "line": 5
+        },
+        "analysisEvidence": null,
+        "rawOcrContextUsed": true,
+        "raw": {
+          "processingJobId": "import_task_golden_001",
+          "sourceQuestionId": "raw_2",
+          "answerEvidence": {
+            "source": "answer.md",
+            "line": 5
+          },
+          "rawOcrContextUsed": true
+        }
+      },
+      "raw": {
+        "sourceQuestionId": "raw_2",
+        "answerEvidence": {
+          "source": "answer.md",
+          "line": 5
+        },
+        "rawOcrContextUsed": true
+      }
+    },
+    {
+      "questionId": "question_golden_003",
+      "sourceQuestionId": "raw_3",
+      "number": 3,
+      "status": "待校验",
+      "type": "short_answer",
+      "stemMarkdown": "化简：$a^2+2a+1$。",
+      "originalStemMarkdown": "化简：$a^2+2a+1$。",
+      "answer": "$(a+1)^2$",
+      "analysis": "由完全平方公式得 $(a+1)^2$。",
+      "options": [],
+      "children": [],
+      "images": [],
+      "imagePlacements": [],
+      "knowledgePointIdCandidates": [
+        "kp-perfect-square"
+      ],
+      "knowledgePointCandidates": [
+        "完全平方公式"
+      ],
+      "difficultyCandidate": "easy",
+      "scoreCandidate": 5.0,
+      "mathValidation": {
+        "status": "ok",
+        "summary": "",
+        "issues": [],
+        "raw": {
+          "status": "ok",
+          "summary": "",
+          "issues": []
+        }
+      },
+      "warnings": [],
+      "sourceEvidence": {
+        "processingJobId": "import_task_golden_001",
+        "sourceQuestionId": "raw_3",
+        "answerEvidence": {
+          "source": "answer.md",
+          "line": 7
+        },
+        "analysisEvidence": null,
+        "rawOcrContextUsed": true,
+        "raw": {
+          "processingJobId": "import_task_golden_001",
+          "sourceQuestionId": "raw_3",
+          "answerEvidence": {
+            "source": "answer.md",
+            "line": 7
+          },
+          "rawOcrContextUsed": true
+        }
+      },
+      "raw": {
+        "sourceQuestionId": "raw_3",
+        "answerEvidence": {
+          "source": "answer.md",
+          "line": 7
         },
         "rawOcrContextUsed": true
       }

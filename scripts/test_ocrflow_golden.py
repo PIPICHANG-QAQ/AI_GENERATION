@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -223,6 +224,162 @@ class CliTest(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertEqual("different", report["status"])
         self.assertFalse(output_exists)
+
+    def test_capture_write_failure_returns_machine_readable_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "paper.md").write_text("paper", encoding="utf-8")
+            (root / "expected.json").write_text('{"value":"expected"}', encoding="utf-8")
+            (root / "processing-job.json").write_text('{"rawJob":"input"}', encoding="utf-8")
+            output = root / "output-is-a-directory"
+            output.mkdir()
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({
+                "schemaVersion": "ocrflow-golden.v1",
+                "cases": [{
+                    "id": "case-1",
+                    "paper": "paper.md",
+                    "expected": "expected.json",
+                    "runner": "java-question-processing",
+                    "replayInput": "processing-job.json",
+                }],
+            }), encoding="utf-8")
+
+            with mock.patch.object(
+                ocrflow_golden,
+                "_run_replay_cases",
+                return_value={"case-1": {"value": "candidate"}},
+            ):
+                try:
+                    code, report = self.run_cli(
+                        "capture", "--manifest", str(manifest), "--mode", "replay",
+                        "--output", str(output),
+                    )
+                except OSError as exc:
+                    self.fail(f"capture leaked OSError instead of JSON: {exc}")
+
+        self.assertEqual(2, code)
+        self.assertEqual("output_write_failed", report["status"])
+
+    def test_runner_timeout_is_reported_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "paper.md").write_text("paper", encoding="utf-8")
+            (root / "expected.json").write_text('{"value":"expected"}', encoding="utf-8")
+            (root / "processing-job.json").write_text('{"rawJob":"input"}', encoding="utf-8")
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({
+                "schemaVersion": "ocrflow-golden.v1",
+                "cases": [{
+                    "id": "case-1",
+                    "paper": "paper.md",
+                    "expected": "expected.json",
+                    "runner": "java-question-processing",
+                    "replayInput": "processing-job.json",
+                }],
+            }), encoding="utf-8")
+
+            with mock.patch.object(
+                ocrflow_golden.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(cmd="mvn", timeout=3),
+            ):
+                code, report = self.run_cli("compare", "--manifest", str(manifest))
+
+        self.assertEqual(2, code)
+        self.assertEqual("runner_timeout", report["status"])
+
+    def test_runner_uses_finite_default_and_environment_timeout(self) -> None:
+        replay_case = {
+            "id": "case-1",
+            "input": Path("processing-job.json"),
+        }
+        for environment, expected_timeout in (
+            ({}, 120.0),
+            ({"OCRFLOW_GOLDEN_RUNNER_TIMEOUT_SECONDS": "7.5"}, 7.5),
+        ):
+            with self.subTest(environment=environment), \
+                    mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(
+                        ocrflow_golden.subprocess,
+                        "run",
+                        return_value=subprocess.CompletedProcess(
+                            args=["mvn"], returncode=1, stdout="", stderr="failure"
+                        ),
+                ) as run:
+                with self.assertRaises(RuntimeError):
+                    ocrflow_golden._run_replay_cases([replay_case])
+                self.assertIn("timeout", run.call_args.kwargs)
+                self.assertEqual(expected_timeout, run.call_args.kwargs["timeout"])
+
+    def test_release_capture_reports_malformed_expected(self) -> None:
+        code, report = self._run_release_capture_with(
+            expected_text="not-json",
+            candidates={"controlled-case": {"value": "actual"}},
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual("expected_invalid", report["status"], report)
+
+    def test_release_capture_reports_missing_candidate(self) -> None:
+        code, report = self._run_release_capture_with(
+            expected_text='{"value":"expected"}',
+            candidates={},
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual("candidate_invalid", report["status"])
+
+    def _run_release_capture_with(
+        self,
+        *,
+        expected_text: str,
+        candidates: dict[str, object],
+    ) -> tuple[int, dict[str, object]]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paper = root / "paper.md"
+            replay = root / "processing-job.json"
+            expected = root / "expected.json"
+            manifest = root / "manifest.json"
+            paper.write_text("paper", encoding="utf-8")
+            replay.write_text('{"rawJob":"input"}', encoding="utf-8")
+            expected.write_text(expected_text, encoding="utf-8")
+            manifest.write_text(json.dumps({
+                "schemaVersion": "ocrflow-golden.v1",
+                "cases": [{
+                    "id": "manifest-case",
+                    "paper": "paper.md",
+                    "expected": "expected.json",
+                    "runner": "java-question-processing",
+                    "replayInput": "processing-job.json",
+                }],
+            }), encoding="utf-8")
+            controlled_case = {
+                "id": "controlled-case",
+                "scope": "controlled",
+                "runner": "java-question-processing",
+                "input": replay,
+                "expected": expected,
+                "randomIdPaths": [],
+            }
+            with mock.patch.object(
+                ocrflow_golden,
+                "_controlled_status",
+                return_value={"valid": True, "caseCount": 20, "errors": []},
+            ), mock.patch.object(
+                ocrflow_golden,
+                "_case_descriptors",
+                return_value=[controlled_case],
+            ), mock.patch.object(
+                ocrflow_golden,
+                "_run_replay_cases",
+                return_value=candidates,
+            ):
+                return self.run_cli(
+                    "capture", "--manifest", str(manifest), "--mode", "replay",
+                    "--output", str(root / "capture.json"), "--release",
+                )
 
     def test_capture_executes_runner_on_raw_replay_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -441,6 +598,74 @@ class CliTest(unittest.TestCase):
 
         self.assertNotEqual(0, code)
         self.assertEqual("controlled_corpus_invalid", report["status"])
+
+
+class ManifestPathTest(unittest.TestCase):
+    def test_builtin_manifest_resolves_repo_paths_in_export_without_git_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            export_root = Path(directory) / "export"
+            manifest = export_root / "tests/ocrflow-golden/manifest.json"
+            expected = export_root / "docs/samples/platform-integration/expected.json"
+            manifest.parent.mkdir(parents=True)
+            expected.parent.mkdir(parents=True)
+            manifest.write_text("{}", encoding="utf-8")
+            expected.write_text("{}", encoding="utf-8")
+            self.assertFalse((export_root / ".git").exists())
+
+            with mock.patch.object(ocrflow_golden, "TOOL_ROOT", export_root, create=True):
+                resolved = ocrflow_golden._resolve_manifest_path(
+                    manifest,
+                    "docs/samples/platform-integration/expected.json",
+                )
+
+            self.assertEqual(expected.resolve(), resolved.resolve())
+
+    def test_external_manifest_resolves_paths_relative_to_its_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            export_root = Path(directory) / "export"
+            manifest = export_root / "external/manifest.json"
+            expected = manifest.parent / "expected.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}", encoding="utf-8")
+            expected.write_text("{}", encoding="utf-8")
+
+            with mock.patch.object(ocrflow_golden, "TOOL_ROOT", export_root, create=True):
+                resolved = ocrflow_golden._resolve_manifest_path(manifest, "expected.json")
+
+            self.assertEqual(expected.resolve(), resolved.resolve())
+
+
+class RepositoryFixtureTest(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_public_platform_sample_retains_all_three_questions(self) -> None:
+        paper = (self.ROOT / "docs/samples/platform-integration/paper.md").read_text(
+            encoding="utf-8"
+        )
+        answer = (self.ROOT / "docs/samples/platform-integration/answer.md").read_text(
+            encoding="utf-8"
+        )
+
+        for number in ("1.", "2.", "3."):
+            self.assertIn(number, paper)
+            self.assertIn(number, answer)
+
+    def test_replay_and_byte_identical_expected_copies_cover_three_questions(self) -> None:
+        processing = json.loads((
+            self.ROOT / "backend/src/test/resources/golden/ocrflow/processing-job.json"
+        ).read_text(encoding="utf-8"))
+        canonical_path = (
+            self.ROOT / "backend/src/test/resources/golden/ocrflow/question-package.json"
+        )
+        public_path = (
+            self.ROOT / "docs/samples/platform-integration/expected-question-package.v1.json"
+        )
+        canonical = json.loads(canonical_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(3, processing["task"]["questionCount"])
+        self.assertEqual(3, len(processing["questions"]))
+        self.assertEqual(3, len(canonical["questions"]))
+        self.assertEqual(canonical_path.read_bytes(), public_path.read_bytes())
 
 
 class ControlledCorpusTest(unittest.TestCase):

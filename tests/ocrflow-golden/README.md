@@ -8,7 +8,15 @@
 
 runner 是测试范围 Java harness `OcrFlowReplayRunnerTest`。Python 为所有 case 生成一次批量请求，Maven harness 读取 raw Java 持久化快照、构造现有仓储边界，并现场调用生产 `QuestionProcessingCapabilityService` 生成 candidate。Python 不实现题目转换算法，也不把 expected 当 candidate。runner 未配置、Maven 失败、candidate 缺失或非法时均非零退出。
 
+内置 manifest 的路径固定以 `scripts/ocrflow_golden.py` 的上一级目录（仓库或导出包根）为基准，不依赖 `.git`。只有精确路径 `tests/ocrflow-golden/manifest.json` 使用该规则；所有外部 manifest 的相对路径一律以 manifest 自身目录为基准。
+
+Java runner 默认超时 120 秒，可用 `OCRFLOW_GOLDEN_RUNNER_TIMEOUT_SECONDS` 调整，合法范围为大于 0 且不超过 3600 秒。超时返回 `runner_timeout`，不会继续使用旧 candidate。
+
 这是“当前 Java 聚合实现的确定性 replay”，不调用外部 OCR/LLM provider。完整生产链 fixture 可用后，必须新增调用真实无状态入口的 runner 类型，不能退回静态 candidate 文件。
+
+canonical expected 是 `backend/src/test/resources/golden/ocrflow/question-package.json`；公共平台副本 `docs/samples/platform-integration/expected-question-package.v1.json` 必须保持字节一致，`RepositoryFixtureTest` 会阻止漏同步。
+
+工具当前不加跨进程锁。单次 runner 的 request/candidate 位于独立临时目录，但同一 checkout 中并发 Maven 仍共享 `backend/target/`，存在构建产物竞争的残余风险。发布任务应串行执行，或为并发任务使用独立 checkout/worktree。
 
 ## 命令
 
