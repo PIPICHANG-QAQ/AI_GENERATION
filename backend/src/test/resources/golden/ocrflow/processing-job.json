@@ -40,7 +40,7 @@
       "score": 5.0,
       "imagesJson": "[]",
       "imagePlacementsJson": "[{\"imageId\":\"image_golden_001\",\"target\":{\"kind\":\"option\",\"optionLabel\":\"A\"}}]",
-      "optionsJson": "[{\"label\":\"A\",\"contentMarkdown\":\"0\"},{\"label\":\"B\",\"contentMarkdown\":\"1\"}]",
+      "optionsJson": "[{\"label\":\"A\",\"contentMarkdown\":\"0\"},{\"label\":\"B\",\"contentMarkdown\":\"1\"},{\"label\":\"C\",\"contentMarkdown\":\"2\"},{\"label\":\"D\",\"contentMarkdown\":\"3\"}]",
       "childrenJson": "[]",
       "mathValidationJson": "{\"status\":\"review\",\"summary\":\"公式需复核\",\"issues\":[{\"code\":\"LATEX_SPACING\",\"severity\":\"warning\",\"message\":\"检查空格\",\"field\":\"stemMarkdown\"}]}",
       "rawJson": "{\"sourceQuestionId\":\"raw_1\",\"answerEvidence\":{\"source\":\"answer.md\",\"line\":3},\"rawOcrContextUsed\":true}",

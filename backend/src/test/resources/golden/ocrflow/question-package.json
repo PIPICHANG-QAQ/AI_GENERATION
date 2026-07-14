@@ -81,6 +81,22 @@
             "label": "B",
             "contentMarkdown": "1"
           }
+        },
+        {
+          "label": "C",
+          "contentMarkdown": "2",
+          "raw": {
+            "label": "C",
+            "contentMarkdown": "2"
+          }
+        },
+        {
+          "label": "D",
+          "contentMarkdown": "3",
+          "raw": {
+            "label": "D",
+            "contentMarkdown": "3"
+          }
         }
       ],
       "children": [],

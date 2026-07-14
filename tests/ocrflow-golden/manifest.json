@@ -8,9 +8,9 @@
       "id": "platform-markdown-basic",
       "paper": "docs/samples/platform-integration/paper.md",
       "answer": "docs/samples/platform-integration/answer.md",
-      "providerOutput": "backend/src/test/resources/golden/ocrflow/question-package.json",
-      "expected": "docs/samples/platform-integration/expected-question-package.v1.json",
-      "replayMode": "captured-aggregate"
+      "runner": "java-question-processing",
+      "replayInput": "backend/src/test/resources/golden/ocrflow/processing-job.json",
+      "expected": "docs/samples/platform-integration/expected-question-package.v1.json"
     }
   ]
 }
