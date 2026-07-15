@@ -78,6 +78,54 @@ class MermaidStructureCheckTest(unittest.TestCase):
 
         self.assertEqual(["flow.svg: unexpected rendered directed edge B -> A"], failures)
 
+    def test_resolves_ambiguous_encoded_edge_to_unique_declared_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n'
+                '  A["A"]\n'
+                '  B_C["B_C"]\n'
+                '  A_B["A_B"]\n'
+                '  C["C"]\n'
+                '  A --> B_C\n',
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<path data-id="L_A_B_C_0"/><path data-id="L_A_B_C_1"/>'
+                '<g id="flowchart-A-0"><text>A</text></g>'
+                '<g id="flowchart-B_C-1"><text>B_C</text></g>'
+                '<g id="flowchart-A_B-2"><text>A_B</text></g>'
+                '<g id="flowchart-C-3"><text>C</text></g>'
+                '</svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual([], failures)
+
+    def test_reports_ambiguous_encoded_edge_with_sorted_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n'
+                '  A["A"]\n'
+                '  B_C["B_C"]\n'
+                '  A_B["A_B"]\n'
+                '  C["C"]\n',
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<path data-id="L_A_B_C_0"/>'
+                '<g id="flowchart-A-0"><text>A</text></g>'
+                '<g id="flowchart-B_C-1"><text>B_C</text></g>'
+                '<g id="flowchart-A_B-2"><text>A_B</text></g>'
+                '<g id="flowchart-C-3"><text>C</text></g>'
+                '</svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual(
+            ["flow.svg: ambiguous rendered edge A_B_C: candidates A -> B_C, A_B -> C"],
+            failures,
+        )
+
     def test_reports_missing_rendered_class_assignment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             mmd, svg = self.write_pair(

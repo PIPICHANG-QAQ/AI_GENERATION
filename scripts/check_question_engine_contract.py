@@ -72,25 +72,36 @@ def declared_mermaid_semantics(mmd: str) -> tuple[dict[str, str], set[tuple[str,
     return labels, edges, classes
 
 
-def rendered_mermaid_edges(rendered_ids: set[str], declared_nodes: set[str]) -> set[tuple[str, str]]:
-    """Map Mermaid edge ids to declared endpoint pairs; duplicate SVG instances collapse into one edge."""
-    prefixes = sorted(
-        (
-            (f"L_{source}_{target}_", (source, target))
-            for source in declared_nodes
-            for target in declared_nodes
-        ),
-        key=lambda item: len(item[0]),
-        reverse=True,
-    )
+def rendered_mermaid_edges(
+    rendered_ids: set[str],
+    semantic_nodes: set[str],
+    declared_edges: set[tuple[str, str]],
+) -> tuple[set[tuple[str, str]], dict[str, tuple[tuple[str, str], ...]]]:
+    """Resolve encoded Mermaid edges without guessing between overlapping node ids."""
     edges: set[tuple[str, str]] = set()
-    for rendered_id in rendered_ids:
-        for prefix, edge in prefixes:
-            suffix = rendered_id.removeprefix(prefix)
-            if suffix != rendered_id and suffix.isdigit():
-                edges.add(edge)
-                break
-    return edges
+    ambiguities: dict[str, tuple[tuple[str, str], ...]] = {}
+    for rendered_id in sorted(rendered_ids):
+        match = re.fullmatch(r"L_(?P<encoded>.+)_(?P<render_index>[0-9]+)", rendered_id)
+        if not match:
+            continue
+        encoded = match.group("encoded")
+        candidates = tuple(
+            sorted(
+                (encoded[:split_index], encoded[split_index + 1:])
+                for split_index, character in enumerate(encoded)
+                if character == "_"
+                and encoded[:split_index] in semantic_nodes
+                and encoded[split_index + 1:] in semantic_nodes
+            )
+        )
+        declared_candidates = tuple(edge for edge in candidates if edge in declared_edges)
+        if len(declared_candidates) == 1:
+            edges.add(declared_candidates[0])
+        elif not declared_candidates and len(candidates) == 1:
+            edges.add(candidates[0])
+        elif candidates:
+            ambiguities.setdefault(encoded, candidates)
+    return edges, ambiguities
 
 
 def rendered_mermaid_nodes(svg_root: ElementTree.Element) -> dict[str, list[ElementTree.Element]]:
@@ -118,7 +129,7 @@ def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
     rendered_nodes = rendered_mermaid_nodes(svg_root)
     rendered_edge_ids = {element.get("data-id", "") for element in svg_root.iter() if element.get("data-id")}
     semantic_nodes = set(declared_nodes) | set(rendered_nodes)
-    rendered_edges = rendered_mermaid_edges(rendered_edge_ids, semantic_nodes)
+    rendered_edges, ambiguous_edges = rendered_mermaid_edges(rendered_edge_ids, semantic_nodes, declared_edges)
     source_custom_classes = set(MERMAID_CLASS_DEFINITION.findall(mmd))
     source_custom_classes.update(
         class_name
@@ -146,8 +157,16 @@ def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
             failures.append(f"{svg_path.name}: missing rendered class {class_name} for {node_id}")
         for class_name in sorted(rendered_classes - expected_classes):
             failures.append(f"{svg_path.name}: unexpected rendered class {class_name} for {node_id}")
+    ambiguous_candidates = {
+        edge
+        for candidates in ambiguous_edges.values()
+        for edge in candidates
+    }
+    for encoded, candidates in sorted(ambiguous_edges.items()):
+        candidate_names = ", ".join(f"{source} -> {target}" for source, target in candidates)
+        failures.append(f"{svg_path.name}: ambiguous rendered edge {encoded}: candidates {candidate_names}")
     for source, target in sorted(declared_edges - rendered_edges):
-        if source in missing_nodes or target in missing_nodes:
+        if source in missing_nodes or target in missing_nodes or (source, target) in ambiguous_candidates:
             continue
         failures.append(f"{svg_path.name}: missing rendered directed edge {source} -> {target}")
     for source, target in sorted(rendered_edges - declared_edges):
