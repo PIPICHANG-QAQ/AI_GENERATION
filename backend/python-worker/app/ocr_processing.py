@@ -168,11 +168,45 @@ def _inline_code_ranges(markdown: str, start: int, end: int) -> list[tuple[int, 
     return ranges
 
 
+def _indented_code_ranges(markdown: str, start: int, end: int) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    block_start: int | None = None
+    last_indented_end: int | None = None
+    offset = start
+
+    for line in markdown[start:end].splitlines(keepends=True):
+        content = _line_content(line)
+        line_end = offset + len(line)
+        is_indented = re.match(r"^(?: {4,}| {0,3}\t)", content) is not None
+        is_blank = not content.strip(" \t")
+        if is_indented:
+            if block_start is None:
+                block_start = offset
+            last_indented_end = line_end
+        elif not is_blank and block_start is not None and last_indented_end is not None:
+            ranges.append((block_start, last_indented_end))
+            block_start = None
+            last_indented_end = None
+        offset = line_end
+
+    if block_start is not None and last_indented_end is not None:
+        ranges.append((block_start, last_indented_end))
+    return ranges
+
+
 def _markdown_code_ranges(markdown: str) -> list[tuple[int, int]]:
     fenced = _fenced_code_ranges(markdown)
-    protected = list(fenced)
+    blocks = list(fenced)
     cursor = 0
     for start, end in fenced:
+        blocks.extend(_indented_code_ranges(markdown, cursor, start))
+        cursor = end
+    blocks.extend(_indented_code_ranges(markdown, cursor, len(markdown)))
+    blocks.sort()
+
+    protected = list(blocks)
+    cursor = 0
+    for start, end in blocks:
         protected.extend(_inline_code_ranges(markdown, cursor, start))
         cursor = end
     protected.extend(_inline_code_ranges(markdown, cursor, len(markdown)))
