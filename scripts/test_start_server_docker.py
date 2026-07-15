@@ -18,6 +18,97 @@ from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).with_name("start_server_docker.sh").resolve()
 COMPOSE_PATH = SCRIPT_PATH.parents[1] / "docker-compose.server.yml"
+HEALTH_PAYLOAD_CASES = (
+    (
+        "disabled",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": False, "apiReady": False}},
+        0,
+    ),
+    (
+        "disabled-without-api-ready",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": False}},
+        0,
+    ),
+    (
+        "enabled-ready",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": True, "apiReady": True}},
+        0,
+    ),
+    (
+        "enabled-not-ready",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": True, "apiReady": False}},
+        1,
+    ),
+    (
+        "enabled-missing-ready",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": True}},
+        1,
+    ),
+    (
+        "enabled-null-ready",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": True, "apiReady": None}},
+        1,
+    ),
+    (
+        "enabled-wrong-ready-type",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": True, "apiReady": "true"}},
+        1,
+    ),
+    ("missing-mode", {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiReady": True}}, 1),
+    (
+        "null-mode",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": None, "apiReady": True}},
+        1,
+    ),
+    (
+        "wrong-mode-type",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": "false", "apiReady": True}},
+        1,
+    ),
+    (
+        "not-installed",
+        {"providerStatus": {"installed": False, "runtimeProbeOk": True, "apiEnabled": False, "apiReady": False}},
+        1,
+    ),
+    (
+        "missing-installed",
+        {"providerStatus": {"runtimeProbeOk": True, "apiEnabled": False, "apiReady": False}},
+        1,
+    ),
+    (
+        "null-installed",
+        {"providerStatus": {"installed": None, "runtimeProbeOk": True, "apiEnabled": False, "apiReady": False}},
+        1,
+    ),
+    (
+        "wrong-installed-type",
+        {"providerStatus": {"installed": 1, "runtimeProbeOk": True, "apiEnabled": False, "apiReady": False}},
+        1,
+    ),
+    (
+        "runtime-failed",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": False, "apiEnabled": False, "apiReady": False}},
+        1,
+    ),
+    (
+        "missing-runtime",
+        {"providerStatus": {"installed": True, "apiEnabled": False, "apiReady": False}},
+        1,
+    ),
+    (
+        "null-runtime",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": None, "apiEnabled": False, "apiReady": False}},
+        1,
+    ),
+    (
+        "wrong-runtime-type",
+        {"providerStatus": {"installed": True, "runtimeProbeOk": "true", "apiEnabled": False, "apiReady": False}},
+        1,
+    ),
+    ("missing-provider-status", {}, 1),
+    ("null-provider-status", {"providerStatus": None}, 1),
+    ("wrong-provider-status-type", {"providerStatus": []}, 1),
+)
 
 
 class StartServerDockerTest(unittest.TestCase):
@@ -90,38 +181,20 @@ class StartServerDockerTest(unittest.TestCase):
         self.assertIn("MINERU_HOST_COMMAND", completed.stderr)
         self.assertIn("HOST_MINERU_VENV", completed.stderr)
 
-    def test_ocr_predicate_requires_explicit_boolean_api_mode(self) -> None:
-        disabled = json.dumps(
-            {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": False, "apiReady": False}}
-        )
-        enabled = json.dumps(
-            {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": True, "apiReady": False}}
-        )
-        missing = json.dumps({"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiReady": True}})
-        null_mode = json.dumps(
-            {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": None, "apiReady": True}}
-        )
-        wrong_type = json.dumps(
-            {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiEnabled": "false", "apiReady": True}}
-        )
-        completed = self.run_bash(
-            f"""
-            export PYTHONOPTIMIZE=1
-            printf '%s' '{disabled}' | ocr_runtime_payload_is_ready
-            disabled_status=$?
-            enabled_status=0
-            printf '%s' '{enabled}' | ocr_runtime_payload_is_ready || enabled_status=$?
-            missing_status=0
-            printf '%s' '{missing}' | ocr_runtime_payload_is_ready || missing_status=$?
-            null_status=0
-            printf '%s' '{null_mode}' | ocr_runtime_payload_is_ready || null_status=$?
-            type_status=0
-            printf '%s' '{wrong_type}' | ocr_runtime_payload_is_ready || type_status=$?
-            printf '%s %s %s %s %s\n' "$disabled_status" "$enabled_status" "$missing_status" "$null_status" "$type_status"
-            """
-        )
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual("0 1 1 1 1", completed.stdout.strip())
+    def test_ocr_predicate_complete_matrix_with_and_without_python_optimize(self) -> None:
+        for optimize in ("0", "1"):
+            for name, payload, expected_status in HEALTH_PAYLOAD_CASES:
+                with self.subTest(optimize=optimize, case=name):
+                    completed = self.run_bash(
+                        f"""
+                        set +e
+                        export PYTHONOPTIMIZE={optimize}
+                        printf '%s' '{json.dumps(payload)}' | ocr_runtime_payload_is_ready
+                        printf '%s\n' "$?"
+                        """
+                    )
+                    self.assertEqual(0, completed.returncode, completed.stderr)
+                    self.assertEqual(str(expected_status), completed.stdout.strip())
 
     def test_readiness_retries_java_and_ocr_under_one_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -149,22 +222,24 @@ class StartServerDockerTest(unittest.TestCase):
         self.assertEqual("3 3", completed.stdout.strip())
 
     def test_timeout_reports_diagnostics_and_removes_failed_service(self) -> None:
-        completed = self.run_bash(
-            """
-            server_readiness_probe() { return 1; }
-            show_startup_diagnostics() { printf 'diagnostics-called\n' >&2; }
-            cleanup_failed_service() { printf 'cleanup-called\n' >&2; }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            events = Path(temp_dir) / "events"
+            completed = self.run_bash(
+                f"""
+            server_readiness_probe() {{ return 1; }}
+            show_startup_diagnostics() {{ printf 'diagnostics\n' >>'{events}'; }}
+            cleanup_failed_service() {{ printf 'cleanup\n' >>'{events}'; }}
             QUESTION_ENGINE_STARTUP_TIMEOUT_SECONDS=0
             QUESTION_ENGINE_STARTUP_POLL_SECONDS=0
             status=0
             require_server_readiness || status=$?
             printf 'status=%s\n' "$status"
             """
-        )
+            )
+            event_lines = events.read_text(encoding="utf-8").splitlines()
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual("status=1", completed.stdout.strip())
-        self.assertIn("diagnostics-called", completed.stderr)
-        self.assertIn("cleanup-called", completed.stderr)
+        self.assertEqual(["cleanup", "diagnostics"], event_lines)
 
     def test_default_deadline_is_600_seconds(self) -> None:
         completed = self.run_bash(
@@ -177,26 +252,26 @@ class StartServerDockerTest(unittest.TestCase):
         self.assertEqual("600", completed.stdout.strip())
 
     def test_api_enabled_is_normalized_case_insensitively_and_invalid_values_fail(self) -> None:
-        completed = self.run_bash(
-            """
-            set +e
-            MINERU_API_ENABLED=TRUE
-            normalize_mineru_api_enabled true
-            upper_status=$?
-            upper_value=$MINERU_API_ENABLED
-            MINERU_API_ENABLED=False
-            normalize_mineru_api_enabled true
-            mixed_status=$?
-            mixed_value=$MINERU_API_ENABLED
-            MINERU_API_ENABLED=maybe
-            normalize_mineru_api_enabled true
-            invalid_status=$?
-            printf '%s %s %s %s %s\n' "$upper_status" "$upper_value" "$mixed_status" "$mixed_value" "$invalid_status"
-            """
-        )
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual("0 true 0 false 1", completed.stdout.strip())
-        self.assertIn("MINERU_API_ENABLED", completed.stderr)
+        cases = ((None, "false", 0), ("", "false", 0), ("true", "true", 0), ("TRUE", "true", 0),
+                 ("False", "false", 0), ("invalid", "invalid", 1), (" TRUE ", " TRUE ", 1))
+        for raw_value, expected_value, expected_status in cases:
+            with self.subTest(raw_value=raw_value):
+                assignment = "unset MINERU_API_ENABLED" if raw_value is None else f"MINERU_API_ENABLED={raw_value!r}"
+                completed = self.run_bash(
+                    f"""
+                    set +e
+                    {assignment}
+                    normalize_mineru_api_enabled
+                    status=$?
+                    printf '%s|%s\n' "$status" "${{MINERU_API_ENABLED-<unset>}}"
+                    """
+                )
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertEqual(f"{expected_status}|{expected_value}", completed.stdout.rstrip("\n"))
+                if expected_status:
+                    self.assertIn("MINERU_API_ENABLED", completed.stderr)
+                    self.assertIn("exactly true or false", completed.stderr)
+                    self.assertIn("surrounding whitespace", completed.stderr)
 
     def test_hard_deadline_bounds_hanging_http_and_cleanup_runs(self) -> None:
         class HangingHandler(BaseHTTPRequestHandler):
@@ -209,15 +284,24 @@ class StartServerDockerTest(unittest.TestCase):
         server = self.start_http_server(HangingHandler)
         with tempfile.TemporaryDirectory() as temp_dir:
             cleanup_log = Path(temp_dir) / "cleanup.log"
+            event_log = Path(temp_dir) / "events.log"
             url = f"http://127.0.0.1:{server.server_port}/hang"
             body = f"""
 health_url='{url}'
 ocr_runtime_url='{url}'
 COMPOSE_FILE=docker-compose.server.yml
 docker() {{ printf '%s\n' "$*" >>'{cleanup_log}'; }}
+record_event() {{
+  python3 -c 'import sys,time; print(f"{{sys.argv[1]}} {{time.monotonic():.9f}}")' "$1" >>'{event_log}'
+}}
+eval "$(declare -f cleanup_failed_service | sed '1s/cleanup_failed_service/original_cleanup_failed_service/')"
+eval "$(declare -f show_startup_diagnostics | sed '1s/show_startup_diagnostics/original_show_startup_diagnostics/')"
+cleanup_failed_service() {{ record_event cleanup; original_cleanup_failed_service; }}
+show_startup_diagnostics() {{ record_event diagnostics; original_show_startup_diagnostics; }}
 QUESTION_ENGINE_STARTUP_TIMEOUT_SECONDS=1
 QUESTION_ENGINE_STARTUP_POLL_SECONDS=0.01
 status=0
+record_event start
 require_server_readiness || status=$?
 printf 'status=%s\n' "$status"
 """
@@ -247,6 +331,14 @@ printf 'status=%s\n' "$status"
             cleanup = cleanup_log.read_text(encoding="utf-8")
             self.assertIn("stop question-engine", cleanup)
             self.assertIn("rm -f question-engine", cleanup)
+            events = {
+                name: float(timestamp)
+                for name, timestamp in (line.split() for line in event_log.read_text(encoding="utf-8").splitlines())
+            }
+            self.assertLess(events["cleanup"], events["diagnostics"])
+            cleanup_delay = events["cleanup"] - events["start"]
+            self.assertGreaterEqual(cleanup_delay, 0.75)
+            self.assertLess(cleanup_delay, 1.75)
 
     def test_real_http_readiness_retries_then_succeeds_before_deadline(self) -> None:
         request_counts = {"/api/java/health": 0, "/api/capabilities/ocr-flow/runtime": 0}
@@ -349,67 +441,24 @@ else:
             curl.chmod(0o755)
             host_command = command.replace("/opt/question-engine/venv/bin/python", sys.executable)
             base_env = {**os.environ, "PATH": f"{temp_dir}:{os.environ['PATH']}"}
-            disabled_payload = json.dumps(
-                {
-                    "providerStatus": {
-                        "installed": True,
-                        "runtimeProbeOk": True,
-                        "apiEnabled": False,
-                        "apiReady": False,
-                    }
-                }
-            )
-            enabled_payload = json.dumps(
-                {
-                    "providerStatus": {
-                        "installed": True,
-                        "runtimeProbeOk": True,
-                        "apiEnabled": True,
-                        "apiReady": False,
-                    }
-                }
-            )
-            missing_payload = json.dumps(
-                {"providerStatus": {"installed": True, "runtimeProbeOk": True, "apiReady": True}}
-            )
-            wrong_type_payload = json.dumps(
-                {
-                    "providerStatus": {
-                        "installed": True,
-                        "runtimeProbeOk": True,
-                        "apiEnabled": "false",
-                        "apiReady": True,
-                    }
-                }
-            )
-            disabled = subprocess.run(
-                ["bash", "-c", host_command],
-                env={**base_env, "OCR_PAYLOAD": disabled_payload, "PYTHONOPTIMIZE": "1"},
-                capture_output=True,
-                check=False,
-            )
-            enabled = subprocess.run(
-                ["bash", "-c", host_command],
-                env={**base_env, "OCR_PAYLOAD": enabled_payload, "PYTHONOPTIMIZE": "1"},
-                capture_output=True,
-                check=False,
-            )
-            missing = subprocess.run(
-                ["bash", "-c", host_command],
-                env={**base_env, "OCR_PAYLOAD": missing_payload, "PYTHONOPTIMIZE": "1"},
-                capture_output=True,
-                check=False,
-            )
-            wrong_type = subprocess.run(
-                ["bash", "-c", host_command],
-                env={**base_env, "OCR_PAYLOAD": wrong_type_payload, "PYTHONOPTIMIZE": "1"},
-                capture_output=True,
-                check=False,
-            )
-        self.assertEqual(0, disabled.returncode, disabled.stderr.decode(errors="replace"))
-        self.assertEqual(1, enabled.returncode, enabled.stderr.decode(errors="replace"))
-        self.assertEqual(1, missing.returncode, missing.stderr.decode(errors="replace"))
-        self.assertEqual(1, wrong_type.returncode, wrong_type.stderr.decode(errors="replace"))
+            for optimize in ("0", "1"):
+                for name, payload, expected_status in HEALTH_PAYLOAD_CASES:
+                    with self.subTest(optimize=optimize, case=name):
+                        completed = subprocess.run(
+                            ["bash", "-c", host_command],
+                            env={
+                                **base_env,
+                                "OCR_PAYLOAD": json.dumps(payload),
+                                "PYTHONOPTIMIZE": optimize,
+                            },
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(
+                            expected_status,
+                            completed.returncode,
+                            completed.stderr.decode(errors="replace"),
+                        )
 
 
 if __name__ == "__main__":

@@ -191,8 +191,25 @@ class MineruOcrProvider(OcrProvider):
         return value or None
 
     @staticmethod
-    def _api_enabled() -> bool:
-        return os.getenv("MINERU_API_ENABLED", "").strip().lower() == "true"
+    def _api_mode() -> tuple[bool, str | None]:
+        raw_value = os.getenv("MINERU_API_ENABLED")
+        if raw_value is None or raw_value == "":
+            return False, None
+        normalized = raw_value.lower()
+        if normalized == "true":
+            return True, None
+        if normalized == "false":
+            return False, None
+        return (
+            False,
+            "MINERU_API_ENABLED must be exactly true or false (case-insensitive) "
+            f"without surrounding whitespace; got {raw_value!r}.",
+        )
+
+    @classmethod
+    def _api_enabled(cls) -> bool:
+        enabled, _error = cls._api_mode()
+        return enabled
 
     def _api_openapi_url(self) -> str | None:
         api_url = self._api_url()
@@ -214,12 +231,16 @@ class MineruOcrProvider(OcrProvider):
 
     def _probe_api(self) -> dict[str, Any]:
         openapi_url = self._api_openapi_url()
+        api_enabled, api_mode_error = self._api_mode()
         result: dict[str, Any] = {
-            "apiEnabled": self._api_enabled(),
+            "apiEnabled": api_enabled,
             "apiReady": False,
             "apiUrl": openapi_url,
             "apiError": None,
         }
+        if api_mode_error:
+            result["apiError"] = api_mode_error
+            return result
         if openapi_url is None:
             result["apiError"] = "MINERU_API_URL is not configured."
             return result
@@ -629,9 +650,16 @@ class MineruOcrProvider(OcrProvider):
     def status(self, check_api: bool | None = None) -> dict[str, Any]:
         """执行 status 逻辑。"""
         command, resolution = self.resolve_command()
-        api_enabled = self._api_enabled()
+        api_enabled, api_mode_error = self._api_mode()
         api_required = api_enabled if check_api is None else check_api
-        if api_required:
+        if api_mode_error:
+            api_status = {
+                "apiEnabled": False,
+                "apiReady": False,
+                "apiUrl": self._api_openapi_url(),
+                "apiError": api_mode_error,
+            }
+        elif api_required:
             api_status = self._probe_api()
         else:
             api_status = {
@@ -640,9 +668,11 @@ class MineruOcrProvider(OcrProvider):
                 "apiUrl": self._api_openapi_url(),
                 "apiError": None,
             }
-        installed = command is not None and (not api_required or bool(api_status["apiReady"]))
+        installed = command is not None and not api_mode_error and (not api_required or bool(api_status["apiReady"]))
         error = resolution.get("error")
-        if command is not None and api_required and not api_status["apiReady"]:
+        if api_mode_error:
+            error = api_mode_error
+        elif command is not None and api_required and not api_status["apiReady"]:
             error = api_status["apiError"] or "MinerU API is not ready."
         status: dict[str, Any] = {
             "provider": self.name,
@@ -663,6 +693,24 @@ class MineruOcrProvider(OcrProvider):
 
     def run(self, request: OcrProviderRequest) -> OcrProviderResult:
         """调用 MinerU 并把工件归一为 Bundle，不执行题库后处理或状态写入。"""
+        api_enabled, api_mode_error = self._api_mode()
+        if api_mode_error:
+            api_status = {
+                "apiEnabled": False,
+                "apiReady": False,
+                "apiUrl": self._api_openapi_url(),
+                "apiError": api_mode_error,
+            }
+            return OcrProviderResult(
+                success=False,
+                metadata={
+                    "ocrFlowProvider": self.name,
+                    "ocrProvider": self.name,
+                    "ocrFlowProviderResolution": api_status,
+                },
+                error=api_mode_error,
+            )
+
         command, resolution = self.resolve_command()
         if not command:
             return OcrProviderResult(
@@ -675,7 +723,6 @@ class MineruOcrProvider(OcrProvider):
                 error=resolution.get("error") or "MinerU CLI is not installed or not available.",
             )
 
-        api_enabled = self._api_enabled()
         api_url = self._api_url() if api_enabled else None
         if api_enabled:
             api_status = self._probe_api()

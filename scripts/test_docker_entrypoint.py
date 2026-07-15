@@ -202,27 +202,27 @@ start_optional_mineru_api
             self.assertFalse(calls.exists())
 
     def test_api_enabled_is_normalized_case_insensitively_and_invalid_values_fail(self):
-        completed = self._run_harness(
-            """
+        cases = ((None, "false", 0), ("", "false", 0), ("true", "true", 0), ("TRUE", "true", 0),
+                 ("False", "false", 0), ("invalid", "invalid", 1), (" TRUE ", " TRUE ", 1))
+        for raw_value, expected_value, expected_status in cases:
+            with self.subTest(raw_value=raw_value):
+                assignment = "unset MINERU_API_ENABLED" if raw_value is None else f"MINERU_API_ENABLED={raw_value!r}"
+                completed = self._run_harness(
+                    f"""
 set +e
-MINERU_API_ENABLED=TRUE
-normalize_mineru_api_enabled false
-upper_status=$?
-upper_value=$MINERU_API_ENABLED
-MINERU_API_ENABLED=False
-normalize_mineru_api_enabled false
-mixed_status=$?
-mixed_value=$MINERU_API_ENABLED
-MINERU_API_ENABLED=invalid
-normalize_mineru_api_enabled false
-invalid_status=$?
-printf '%s %s %s %s %s\n' "$upper_status" "$upper_value" "$mixed_status" "$mixed_value" "$invalid_status"
+{assignment}
+normalize_mineru_api_enabled
+status=$?
+printf '%s|%s\n' "$status" "${{MINERU_API_ENABLED-<unset>}}"
 """
-        )
+                )
 
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertEqual("0 true 0 false 1", completed.stdout.strip())
-        self.assertIn("MINERU_API_ENABLED", completed.stderr)
+                self.assertEqual(0, completed.returncode, completed.stderr)
+                self.assertEqual(f"{expected_status}|{expected_value}", completed.stdout.rstrip("\n"))
+                if expected_status:
+                    self.assertIn("MINERU_API_ENABLED", completed.stderr)
+                    self.assertIn("exactly true or false", completed.stderr)
+                    self.assertIn("surrounding whitespace", completed.stderr)
 
     def test_readiness_timeout_cleans_api_process_before_main_exits(self):
         with tempfile.TemporaryDirectory() as tmp:

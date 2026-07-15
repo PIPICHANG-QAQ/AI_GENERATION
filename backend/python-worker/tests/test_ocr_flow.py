@@ -21,6 +21,15 @@ from app import worker_base
 
 
 class MineruOcrProviderTest(unittest.TestCase):
+    API_ENABLED_CASES = (
+        (None, False, True),
+        ("", False, True),
+        ("true", True, True),
+        ("TRUE", True, True),
+        ("False", False, True),
+        ("invalid", False, False),
+        (" TRUE ", False, False),
+    )
     RUNTIME_IMPORT_PROBE = (
         "from markupsafe import Markup\n"
         "from jinja2 import Environment\n"
@@ -362,6 +371,69 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertTrue(status["apiEnabled"])
         self.assertFalse(status["apiReady"])
         urlopen.assert_not_called()
+
+    def test_status_strictly_parses_api_enabled_matrix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, _runtime_python = self._write_local_python_mineru(app_root)
+            command = self._provider_command(command_path)
+            provider = MineruOcrProvider(app_root, 5)
+
+            for raw_value, expected_enabled, valid in self.API_ENABLED_CASES:
+                with self.subTest(raw_value=raw_value), patch.dict(os.environ, {}, clear=False), patch.object(
+                    provider,
+                    "resolve_command",
+                    return_value=(command, self._healthy_resolution(command)),
+                ):
+                    if raw_value is None:
+                        os.environ.pop("MINERU_API_ENABLED", None)
+                    else:
+                        os.environ["MINERU_API_ENABLED"] = raw_value
+                    status = provider.status(check_api=False)
+
+                self.assertIs(status["apiEnabled"], expected_enabled)
+                self.assertFalse(status["apiReady"])
+                if valid:
+                    self.assertTrue(status["installed"])
+                    self.assertIsNone(status["apiError"])
+                    self.assertIsNone(status["error"])
+                else:
+                    self.assertFalse(status["installed"])
+                    self.assertIn("MINERU_API_ENABLED", status["apiError"])
+                    self.assertIn("MINERU_API_ENABLED", status["error"])
+
+    def test_run_rejects_invalid_api_enabled_before_resolution_output_or_ocr(self):
+        for raw_value in ("invalid", " TRUE "):
+            with self.subTest(raw_value=raw_value), tempfile.TemporaryDirectory() as tmp:
+                app_root = Path(tmp)
+                provider = MineruOcrProvider(app_root, 5)
+                command = ProviderCommand(args=["mineru"], display="mineru", source="test")
+                request = OcrProviderRequest(
+                    document_id="job-invalid-api-mode",
+                    input_path="paper.pdf",
+                    output_dir=app_root / "outputs" / "job-invalid-api-mode",
+                    timeout_seconds=30,
+                )
+
+                with patch.dict(
+                    os.environ,
+                    {"MINERU_API_ENABLED": raw_value},
+                    clear=False,
+                ), patch.object(
+                    provider,
+                    "resolve_command",
+                    return_value=(command, self._healthy_resolution(command)),
+                ) as resolve_command, patch(
+                    "app.ocr_flow.subprocess.run",
+                    return_value=subprocess.CompletedProcess(["mineru"], 1, "", "invalid mode was ignored"),
+                ) as run:
+                    result = provider.run(request)
+
+                self.assertFalse(result.success)
+                self.assertIn("MINERU_API_ENABLED", result.error)
+                self.assertFalse(request.output_dir.exists())
+                resolve_command.assert_not_called()
+                run.assert_not_called()
 
     def test_status_check_api_true_forces_probe_when_api_mode_is_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:

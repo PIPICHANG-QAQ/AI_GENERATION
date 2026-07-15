@@ -5,15 +5,19 @@ pids=()
 mineru_api_pid=""
 
 normalize_mineru_api_enabled() {
-  local default_value="$1"
   local normalized
-  normalized="$(printf '%s' "${MINERU_API_ENABLED:-${default_value}}" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "${MINERU_API_ENABLED-}" ]]; then
+    normalized=false
+  else
+    normalized="$(printf '%s' "${MINERU_API_ENABLED}" | tr '[:upper:]' '[:lower:]')"
+  fi
   case "${normalized}" in
     true|false)
       export MINERU_API_ENABLED="${normalized}"
       ;;
     *)
-      echo "MINERU_API_ENABLED must be true or false." >&2
+      printf "MINERU_API_ENABLED must be exactly true or false (case-insensitive) without surrounding whitespace; got '%s'.\n" \
+        "${MINERU_API_ENABLED}" >&2
       return 1
       ;;
   esac
@@ -35,7 +39,7 @@ configure_environment() {
   export JAVA_DOMAIN_LIBRARY_STORE_PATH="${JAVA_DOMAIN_LIBRARY_STORE_PATH:-/data/library_store.json}"
   export OCR_FLOW_PROVIDER="${OCR_FLOW_PROVIDER:-mineru}"
   export MINERU_COMMAND="${MINERU_COMMAND:-/opt/question-engine/venv/bin/mineru}"
-  normalize_mineru_api_enabled false
+  normalize_mineru_api_enabled
   export MINERU_API_HOST="${MINERU_API_HOST:-127.0.0.1}"
   export MINERU_API_PORT="${MINERU_API_PORT:-8002}"
   export MINERU_API_URL="${MINERU_API_URL:-http://${MINERU_API_HOST}:${MINERU_API_PORT}}"

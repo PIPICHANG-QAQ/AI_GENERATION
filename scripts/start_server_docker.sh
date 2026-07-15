@@ -21,15 +21,19 @@ need_command() {
 }
 
 normalize_mineru_api_enabled() {
-  local default_value="$1"
   local normalized
-  normalized="$(printf '%s' "${MINERU_API_ENABLED:-${default_value}}" | tr '[:upper:]' '[:lower:]')"
+  if [[ -z "${MINERU_API_ENABLED-}" ]]; then
+    normalized=false
+  else
+    normalized="$(printf '%s' "${MINERU_API_ENABLED}" | tr '[:upper:]' '[:lower:]')"
+  fi
   case "${normalized}" in
     true|false)
       export MINERU_API_ENABLED="${normalized}"
       ;;
     *)
-      echo "MINERU_API_ENABLED must be true or false." >&2
+      printf "MINERU_API_ENABLED must be exactly true or false (case-insensitive) without surrounding whitespace; got '%s'.\n" \
+        "${MINERU_API_ENABLED}" >&2
       return 1
       ;;
   esac
@@ -235,7 +239,7 @@ build_server_artifacts() {
 main() {
   cd "${ROOT_DIR}"
   load_environment
-  normalize_mineru_api_enabled true
+  normalize_mineru_api_enabled
 
   need_command docker
   need_command curl

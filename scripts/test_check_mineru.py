@@ -21,9 +21,22 @@ if SPEC is None or SPEC.loader is None:  # pragma: no cover - import guard
     raise RuntimeError(f"Unable to load {SCRIPT_PATH}")
 check_mineru = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(check_mineru)
+worker_path = str(check_mineru.WORKER_DIR)
+if worker_path not in sys.path:
+    sys.path.insert(0, worker_path)
+from app import ocr_flow
 
 
 class CheckMineruCliTest(unittest.TestCase):
+    API_ENABLED_CASES = (
+        (None, False, True),
+        ("", False, True),
+        ("true", True, True),
+        ("TRUE", True, True),
+        ("False", False, True),
+        ("invalid", False, False),
+        (" TRUE ", False, False),
+    )
     RUNTIME_READY = {
         "installed": True,
         "runtimeProbeOk": True,
@@ -80,6 +93,37 @@ class CheckMineruCliTest(unittest.TestCase):
     def test_skip_api_succeeds_without_api_readiness(self):
         with mock.patch.object(check_mineru, "provider_status", return_value=self.RUNTIME_READY):
             self.assertEqual(0, check_mineru.main(["--skip-api"]))
+
+    def test_skip_api_strictly_parses_api_enabled_matrix(self):
+        command = ocr_flow.ProviderCommand(args=["mineru"], display="mineru", source="test")
+        resolution = {
+            "version": "3.4.0",
+            "versionProbeOk": True,
+            "runtimeProbeOk": True,
+            "runtimePython": sys.executable,
+            "candidates": [],
+            "error": None,
+        }
+        for raw_value, expected_enabled, valid in self.API_ENABLED_CASES:
+            with self.subTest(raw_value=raw_value), mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(
+                ocr_flow.MineruOcrProvider,
+                "resolve_command",
+                return_value=(command, resolution),
+            ), mock.patch("sys.stdout", io.StringIO()) as output:
+                if raw_value is None:
+                    os.environ.pop("MINERU_API_ENABLED", None)
+                else:
+                    os.environ["MINERU_API_ENABLED"] = raw_value
+                exit_code = check_mineru.main(["--json", "--skip-api"])
+                payload = json.loads(output.getvalue())
+
+            self.assertEqual(0 if valid else 1, exit_code)
+            self.assertIs(payload["apiEnabled"], expected_enabled)
+            if valid:
+                self.assertTrue(payload["installed"])
+            else:
+                self.assertFalse(payload["installed"])
+                self.assertIn("MINERU_API_ENABLED", payload["error"])
 
     def test_json_output_is_exactly_one_line(self):
         output = io.StringIO()
