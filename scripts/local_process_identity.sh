@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
 LOCAL_PID_RECORD_VERSION=1
+TERMINATION_TARGET_MATCH=0
+TERMINATION_TARGET_CONFIRMED_EXITED=10
+TERMINATION_TARGET_IDENTITY_UNAVAILABLE=11
+TERMINATION_TARGET_IDENTITY_CHANGED=12
+TERMINATION_TARGET_SIGNATURE_MISMATCH=20
 
 local_pid_is_running() {
   local pid="$1"
@@ -196,14 +201,34 @@ termination_target_status() {
   local screen_session="$5"
   local current_start
 
-  local_pid_is_running "${pid}" || return 10
+  local_pid_is_running "${pid}" || return "${TERMINATION_TARGET_CONFIRMED_EXITED}"
   current_start="$(process_start_identity "${pid}" || true)"
-  [[ -n "${current_start}" && "${current_start}" == "${expected_start}" ]] || return 10
-  if [[ -n "${screen_session}" ]]; then
-    screen_pid_matches_service "${service}" "${pid}" "${root}" "${screen_session}" || return 20
-  else
-    pid_matches_service "${service}" "${pid}" "${root}" || return 20
+  if [[ -z "${current_start}" ]]; then
+    if local_pid_is_running "${pid}"; then
+      return "${TERMINATION_TARGET_IDENTITY_UNAVAILABLE}"
+    fi
+    return "${TERMINATION_TARGET_CONFIRMED_EXITED}"
   fi
+  if [[ "${current_start}" != "${expected_start}" ]]; then
+    return "${TERMINATION_TARGET_IDENTITY_CHANGED}"
+  fi
+  if [[ -n "${screen_session}" ]]; then
+    screen_pid_matches_service "${service}" "${pid}" "${root}" "${screen_session}" && \
+      return "${TERMINATION_TARGET_MATCH}"
+  else
+    pid_matches_service "${service}" "${pid}" "${root}" && return "${TERMINATION_TARGET_MATCH}"
+  fi
+
+  local_pid_is_running "${pid}" || return "${TERMINATION_TARGET_CONFIRMED_EXITED}"
+  current_start="$(process_start_identity "${pid}" || true)"
+  if [[ -z "${current_start}" ]]; then
+    if local_pid_is_running "${pid}"; then
+      return "${TERMINATION_TARGET_IDENTITY_UNAVAILABLE}"
+    fi
+    return "${TERMINATION_TARGET_CONFIRMED_EXITED}"
+  fi
+  [[ "${current_start}" == "${expected_start}" ]] || return "${TERMINATION_TARGET_IDENTITY_CHANGED}"
+  return "${TERMINATION_TARGET_SIGNATURE_MISMATCH}"
 }
 
 terminate_pid_verified() {
@@ -231,7 +256,10 @@ terminate_pid_verified() {
 
   local_pid_is_running "${pid}" || return 0
   expected_start="$(process_start_identity "${pid}" || true)"
-  [[ -n "${expected_start}" ]] || return 0
+  if [[ -z "${expected_start}" ]]; then
+    local_pid_is_running "${pid}" && return 1
+    return 0
+  fi
   if [[ -n "${prior_expected_start}" && "${expected_start}" != "${prior_expected_start}" ]]; then
     return 0
   fi
@@ -239,8 +267,8 @@ terminate_pid_verified() {
   status=0
   termination_target_status "${pid}" "${expected_start}" "${service}" "${root}" "${screen_session}" || status=$?
   case "${status}" in
-    0) ;;
-    10) return 0 ;;
+    "${TERMINATION_TARGET_MATCH}") ;;
+    "${TERMINATION_TARGET_CONFIRMED_EXITED}"|"${TERMINATION_TARGET_IDENTITY_CHANGED}") return 0 ;;
     *) return 1 ;;
   esac
 
@@ -250,8 +278,8 @@ terminate_pid_verified() {
     status=0
     termination_target_status "${pid}" "${expected_start}" "${service}" "${root}" "${screen_session}" || status=$?
     case "${status}" in
-      0) ;;
-      10) return 0 ;;
+      "${TERMINATION_TARGET_MATCH}") ;;
+      "${TERMINATION_TARGET_CONFIRMED_EXITED}"|"${TERMINATION_TARGET_IDENTITY_CHANGED}") return 0 ;;
       *) return 1 ;;
     esac
     sleep "${interval}"
@@ -261,8 +289,8 @@ terminate_pid_verified() {
   status=0
   termination_target_status "${pid}" "${expected_start}" "${service}" "${root}" "${screen_session}" || status=$?
   case "${status}" in
-    0) ;;
-    10) return 0 ;;
+    "${TERMINATION_TARGET_MATCH}") ;;
+    "${TERMINATION_TARGET_CONFIRMED_EXITED}"|"${TERMINATION_TARGET_IDENTITY_CHANGED}") return 0 ;;
     *) return 1 ;;
   esac
   kill -9 "${pid}" 2>/dev/null || true
@@ -272,8 +300,8 @@ terminate_pid_verified() {
     status=0
     termination_target_status "${pid}" "${expected_start}" "${service}" "${root}" "${screen_session}" || status=$?
     case "${status}" in
-      0) ;;
-      10) return 0 ;;
+      "${TERMINATION_TARGET_MATCH}") ;;
+      "${TERMINATION_TARGET_CONFIRMED_EXITED}"|"${TERMINATION_TARGET_IDENTITY_CHANGED}") return 0 ;;
       *) return 1 ;;
     esac
     sleep "${interval}"

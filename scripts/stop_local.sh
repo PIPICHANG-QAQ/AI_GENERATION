@@ -53,7 +53,15 @@ stop_pid_file() {
   if [[ "${versioned}" == "true" ]]; then
     local current_start
     current_start="$(process_start_identity "${pid}" || true)"
-    if [[ -z "${current_start}" || "${current_start}" != "${recorded_start}" ]]; then
+    if [[ -z "${current_start}" ]]; then
+      if local_pid_is_running "${pid}"; then
+        echo "refusing to stop PID ${pid}: start identity unavailable" >&2
+        return 1
+      fi
+      rm -f -- "${file}"
+      return 0
+    fi
+    if [[ "${current_start}" != "${recorded_start}" ]]; then
       echo "refusing to stop PID ${pid}: start identity mismatch" >&2
       return 1
     fi
