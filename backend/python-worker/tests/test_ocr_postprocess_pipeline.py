@@ -162,6 +162,79 @@ def test_normalize_office_html_tables_converts_table_after_three_spaces() -> Non
     assert ocr_processing.normalize_office_html_tables(markdown) == "before\n   1. real question\nafter"
 
 
+def test_normalize_office_html_tables_preserves_blockquote_fences_and_indented_code() -> None:
+    markdown = (
+        "> ```html\n"
+        "> <table><tr><td>99. blockquote backtick</td></tr></table>\n"
+        "> ```\n"
+        ">   ~~~~html\n"
+        "> <table><tr><td>98. blockquote tilde</td></tr></table>\n"
+        ">   ~~~~\n"
+        "> > ```html\n"
+        "> > <table><tr><td>97. nested blockquote</td></tr></table>\n"
+        "> > ```\n"
+        ">     <table><tr><td>96. blockquote indented code</td></tr></table>\n"
+        ">\t<table><tr><td>95. blockquote tab code</td></tr></table>\n"
+        "<table><tr><td><p>1. external question</p></td></tr></table>"
+    )
+    expected = markdown.rsplit("<table", 1)[0] + "1. external question"
+
+    assert ocr_processing.normalize_office_html_tables(markdown) == expected
+
+
+def test_normalize_office_html_tables_preserves_unclosed_blockquote_fence_to_end() -> None:
+    markdown = (
+        "before\n"
+        "> ```html\n"
+        "> <table><tr><td>99. code example</td></tr></table>\n"
+        "<table><tr><td>1. still protected to end</td></tr></table>"
+    )
+
+    assert ocr_processing.normalize_office_html_tables(markdown) == markdown
+
+
+def test_normalize_office_html_tables_preserves_inline_text_semantics() -> None:
+    markdown = (
+        "<table><tr>"
+        "<td><span>1</span><span>.</span><span> question</span></td>"
+        "<td>H<sub>2</sub>O</td>"
+        "</tr></table>"
+    )
+
+    assert ocr_processing.normalize_office_html_tables(markdown) == "1. question\nH2O"
+
+
+def test_normalize_office_html_tables_ignores_nonvisible_content() -> None:
+    markdown = (
+        "<table><tr><td>"
+        "<script>99. script fake</script>"
+        "<style>98. style fake</style>"
+        "<template>97. template fake</template>"
+        "<noscript>96. noscript fake</noscript>"
+        "<span hidden>95. hidden fake</span>"
+        "<span aria-hidden=\"true\">94. aria fake</span>"
+        "<span style=\"display: none\">93. style hidden fake</span>"
+        "<span>1. visible question</span>"
+        "</td></tr></table>"
+    )
+
+    assert ocr_processing.normalize_office_html_tables(markdown) == "1. visible question"
+
+
+def test_normalize_office_html_tables_decodes_entities_and_separates_cells_and_blocks() -> None:
+    markdown = (
+        "<table>"
+        "<tr><th><h2><span>1</span><span>.</span>&nbsp;A&nbsp;&amp;&nbsp;B</h2></th></tr>"
+        "<tr><td><div>A<span>.</span>&nbsp;first</div></td><td>B. second</td></tr>"
+        "<tr><td><ul><li>C. third</li><li>D. fourth</li></ul></td></tr>"
+        "</table>"
+    )
+
+    assert ocr_processing.normalize_office_html_tables(markdown) == (
+        "1. A & B\nA. first\nB. second\nC. third\nD. fourth"
+    )
+
+
 def test_collect_outputs_facade_delegates_to_single_pipeline_instance() -> None:
     expected = {"questions": []}
 
@@ -568,6 +641,74 @@ def test_run_bundle_preserves_indented_code_while_normalizing_xlsx_table(tmp_pat
         "\t<table><tr><td>98. tab code</td></tr></table>\n\n"
         "1. x + 1 = 2, find x.\nA. 0 B. 1 C. 2 D. 3"
     )
+    assert len(outputs["questions"]) == 1
+    assert outputs["questions"][0]["number"] == 1
+
+
+def test_run_bundle_preserves_blockquote_code_while_normalizing_xlsx_table(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    canonical_markdown = (
+        "> ```html\n"
+        "> <table><tr><td>99. fenced example</td></tr></table>\n"
+        "> ```\n"
+        ">     <table><tr><td>98. indented example</td></tr></table>\n\n"
+        "<table>\n"
+        "  <tr><th><p>1. x + 1 = 2, find x.</p></th></tr>\n"
+        "  <tr><td><p>A. 0   B. 1   C. 2   D. 3</p></td></tr>\n"
+        "</table>"
+    )
+    bundle = CanonicalOcrBundle(
+        document_id="blockquote-code-and-xlsx-table",
+        input_sha256="sha",
+        canonical_markdown=canonical_markdown,
+        artifact_root=str(artifact_root),
+    )
+
+    outputs = _run_bundle_deterministically(
+        bundle,
+        tmp_path / "outputs",
+        tmp_path / "postprocess",
+        visual_enabled=False,
+    )
+
+    assert outputs["markdown"] == (
+        "> ```html\n"
+        "> <table><tr><td>99. fenced example</td></tr></table>\n"
+        "> ```\n"
+        ">     <table><tr><td>98. indented example</td></tr></table>\n\n"
+        "1. x + 1 = 2, find x.\nA. 0 B. 1 C. 2 D. 3"
+    )
+    assert len(outputs["questions"]) == 1
+    assert outputs["questions"][0]["number"] == 1
+
+
+def test_run_bundle_uses_html_semantics_without_hidden_pseudo_questions(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    bundle = CanonicalOcrBundle(
+        document_id="html-semantics-question",
+        input_sha256="sha",
+        canonical_markdown=(
+            "<table>"
+            "<tr><td><script>99. fake question</script>"
+            "<style>98. fake question</style>"
+            "<span>1</span><span>.</span><span>&nbsp;real question</span></td></tr>"
+            "<tr><td>A<span>.</span>&nbsp;one &amp; only</td></tr>"
+            "<tr><td>B. two</td></tr>"
+            "</table>"
+        ),
+        artifact_root=str(artifact_root),
+    )
+
+    outputs = _run_bundle_deterministically(
+        bundle,
+        tmp_path / "outputs",
+        tmp_path / "postprocess",
+        visual_enabled=False,
+    )
+
+    assert outputs["markdown"] == "1. real question\nA. one & only\nB. two"
     assert len(outputs["questions"]) == 1
     assert outputs["questions"][0]["number"] == 1
 

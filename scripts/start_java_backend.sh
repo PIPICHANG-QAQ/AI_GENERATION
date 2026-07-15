@@ -13,4 +13,4 @@ export PYTHON_WORKER_ENABLED="${PYTHON_WORKER_ENABLED:-true}"
 export PYTHON_WORKER_BASE_URL="${PYTHON_WORKER_BASE_URL:-http://127.0.0.1:8000}"
 export PYTHON_WORKER_HEALTH_PATH="${PYTHON_WORKER_HEALTH_PATH:-/api/health}"
 
-mvn clean spring-boot:run -Dspring-boot.run.profiles="${SPRING_PROFILES_ACTIVE}"
+exec mvn clean spring-boot:run -Dspring-boot.run.profiles="${SPRING_PROFILES_ACTIVE}"

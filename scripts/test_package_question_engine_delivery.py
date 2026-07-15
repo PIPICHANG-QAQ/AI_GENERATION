@@ -9,6 +9,16 @@ import package_question_engine_delivery as delivery
 
 
 class DeliveryBoundaryTest(unittest.TestCase):
+    def test_local_process_identity_script_is_individually_required(self) -> None:
+        required = "scripts/local_process_identity.sh"
+
+        self.assertIn(required, delivery.REQUIRED_IN_PACKAGE)
+        files = [delivery.ROOT / relative for relative in delivery.REQUIRED_IN_PACKAGE if relative != required]
+        self.assertIn(
+            f"missing required delivery file: {required}",
+            delivery.validate(files),
+        )
+
     def test_local_stop_script_is_individually_required(self) -> None:
         required = "scripts/stop_local.sh"
 

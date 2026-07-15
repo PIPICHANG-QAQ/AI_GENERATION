@@ -7,6 +7,9 @@ LOG_DIR="${RUN_DIR}/logs"
 PID_DIR="${RUN_DIR}/pids"
 DEPLOY_ENV="${RUN_DIR}/deploy.env"
 
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/local_process_identity.sh"
+
 WITH_MINERU="false"
 WITH_AI="false"
 STRICT_PORTS="false"
@@ -102,84 +105,37 @@ port_is_free() {
   [[ -z "$(pids_on_port "$1")" ]]
 }
 
-pid_command() {
-  ps -p "$1" -o command= 2>/dev/null || true
-}
-
-pid_belongs_to_project() {
-  local pid="$1"
-  local command
-  command="$(pid_command "${pid}")"
-  [[ "${command}" == *"${ROOT_DIR}"* ]]
-}
-
-stop_pid() {
-  local pid="$1"
-  if ! kill -0 "${pid}" 2>/dev/null; then
-    return
-  fi
-  kill "${pid}" 2>/dev/null || true
-  for _ in $(seq 1 30); do
-    if ! kill -0 "${pid}" 2>/dev/null; then
-      return
-    fi
-    sleep 0.2
-  done
-  kill -9 "${pid}" 2>/dev/null || true
-}
-
-stop_pid_file() {
-  local service="$1"
-  local file="${PID_DIR}/${service}.pid"
-  if [[ ! -f "${file}" ]]; then
-    return
-  fi
-  local pid
-  pid="$(cat "${file}" 2>/dev/null || true)"
-  if [[ -n "${pid}" ]]; then
-    stop_pid "${pid}"
-  fi
-  rm -f "${file}"
-}
-
-stop_screen_session() {
-  local service="$1"
-  local session="${SCREEN_PREFIX}_${service//-/_}"
-  if command -v screen >/dev/null 2>&1 && screen -ls | grep -q "[.]${session}[[:space:]]"; then
-    screen -S "${session}" -X quit || true
-  fi
-}
-
 stop_current_project_pids() {
-  stop_screen_session "frontend"
-  stop_screen_session "java-backend"
-  stop_screen_session "python-worker"
-  stop_pid_file "frontend"
-  stop_pid_file "java-backend"
-  stop_pid_file "python-worker"
+  "${ROOT_DIR}/scripts/stop_local.sh"
 }
 
-stop_project_pids_on_port() {
-  local port="$1"
+stop_service_pids_on_port() {
+  local service="$1"
+  local port="$2"
   local pids
   pids="$(pids_on_port "${port}")"
   [[ -n "${pids}" ]] || return 0
   while IFS= read -r pid; do
     [[ -z "${pid}" ]] && continue
-    if pid_belongs_to_project "${pid}"; then
-      stop_pid "${pid}"
+    if ! pid_matches_service "${service}" "${pid}" "${ROOT_DIR}"; then
+      return 1
+    fi
+    if ! terminate_pid_verified "${pid}"; then
+      echo "Could not stop ${service} process ${pid} on port ${port}." >&2
+      return 1
     fi
   done <<< "${pids}"
 }
 
-all_port_pids_belong_to_project() {
-  local port="$1"
+all_port_pids_belong_to_service() {
+  local service="$1"
+  local port="$2"
   local pids
   pids="$(pids_on_port "${port}")"
   [[ -n "${pids}" ]] || return 1
   while IFS= read -r pid; do
     [[ -z "${pid}" ]] && continue
-    pid_belongs_to_project "${pid}" || return 1
+    pid_matches_service "${service}" "${pid}" "${ROOT_DIR}" || return 1
   done <<< "${pids}"
   return 0
 }
@@ -198,17 +154,22 @@ find_free_port() {
 }
 
 resolve_port() {
-  local label="$1"
-  local requested="$2"
+  local service="$1"
+  local label="$2"
+  local requested="$3"
   if port_is_free "${requested}"; then
     echo "${requested}"
     return
   fi
 
-  if all_port_pids_belong_to_project "${requested}"; then
+  if all_port_pids_belong_to_service "${service}" "${requested}"; then
     echo "Port ${requested} for ${label} is used by this project; restarting it." >&2
-    stop_project_pids_on_port "${requested}"
+    stop_service_pids_on_port "${service}" "${requested}"
     sleep 1
+    if ! port_is_free "${requested}"; then
+      echo "Port ${requested} for ${label} is still occupied after stop." >&2
+      exit 1
+    fi
     echo "${requested}"
     return
   fi
@@ -326,13 +287,14 @@ start_python_worker() {
   cat > "${command_file}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-echo \$\$ > "${PID_DIR}/python-worker.pid"
+source "${ROOT_DIR}/scripts/local_process_identity.sh"
 cd "${ROOT_DIR}"
 if [[ -f "${ROOT_DIR}/.env" ]]; then set -a; source "${ROOT_DIR}/.env"; set +a; fi
 args=(backend/python-worker/.venv/bin/python -m uvicorn app.main:app --app-dir backend/python-worker --host 127.0.0.1 --port "${PYTHON_WORKER_PORT}")
 if [[ "${DEV_RELOAD}" == "true" ]]; then
   args+=(--reload --reload-dir backend/python-worker/app --reload-include '*.py')
 fi
+write_pid_record_atomic "${PID_DIR}/python-worker.pid" "python-worker" \$\$
 exec "\${args[@]}" >> "${log_file}" 2>&1
 EOF
   chmod +x "${command_file}"
@@ -346,12 +308,13 @@ start_java_backend() {
   cat > "${command_file}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-echo \$\$ > "${PID_DIR}/java-backend.pid"
+source "${ROOT_DIR}/scripts/local_process_identity.sh"
 cd "${ROOT_DIR}"
 if [[ -f "${ROOT_DIR}/.env" ]]; then set -a; source "${ROOT_DIR}/.env"; set +a; fi
 export JAVA_BACKEND_PORT="${JAVA_BACKEND_PORT}"
 export SERVER_PORT="${JAVA_BACKEND_PORT}"
 export PYTHON_WORKER_BASE_URL="${PYTHON_WORKER_URL}"
+write_pid_record_atomic "${PID_DIR}/java-backend.pid" "java-backend" \$\$
 exec ./scripts/start_java_backend.sh >> "${log_file}" 2>&1
 EOF
   chmod +x "${command_file}"
@@ -365,12 +328,13 @@ start_frontend() {
   cat > "${command_file}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-echo \$\$ > "${PID_DIR}/frontend.pid"
+source "${ROOT_DIR}/scripts/local_process_identity.sh"
 cd "${ROOT_DIR}/local-platform"
 if [[ -f "${ROOT_DIR}/.env" ]]; then set -a; source "${ROOT_DIR}/.env"; set +a; fi
 export VITE_API_BASE="${JAVA_BACKEND_URL}"
 export VITE_API_BASE_URL="${JAVA_BACKEND_URL}"
-exec npm run dev -- --host 0.0.0.0 --port "${FRONTEND_PORT}" --strictPort >> "${log_file}" 2>&1
+write_pid_record_atomic "${PID_DIR}/frontend.pid" "frontend" \$\$
+exec ./node_modules/.bin/vite --host 0.0.0.0 --port "${FRONTEND_PORT}" --strictPort >> "${log_file}" 2>&1
 EOF
   chmod +x "${command_file}"
   start_detached "frontend" "${command_file}"
@@ -381,7 +345,6 @@ start_detached() {
   local command_file="$2"
   local session="${SCREEN_PREFIX}_${service//-/_}"
   if command -v screen >/dev/null 2>&1; then
-    stop_screen_session "${service}"
     screen -dmS "${session}" bash "${command_file}"
   else
     nohup bash "${command_file}" >/dev/null 2>&1 &
@@ -443,10 +406,10 @@ install_dependencies
 
 stop_current_project_pids
 
-PYTHON_WORKER_PORT="$(resolve_port "Python worker" "${PYTHON_WORKER_PORT}")"
-JAVA_BACKEND_PORT="$(resolve_port "Java backend" "${JAVA_BACKEND_PORT}")"
+PYTHON_WORKER_PORT="$(resolve_port "python-worker" "Python worker" "${PYTHON_WORKER_PORT}")"
+JAVA_BACKEND_PORT="$(resolve_port "java-backend" "Java backend" "${JAVA_BACKEND_PORT}")"
 if [[ "${FRONTEND_AVAILABLE}" == "true" ]]; then
-  FRONTEND_PORT="$(resolve_port "frontend" "${FRONTEND_PORT}")"
+  FRONTEND_PORT="$(resolve_port "frontend" "frontend" "${FRONTEND_PORT}")"
 fi
 
 PYTHON_WORKER_URL="http://127.0.0.1:${PYTHON_WORKER_PORT}"

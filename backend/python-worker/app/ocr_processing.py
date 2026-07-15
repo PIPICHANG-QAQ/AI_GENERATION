@@ -36,36 +36,114 @@ from app.ocr.contracts import CanonicalOcrBundle, validate_bundle_artifact_paths
 
 COMMONMARK_FENCE_OPEN_PATTERN = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)$")
 BACKTICK_RUN_PATTERN = re.compile(r"`+")
+BLOCKQUOTE_PREFIX_PATTERN = re.compile(r" {0,3}> ?")
+HTML_BLOCK_TAGS = {
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "caption",
+    "div",
+    "footer",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "ul",
+}
+HTML_IGNORED_CONTENT_TAGS = {"script", "style", "template", "noscript"}
+HTML_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+DISPLAY_NONE_PATTERN = re.compile(r"(?:^|;)\s*display\s*:\s*none(?:\s*!important)?\s*(?:;|$)", re.IGNORECASE)
 
 
 class _HtmlTableTextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self._current: list[str] = []
-        self._lines: list[str] = []
+        self._output: list[str] = []
+        self._pending_space = False
+        self._ignored_stack: list[str] = []
 
-    def _flush(self) -> None:
-        line = " ".join(self._current).strip()
-        if line:
-            self._lines.append(line)
-        self._current = []
+    def _boundary(self) -> None:
+        self._pending_space = False
+        if self._output and not self._output[-1].endswith("\n"):
+            self._output.append("\n")
 
-    def handle_starttag(self, tag: str, _attrs) -> None:
-        if tag.lower() in {"tr", "td", "th", "p", "br"}:
-            self._flush()
+    @staticmethod
+    def _is_hidden(tag: str, attrs) -> bool:
+        attributes = {str(key).lower(): "" if value is None else str(value) for key, value in attrs}
+        if tag in HTML_IGNORED_CONTENT_TAGS or "hidden" in attributes:
+            return True
+        if attributes.get("aria-hidden", "").strip().lower() in {"true", "1"}:
+            return True
+        return DISPLAY_NONE_PATTERN.search(attributes.get("style", "")) is not None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if self._ignored_stack:
+            if tag not in HTML_VOID_TAGS:
+                self._ignored_stack.append(tag)
+            return
+        if self._is_hidden(tag, attrs):
+            if tag not in HTML_VOID_TAGS:
+                self._ignored_stack.append(tag)
+            return
+        if tag in HTML_BLOCK_TAGS:
+            self._boundary()
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        tag = tag.lower()
+        if self._ignored_stack or self._is_hidden(tag, attrs):
+            return
+        if tag in HTML_BLOCK_TAGS:
+            self._boundary()
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in {"tr", "td", "th", "p", "br"}:
-            self._flush()
+        tag = tag.lower()
+        if self._ignored_stack:
+            if tag in self._ignored_stack:
+                while self._ignored_stack:
+                    ignored_tag = self._ignored_stack.pop()
+                    if ignored_tag == tag:
+                        break
+            return
+        if tag in HTML_BLOCK_TAGS:
+            self._boundary()
 
     def handle_data(self, data: str) -> None:
-        text = " ".join(data.split())
-        if text:
-            self._current.append(text)
+        if self._ignored_stack or not data:
+            return
+        text = re.sub(r"\s+", " ", data)
+        content = text.strip()
+        if not content:
+            if self._output and not self._output[-1].endswith("\n"):
+                self._pending_space = True
+            return
+        if (self._pending_space or data[0].isspace()) and self._output and not self._output[-1].endswith((" ", "\n")):
+            self._output.append(" ")
+        self._output.append(content)
+        self._pending_space = data[-1].isspace()
 
     def text(self) -> str:
-        self._flush()
-        return "\n".join(self._lines)
+        lines = (line.strip() for line in "".join(self._output).splitlines())
+        return "\n".join(line for line in lines if line)
 
 
 class _HtmlTableSpanLocator(HTMLParser):
@@ -116,17 +194,31 @@ def _line_content(line: str) -> str:
     return line
 
 
+def _strip_blockquote_prefix(content: str) -> tuple[str, int]:
+    offset = 0
+    depth = 0
+    while True:
+        prefix = BLOCKQUOTE_PREFIX_PATTERN.match(content, offset)
+        if prefix is None:
+            break
+        offset = prefix.end()
+        depth += 1
+    return content[offset:], depth
+
+
 def _fenced_code_ranges(markdown: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     fence_start: int | None = None
     fence_character = ""
     fence_length = 0
+    fence_blockquote_depth = 0
     offset = 0
 
     for line in markdown.splitlines(keepends=True):
         content = _line_content(line)
+        container_content, blockquote_depth = _strip_blockquote_prefix(content)
         if fence_start is None:
-            opening = COMMONMARK_FENCE_OPEN_PATTERN.fullmatch(content)
+            opening = COMMONMARK_FENCE_OPEN_PATTERN.fullmatch(container_content)
             if opening is not None:
                 fence = opening.group(1)
                 info = opening.group(2)
@@ -134,16 +226,18 @@ def _fenced_code_ranges(markdown: str) -> list[tuple[int, int]]:
                     fence_start = offset
                     fence_character = fence[0]
                     fence_length = len(fence)
+                    fence_blockquote_depth = blockquote_depth
         else:
             closing = re.fullmatch(
                 rf" {{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
-                content,
+                container_content,
             )
-            if closing is not None:
+            if closing is not None and blockquote_depth == fence_blockquote_depth:
                 ranges.append((fence_start, offset + len(line)))
                 fence_start = None
                 fence_character = ""
                 fence_length = 0
+                fence_blockquote_depth = 0
         offset += len(line)
 
     if fence_start is not None:
@@ -176,9 +270,10 @@ def _indented_code_ranges(markdown: str, start: int, end: int) -> list[tuple[int
 
     for line in markdown[start:end].splitlines(keepends=True):
         content = _line_content(line)
+        container_content, _blockquote_depth = _strip_blockquote_prefix(content)
         line_end = offset + len(line)
-        is_indented = re.match(r"^(?: {4,}| {0,3}\t)", content) is not None
-        is_blank = not content.strip(" \t")
+        is_indented = re.match(r"^(?: {4,}| {0,3}\t)", container_content) is not None
+        is_blank = not container_content.strip(" \t")
         if is_indented:
             if block_start is None:
                 block_start = offset
