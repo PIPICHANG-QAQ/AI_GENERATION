@@ -16,7 +16,7 @@ python scripts/check_mineru.py
 
 安装脚本会检测不可用的 `.venv` 并自动重建。MinerU 不作为源码内置二进制交付，而是安装进目标机器自己的 Python worker venv。
 
-`check_mineru.py` 的 `installed=true` 表示 OCR provider 已发现可执行入口。部分 MinerU 版本的 `--version` 启动较慢，可能显示 `version=null`、`versionProbeOk=false`；这只表示版本探测超时，不表示 OCR 入口不可用。
+`check_mineru.py` 的 `installed=true` 表示 OCR provider 的可执行入口可用，且已用该入口同一环境的 Python 通过深度运行时导入探测（`runtimeProbeOk=true`）。`--version` 仅提供兼容性信息；即使它超时并显示 `version=null`、`versionProbeOk=false`，只要运行时探测健康，OCR 仍可用。
 
 ## 保留能力
 

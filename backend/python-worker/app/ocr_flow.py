@@ -414,12 +414,6 @@ class MineruOcrProvider(OcrProvider):
             shebang_python_target,
         )
 
-    def _runtime_python_candidate(self, command: ProviderCommand) -> Path | None:
-        return self._resolve_runtime_target(command).python
-
-    def _runtime_python(self, command: ProviderCommand) -> Path | None:
-        return self._resolve_runtime_target(command).python
-
     @staticmethod
     def _mtime_ns(path: Path | None) -> int | None:
         if path is None:

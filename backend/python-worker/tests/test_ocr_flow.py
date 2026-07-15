@@ -84,6 +84,39 @@ class MineruOcrProviderTest(unittest.TestCase):
 
         return run
 
+    def _write_non_utf8_runtime(self, app_root: Path) -> tuple[ProviderCommand, Path]:
+        runtime_python = app_root / "env" / "bin" / "python"
+        runtime_python.parent.mkdir(parents=True)
+        runtime_python.symlink_to(Path(sys.executable))
+        fake_modules = app_root / "fake-modules"
+        fake_modules.mkdir()
+        (fake_modules / "markupsafe.py").write_text(
+            "import os\n"
+            "os.write(2, b'\\xffbad-runtime\\n')\n"
+            "raise ImportError('broken markupsafe')\n",
+            encoding="utf-8",
+        )
+        return (
+            ProviderCommand(
+                args=[str(runtime_python), "-m", "mineru"],
+                display=f"{runtime_python} -m mineru",
+                source="MINERU_COMMAND",
+            ),
+            fake_modules,
+        )
+
+    @staticmethod
+    def _healthy_version_probe(command: ProviderCommand) -> dict[str, object]:
+        return {
+            "source": command.source,
+            "command": command.display,
+            "returncode": 0,
+            "version": "3.4.2",
+            "valid": True,
+            "versionProbeOk": True,
+            "error": None,
+        }
+
     def test_absolute_script_runtime_probe_uses_verified_shebang_and_exact_imports(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp)
@@ -375,6 +408,50 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertEqual(12, run.call_count)
         self.assertEqual(1, len(MineruOcrProvider._runtime_probe_cache))
 
+    def test_runtime_probe_cache_is_bounded_to_thirty_two_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            provider = MineruOcrProvider(app_root, 5)
+            provider._monotonic = Mock(return_value=100.0)
+
+            with patch(
+                "app.ocr_flow.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as run:
+                for index in range(40):
+                    command_path = app_root / f"env-{index}" / "bin" / "mineru"
+                    self._write_python_mineru(command_path)
+                    provider._probe_runtime(self._provider_command(command_path))
+
+        self.assertEqual(40, run.call_count)
+        self.assertEqual(32, len(MineruOcrProvider._runtime_probe_cache))
+
+    def test_runtime_probe_lock_is_released_after_unexpected_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, _runtime_python = self._write_local_python_mineru(app_root)
+            provider = MineruOcrProvider(app_root, 5)
+            provider._monotonic = Mock(side_effect=[RuntimeError("unexpected clock failure"), 100.0, 100.0])
+
+            with patch(
+                "app.ocr_flow.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as run:
+                with self.assertRaisesRegex(RuntimeError, "unexpected clock failure"):
+                    provider._probe_runtime(self._provider_command(command_path))
+
+                original_lock = MineruOcrProvider._runtime_probe_lock
+                lock_released = original_lock.acquire(timeout=0.2)
+                if lock_released:
+                    original_lock.release()
+                else:
+                    MineruOcrProvider._runtime_probe_lock = threading.Lock()
+                probe = provider._probe_runtime(self._provider_command(command_path))
+
+        self.assertTrue(lock_released)
+        self.assertTrue(probe["runtimeProbeOk"])
+        self.assertEqual(1, run.call_count)
+
     def test_runtime_probe_cache_invalidates_when_command_or_interpreter_mtime_changes(self):
         for changed_file in ("command", "interpreter"):
             with self.subTest(changed_file=changed_file), tempfile.TemporaryDirectory() as tmp:
@@ -512,6 +589,39 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertTrue(probe["runtimeProbeOk"])
         self.assertEqual(str(python3.absolute()), run.call_args.args[0][0])
 
+    def test_relative_python_module_commands_use_exact_relative_interpreter(self):
+        original_cwd = Path.cwd()
+        try:
+            for executable_name in ("python", "python3"):
+                with self.subTest(executable_name=executable_name), tempfile.TemporaryDirectory() as tmp:
+                    app_root = Path(tmp)
+                    relative_python = Path("env") / "bin" / executable_name
+                    self._write_python_executable(app_root / relative_python)
+                    provider = MineruOcrProvider(app_root, 5)
+                    command = ProviderCommand(
+                        args=[str(relative_python), "-m", "mineru", "--flag"],
+                        display=f"{relative_python} -m mineru --flag",
+                        source="MINERU_COMMAND",
+                    )
+                    os.chdir(app_root)
+                    expected_python = relative_python.absolute()
+
+                    with patch(
+                        "app.ocr_flow.subprocess.run",
+                        return_value=subprocess.CompletedProcess([], 0, "", ""),
+                    ) as run:
+                        probe = provider._probe_runtime(command)
+
+                    os.chdir(original_cwd)
+                    self.assertTrue(probe["runtimeProbeOk"])
+                    self.assertEqual(str(expected_python), probe["runtimePython"])
+                    self.assertEqual(
+                        [str(expected_python), "-c", self.RUNTIME_IMPORT_PROBE],
+                        run.call_args.args[0],
+                    )
+        finally:
+            os.chdir(original_cwd)
+
     def test_python_named_shell_wrapper_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp)
@@ -579,22 +689,7 @@ class MineruOcrProviderTest(unittest.TestCase):
     def test_run_rejects_non_utf8_runtime_output_without_starting_ocr(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp)
-            runtime_python = app_root / "env" / "bin" / "python"
-            runtime_python.parent.mkdir(parents=True)
-            runtime_python.symlink_to(Path(sys.executable))
-            fake_modules = app_root / "fake-modules"
-            fake_modules.mkdir()
-            (fake_modules / "markupsafe.py").write_text(
-                "import os\n"
-                "os.write(2, b'\\xffbad-runtime\\n')\n"
-                "raise ImportError('broken markupsafe')\n",
-                encoding="utf-8",
-            )
-            command = ProviderCommand(
-                args=[str(runtime_python), "-m", "mineru"],
-                display=f"{runtime_python} -m mineru",
-                source="MINERU_COMMAND",
-            )
+            command, fake_modules = self._write_non_utf8_runtime(app_root)
             provider = MineruOcrProvider(app_root, 5)
             request = OcrProviderRequest(
                 document_id="job-invalid-utf8",
@@ -602,15 +697,6 @@ class MineruOcrProviderTest(unittest.TestCase):
                 output_dir=app_root / "outputs" / "job-invalid-utf8",
                 timeout_seconds=30,
             )
-            version_probe = {
-                "source": command.source,
-                "command": command.display,
-                "returncode": 0,
-                "version": "3.4.2",
-                "valid": True,
-                "versionProbeOk": True,
-                "error": None,
-            }
             real_subprocess_run = subprocess.run
             invocations: list[list[str]] = []
 
@@ -626,7 +712,7 @@ class MineruOcrProviderTest(unittest.TestCase):
                 ), patch.object(
                     provider,
                     "_probe_command",
-                    return_value=version_probe,
+                    return_value=self._healthy_version_probe(command),
                 ), patch(
                     "app.ocr_flow.subprocess.run",
                     side_effect=recording_run,
@@ -640,6 +726,37 @@ class MineruOcrProviderTest(unittest.TestCase):
             self.assertFalse(request.output_dir.exists())
             self.assertEqual(1, len(invocations))
             self.assertNotIn("-p", invocations[0])
+
+    def test_status_rejects_non_utf8_runtime_output_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command, fake_modules = self._write_non_utf8_runtime(app_root)
+            provider = MineruOcrProvider(app_root, 5)
+            real_subprocess_run = subprocess.run
+            invocations: list[list[str]] = []
+
+            def recording_run(args, **kwargs):
+                invocations.append(list(args))
+                return real_subprocess_run(args, **kwargs)
+
+            with patch.dict(os.environ, {"PYTHONPATH": str(fake_modules)}), patch.object(
+                provider,
+                "_command_candidates",
+                return_value=[command],
+            ), patch.object(
+                provider,
+                "_probe_command",
+                return_value=self._healthy_version_probe(command),
+            ), patch(
+                "app.ocr_flow.subprocess.run",
+                side_effect=recording_run,
+            ):
+                status = provider.status()
+
+        self.assertFalse(status["installed"])
+        self.assertFalse(status["runtimeProbeOk"])
+        self.assertIn("\ufffd", status["error"])
+        self.assertEqual(1, len(invocations))
 
     def test_runtime_subprocess_error_becomes_unavailable_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
