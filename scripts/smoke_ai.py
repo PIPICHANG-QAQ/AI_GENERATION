@@ -72,6 +72,38 @@ def wait_import_ready(task_id: str) -> dict[str, Any]:
     return last
 
 
+def wait_standardization_job(
+    task_id: str,
+    job_id: str,
+    timeout_seconds: float = 180,
+    poll_interval_seconds: float = 1,
+) -> dict[str, Any]:
+    active_statuses = {"queued", "running", "cancelling", "pending", "processing"}
+    successful_statuses = {"completed", "partial_review"}
+    deadline = time.monotonic() + timeout_seconds
+    last: dict[str, Any] = {}
+    while True:
+        payload = request(
+            "GET",
+            f"/api/import-tasks/{task_id}/standardization-jobs/{job_id}",
+            timeout=30,
+        )
+        last = payload if isinstance(payload, dict) else {"payload": payload}
+        status = str(last.get("status") or "").strip().lower()
+        if status not in active_statuses:
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"global standardization timed out; last payload: {last}")
+        time.sleep(poll_interval_seconds)
+
+    completed_items = int(last.get("completedItems") or 0)
+    total_items = int(last.get("totalItems") or 0)
+    failed_items = int(last.get("failedItems") or 0)
+    if status in successful_statuses and completed_items == total_items and failed_items == 0:
+        return last
+    raise AssertionError(f"global standardization failed; last payload: {last}")
+
+
 def main() -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as file:
         file.write("# AI 冒烟试卷\n\n1. 已知 $x+1=2$，求 $x$。\n\nA. 0\nB. 1\nC. 2\nD. 3\n")
@@ -138,6 +170,8 @@ def main() -> None:
     global_job_id = str(global_job.get("id") or "")
     ok("global standardization starts", bool(global_job_id), global_job)
     ok("global standardization item count", int(global_job.get("totalItems") or 0) >= 1, global_job)
+    completed_job = wait_standardization_job(task_id, global_job_id)
+    ok("global standardization completed", True, completed_job)
     print("ai smoke passed")
 
 
