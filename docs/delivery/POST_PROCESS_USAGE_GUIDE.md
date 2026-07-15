@@ -60,6 +60,7 @@ from app.ocr import (
 | `documentId` | string | 必须与当前 OCR job id 一致 |
 | `inputSha256` | string | 原文件内容哈希；无法读取原文件时可使用规范 Markdown 哈希 |
 | `canonicalMarkdown` | string | 非空；provider 归一后的完整 OCR Markdown |
+| `artifactRoot` | string | 兼容期显式必需；必须是已存在的只读工件目录 |
 
 ### 4.2 可选证据
 
@@ -69,7 +70,6 @@ from app.ocr import (
 | `pages[]` | 页码、页面宽高和可选页图引用 |
 | `layoutBlocks[]` | 文本/图片块的页码、bbox、阅读顺序、Markdown offset 和图片引用 |
 | `sourceDocumentRef` | 同机原文件路径或受控 URI |
-| `artifactRoot` | 当前兼容期的只读产物根目录 |
 | `markdownArtifactPath` / `jsonArtifactPath` | 相对 `artifactRoot` 的持久化工件路径 |
 | `producer` | provider 名称、版本等非业务元数据 |
 | `nativeArtifacts[]` | 供诊断使用的 provider 原生工件清单；后处理不能依赖私有字段 |
@@ -80,7 +80,7 @@ from app.ocr import (
 
 | 等级 | 最低证据 | 预期效果 |
 | --- | --- | --- |
-| L0 | Markdown | 可进行基础拆题和公式处理，复杂题图/版面可能需要人工复核 |
+| L0 | Markdown + artifactRoot；不要求 assets/layout | 可进行基础拆题和公式处理，复杂题图/版面可能需要人工复核 |
 | L1 | Markdown + embedded-images | 可建立题图库并处理 Markdown 图片引用 |
 | L2 | L1 + layout-bbox + source-page | 可使用二维版面证据提高题目框、选项和题图归属准确度 |
 
@@ -138,19 +138,20 @@ app/ocr/
 进入后处理前至少执行以下校验：
 
 - schema 版本受支持；
-- `documentId`、`inputSha256`、`canonicalMarkdown` 非空；
+- `documentId`、`inputSha256`、`canonicalMarkdown`、`artifactRoot` 非空；
 - `documentId` 与当前 job 一致；
+- `artifactRoot` 必须解析为已存在目录；
 - Markdown 图片引用可在 `assets` 中解析；
 - 页码唯一且非负，页面尺寸为正；
 - bbox 为 `[x0, y0, x1, y1]` 且坐标有序；
-- 相对工件路径不能越过 `artifactRoot`；
-- 持久化 manifest 引用的 Markdown/JSON 文件真实存在。
+- 非空 `markdownArtifactPath`、`jsonArtifactPath`、`assets[].path` 和 `nativeArtifacts[].path` 必须是 `artifactRoot` 内真实存在的相对文件；绝对路径和包含 `..` 的路径一律拒绝；
+- `sourceDocumentRef.path` 是原文件引用，不受 artifactRoot 包含性约束。
 
 契约错误应直接失败并记录明确原因，不允许静默降级成错误题目结构。
 
 ## 8. 输出与兼容性
 
-`run_bundle()` 当前复用既有 `collect_outputs_impl()`，最终 outputs 的字段、算法顺序、LLM 路由和异常传播保持不变。主要输出包括：
+`run_bundle()` 当前复用既有 `collect_outputs_impl()`。确定性工件测试已验证默认 adapter 的 `run(jobId)` 与显式 `run_bundle(bundle)` 归一化 outputs 一致；该证据不等同于受控真实语料准确率或性能结论。主要输出包括：
 
 - `questions`、`sections` 和题目结构证据；
 - `assets`、题图库、`imagePlacements` 和布局信息；
@@ -172,10 +173,10 @@ cd backend/python-worker
 
 1. bundle 序列化/恢复和非法输入；
 2. provider adapter 对同一工件的确定性；
-3. `run(jobId)` 与 `run_bundle(bundle)` 输出等价；
+3. `run(jobId)` 与 `run_bundle(bundle)` 在确定性工件上的归一化输出等价；
 4. 黄金样本的题数、选项数、小问数、题图资产守恒和 placement；
 5. LLM/OCR 调用数量、顺序和并发无意外变化；
-6. 延迟、内存和工件体积不劣于当前基线；
+6. 延迟、内存和工件体积通过受控 baseline 比较；当前 `tests/ocrflow-performance/baseline-ref.json` 仍为 `pending-controlled-baseline`，门禁未完成；
 7. 失败时保留可诊断 manifest，且不覆盖人工校验结果。
 
 ## 10. 常见问题
@@ -191,3 +192,5 @@ cd backend/python-worker
 ### 是否可以从 Java 直接调用 run_bundle
 
 当前不建议。Java/平台调用现有 Question Engine SDK；Python worker 内的 provider 通过 `app.ocr` 嵌入式入口调用。待 Artifact Resolver 和异步服务契约完成后，再评估独立远程 Post Process SDK。
+
+当前已有结构、工具和确定性工件回归证据；受控真实试卷语料 gate 与受控性能 baseline 均仍待建立，不得用本地临时 benchmark 结果替代。

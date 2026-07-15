@@ -16,6 +16,11 @@ from app import worker_base
 
 
 class MineruOcrProviderTest(unittest.TestCase):
+    def _temporary_artifact_root(self) -> str:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return directory.name
+
     def _write_local_mineru(self, app_root: Path, content: str) -> Path:
         command = app_root / ".venv" / "bin" / "mineru"
         command.parent.mkdir(parents=True)
@@ -110,7 +115,12 @@ class MineruOcrProviderTest(unittest.TestCase):
     def test_orchestrator_runs_postprocess_after_provider_artifacts_exist(self):
         job = {"id": "job-1", "status": "running"}
         provider = Mock()
-        bundle = CanonicalOcrBundle(document_id="job-1", input_sha256="sha", canonical_markdown="1. 题目")
+        bundle = CanonicalOcrBundle(
+            document_id="job-1",
+            input_sha256="sha",
+            canonical_markdown="1. 题目",
+            artifact_root=self._temporary_artifact_root(),
+        )
         provider.run.return_value = OcrProviderResult(success=True, bundle=bundle, metadata={"ocrProvider": "external"})
         written_jobs: list[dict] = []
 
@@ -133,7 +143,12 @@ class MineruOcrProviderTest(unittest.TestCase):
     def test_orchestrator_marks_job_failed_when_postprocess_rejects_artifacts(self):
         job = {"id": "job-1", "status": "running"}
         provider = Mock()
-        bundle = CanonicalOcrBundle(document_id="job-1", input_sha256="sha", canonical_markdown="1. 题目")
+        bundle = CanonicalOcrBundle(
+            document_id="job-1",
+            input_sha256="sha",
+            canonical_markdown="1. 题目",
+            artifact_root=self._temporary_artifact_root(),
+        )
         provider.run.return_value = OcrProviderResult(success=True, bundle=bundle)
 
         with patch.object(ocr_execution, "read_job", side_effect=lambda _job_id: job), \
@@ -165,7 +180,12 @@ class MineruOcrProviderTest(unittest.TestCase):
     def test_orchestrator_rejects_bundle_for_another_job(self):
         job = {"id": "job-1", "status": "running"}
         provider = Mock()
-        wrong_bundle = CanonicalOcrBundle(document_id="job-2", input_sha256="sha", canonical_markdown="1. 错题")
+        wrong_bundle = CanonicalOcrBundle(
+            document_id="job-2",
+            input_sha256="sha",
+            canonical_markdown="1. 错题",
+            artifact_root=self._temporary_artifact_root(),
+        )
         provider.run.return_value = OcrProviderResult(success=True, bundle=wrong_bundle)
 
         with patch.object(ocr_execution, "read_job", side_effect=lambda _job_id: job), \

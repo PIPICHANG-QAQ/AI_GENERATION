@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.ocr.contracts import CanonicalOcrBundle
+from app.ocr.contracts import CanonicalOcrBundle, validate_bundle_artifact_paths
 
 
 class OcrPostProcessingPipeline:
@@ -31,6 +31,7 @@ class OcrPostProcessingPipeline:
 
     def run_bundle(self, bundle: CanonicalOcrBundle) -> dict[str, Any]:
         """Run question post-processing from explicit, provider-neutral evidence."""
+        validate_bundle_artifact_paths(bundle)
         # Import lazily to avoid a cycle: ocr_processing owns the legacy
         # façade and imports this class at module import time.
         from app.ocr_processing import collect_outputs_impl

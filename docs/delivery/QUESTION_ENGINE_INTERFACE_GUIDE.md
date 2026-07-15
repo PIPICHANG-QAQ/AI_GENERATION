@@ -10,7 +10,7 @@
 - 创建加工任务、查询任务、获取标准题目包、人工校验、AI 解析、题图、导出和回调的出入参。
 - Python worker 在工程中的职责，以及平台侧不应直接依赖的兼容接口。
 
-本说明书是开发者使用入口；正式机器可读契约以 `question-engine/openapi/question-engine.v1.yaml` 为准。当前 OpenAPI 契约版本为 `1.2.0`，新增强类型 OCR provider/Post Process 能力描述，`question-package.v1` 输出包结构保持兼容。
+本说明书是开发者使用入口；正式机器可读契约以 `question-engine/openapi/question-engine.v1.yaml` 为准。当前 OpenAPI 契约版本为 `1.2.0`，新增顶层类型化 OCR 能力 descriptor；provider/Post Process 嵌套契约保留为可扩展 Map，`question-package.v1` 输出包结构保持兼容。
 
 ## 2. question-engine 作用
 
@@ -408,7 +408,7 @@ GET /api/capabilities/ocr-flow
 | `providerContract.status` | provider 可用性、命令位置、版本和错误原因 |
 | `providerContract.run` | 输入 jobId、uploadPath、runtime，原生结果经 adapter 转成统一 OCR 证据包 |
 | `providerContract.outputSchema` | 固定为 `canonical-ocr-bundle.v1` |
-| `providerContract.requiredEvidence` | documentId、inputSha256、canonicalMarkdown |
+| `providerContract.requiredEvidence` | documentId、inputSha256、canonicalMarkdown、artifactRoot；兼容期 root 必须是已存在目录 |
 | `postProcessContract.inputSchema` | Post Process 接收的统一证据包版本 |
 | `postProcessContract.entrypoint` | Python worker 内的稳定嵌入式入口 |
 | `postProcessContract.outputCompatibility` | 兼容现有 `collect_outputs` 外观 |

@@ -60,7 +60,7 @@
 - `GET /api/capabilities/question-processing/jobs/{jobId}/question-package` 必须返回 `question-package.v1`，包含任务、原文件、题目、题图、可选 `imagePlacements`、答案、解析、知识点候选、难度候选、分值候选和 source evidence。
 - `question-engine/openapi/question-engine.v1.yaml` 必须存在，并作为平台契约和 SDK 的源头。
 - `question-engine/sdk/generated/typescript` 和 `question-engine/sdk/generated/java` 必须存在，并至少覆盖能力目录、engine 目录、加工任务创建/查询和题目包获取。
-- OpenAPI `1.2.0` 的 TypeScript/Java SDK 必须包含强类型 `getOcrFlowCapability()`。
+- OpenAPI `1.2.0` 的 TypeScript/Java SDK 必须包含类型化 `getOcrFlowCapability()`；descriptor 顶层字段有稳定类型，`providerContract` / `postProcessContract` 保持可扩展 Map。
 - `question-engine/sdk/examples` 只能作为旧手写 SDK 示例，不得作为平台正式集成主入口。
 
 ## OCR-Flow
@@ -68,9 +68,10 @@
 - `GET /api/capabilities/ocr-flow` 必须返回 provider 合约、默认 provider、配置键和 worker endpoints。
 - 能力描述必须声明 `providerContract.outputSchema=canonical-ocr-bundle.v1`、`postProcessContract.inputSchema=canonical-ocr-bundle.v1` 和兼容输出策略。
 - `app.ocr` 必须公开 `CanonicalOcrBundle` 与 `OcrPostProcessingPipeline`；Post Process 不得导入新 provider 的私有字段。
-- 非法 schema、缺失 Markdown、无法解析的图片引用、越界 artifact path 和错误 bbox 必须在进入后处理前失败。
-- 默认 MinerU adapter 的 `run(jobId)` 与等价 bundle 的 `run_bundle(bundle)` 必须保持最终 outputs 一致。
-- 替换 provider 的黄金样本必须比较题数、选项、小问、题图 placement、公式、LLM/OCR 调用数量与延迟，不得只比较任务是否成功。
+- 非法 schema、缺失 Markdown/`artifactRoot`、不存在的根目录、无法解析的图片引用、绝对/越界/不存在的已声明 artifact path 和错误 bbox 必须在进入后处理前以 `CanonicalOcrBundleError` 失败；`sourceDocumentRef.path` 不受根目录包含性约束。
+- 默认 MinerU adapter 的 `run(jobId)` 与等价 bundle 的 `run_bundle(bundle)` 必须在确定性工件测试中保持归一化 outputs 一致，并确认两条路径均执行真实 `collect_outputs_impl()`。
+- 替换 provider 的受控真实语料 gate 必须比较题数、选项、小问、题图 placement、公式、LLM/OCR 调用数量与延迟，不得只比较任务是否成功；该 gate 当前仍待执行。
+- `tests/ocrflow-performance/baseline-ref.json` 为 `pending-controlled-baseline` 时，性能验收保持未完成，不得现场录制或伪造 compare 基线。
 - `GET /api/capabilities/ocr-flow/runtime` 在 Python worker 可达时必须返回 `selectedProvider`、`availableProviders`、`allowedExtensions` 和 provider 状态。
 - OCR 上传必须支持 `.pdf`、图片、`.md/.markdown`、`.doc`、`.docx`、`.pptx`、`.xlsx`。
 - `.md/.markdown` 必须直接进入结构化解析。

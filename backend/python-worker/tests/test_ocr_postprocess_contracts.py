@@ -21,7 +21,38 @@ def test_ocr_package_exposes_stable_postprocess_entrypoints() -> None:
     assert callable(OcrPostProcessingPipeline.run_bundle)
 
 
-def test_l2_bundle_serializes_layout_assets_and_source_reference() -> None:
+def test_minimum_bundle_requires_artifact_root() -> None:
+    with pytest.raises(CanonicalOcrBundleError, match="artifactRoot is required"):
+        CanonicalOcrBundle(
+            document_id="job-minimum",
+            input_sha256="input-sha",
+            canonical_markdown="1. 最小题目",
+        )
+
+
+def test_minimum_l0_bundle_accepts_exact_required_evidence(tmp_path) -> None:
+    bundle = CanonicalOcrBundle.from_dict(
+        {
+            "schemaVersion": "canonical-ocr-bundle.v1",
+            "documentId": "job-minimum",
+            "inputSha256": "input-sha",
+            "canonicalMarkdown": "1. 最小题目",
+            "artifactRoot": str(tmp_path),
+        }
+    )
+
+    assert bundle.capability_level == "L0"
+    assert bundle.assets == ()
+    assert bundle.pages == ()
+    assert bundle.layout_blocks == ()
+
+
+def test_l2_bundle_serializes_layout_assets_and_source_reference(tmp_path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    (artifact_root / "images").mkdir(parents=True)
+    (artifact_root / "images" / "figure.png").write_bytes(b"figure")
+    source_path = tmp_path / "source.pdf"
+    source_path.write_bytes(b"pdf")
     bundle = CanonicalOcrBundle(
         document_id="job-1",
         input_sha256="input-sha",
@@ -49,8 +80,8 @@ def test_l2_bundle_serializes_layout_assets_and_source_reference() -> None:
                 image_ref="images/figure.png",
             ),
         ),
-        source_document_ref=SourceDocumentRef(path="/tmp/source.pdf"),
-        artifact_root="/tmp/outputs/job-1",
+        source_document_ref=SourceDocumentRef(path=str(source_path)),
+        artifact_root=str(artifact_root),
         producer={"name": "mineru", "version": "2"},
         capabilities=frozenset({"markdown", "embedded-images", "layout-bbox", "source-page"}),
     )
@@ -61,7 +92,7 @@ def test_l2_bundle_serializes_layout_assets_and_source_reference() -> None:
     assert payload["schemaVersion"] == "canonical-ocr-bundle.v1"
     assert payload["assets"][0]["assetId"] == "asset-figure"
     assert payload["layoutBlocks"][0]["pageWidth"] == 1000
-    assert payload["sourceDocumentRef"]["path"] == "/tmp/source.pdf"
+    assert payload["sourceDocumentRef"]["path"] == str(source_path)
     assert bundle.capability_level == "L2"
     assert restored == bundle
 
@@ -73,7 +104,9 @@ def test_l2_bundle_serializes_layout_assets_and_source_reference() -> None:
         ({"canonical_markdown": "1. ![](images/missing.png)"}, "markdown image reference has no asset"),
     ],
 )
-def test_bundle_rejects_missing_required_markdown_evidence(kwargs: dict[str, str], message: str) -> None:
+def test_bundle_rejects_missing_required_markdown_evidence(
+    tmp_path, kwargs: dict[str, str], message: str
+) -> None:
     defaults = {
         "document_id": "job-1",
         "input_sha256": "input-sha",
@@ -81,18 +114,22 @@ def test_bundle_rejects_missing_required_markdown_evidence(kwargs: dict[str, str
         "assets": (),
         "pages": (),
         "layout_blocks": (),
+        "artifact_root": str(tmp_path),
     }
 
     with pytest.raises(CanonicalOcrBundleError, match=message):
         CanonicalOcrBundle(**{**defaults, **kwargs})
 
 
-def test_bundle_accepts_image_path_relative_to_markdown_artifact() -> None:
+def test_bundle_accepts_image_path_relative_to_markdown_artifact(tmp_path) -> None:
+    (tmp_path / "auto" / "images").mkdir(parents=True)
+    (tmp_path / "auto" / "paper.md").write_text("1. 如图 ![](images/figure.png)", encoding="utf-8")
+    (tmp_path / "auto" / "images" / "figure.png").write_bytes(b"png")
     bundle = CanonicalOcrBundle(
         document_id="job-relative-image",
         input_sha256="input-sha",
         canonical_markdown="1. 如图 ![](images/figure.png)",
-        artifact_root="/tmp/provider-output",
+        artifact_root=str(tmp_path),
         markdown_artifact_path="auto/paper.md",
         assets=(
             OcrAsset(

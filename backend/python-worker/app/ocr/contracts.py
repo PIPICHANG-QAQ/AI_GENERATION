@@ -11,7 +11,7 @@ import re
 import json
 import posixpath
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
 
 
@@ -20,6 +20,21 @@ _MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 
 class CanonicalOcrBundleError(ValueError):
     """Raised when OCR evidence cannot safely enter post-processing."""
+
+
+def _resolve_declared_artifact(root: Path, relative_path: str, label: str) -> Path:
+    normalized = relative_path.replace("\\", "/")
+    declared = PurePosixPath(normalized)
+    if declared.is_absolute() or PureWindowsPath(relative_path).is_absolute() or ".." in declared.parts:
+        raise CanonicalOcrBundleError(f"{label} must be a relative path inside artifactRoot")
+    path = (root / Path(*declared.parts)).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise CanonicalOcrBundleError(f"{label} must be a relative path inside artifactRoot") from exc
+    if not path.is_file():
+        raise CanonicalOcrBundleError(f"declared artifact is unavailable: {relative_path}")
+    return path
 
 
 @dataclass(frozen=True)
@@ -155,6 +170,8 @@ class CanonicalOcrBundle:
             raise CanonicalOcrBundleError("inputSha256 is required")
         if not self.canonical_markdown.strip():
             raise CanonicalOcrBundleError("canonicalMarkdown is required")
+        if not self.artifact_root.strip():
+            raise CanonicalOcrBundleError("artifactRoot is required")
         if self.schema_version != "canonical-ocr-bundle.v1":
             raise CanonicalOcrBundleError("unsupported schemaVersion")
 
@@ -309,14 +326,28 @@ class CanonicalOcrBundle:
 
     @staticmethod
     def _resolve_artifact_path(root: Path, relative_path: str) -> Path:
-        path = (root / relative_path).resolve()
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise CanonicalOcrBundleError("persisted artifact path escapes artifactRoot") from exc
-        if not path.is_file():
-            raise CanonicalOcrBundleError(f"persisted artifact is unavailable: {relative_path}")
-        return path
+        return _resolve_declared_artifact(root, relative_path, "persisted artifact path")
 
     def _markdown_image_refs(self) -> list[str]:
         return [match.strip().strip("<>") for match in _MARKDOWN_IMAGE_RE.findall(self.canonical_markdown)]
+
+
+def validate_bundle_artifact_paths(bundle: CanonicalOcrBundle) -> Path:
+    """Validate every declared local artifact before post-processing reads it."""
+    root = Path(bundle.artifact_root).resolve()
+    if not root.is_dir():
+        raise CanonicalOcrBundleError(f"artifactRoot is not an existing directory: {bundle.artifact_root}")
+
+    declared_paths: list[tuple[str, str]] = [
+        ("markdownArtifactPath", bundle.markdown_artifact_path),
+        ("jsonArtifactPath", bundle.json_artifact_path),
+    ]
+    declared_paths.extend((f"assets[{index}].path", asset.path) for index, asset in enumerate(bundle.assets))
+    declared_paths.extend(
+        (f"nativeArtifacts[{index}].path", str(artifact.get("path") or ""))
+        for index, artifact in enumerate(bundle.native_artifacts)
+    )
+    for label, relative_path in declared_paths:
+        if relative_path:
+            _resolve_declared_artifact(root, relative_path, label)
+    return root

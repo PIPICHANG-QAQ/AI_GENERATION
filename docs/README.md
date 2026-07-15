@@ -59,7 +59,7 @@ docs/
 - [错误码与状态机](delivery/ERROR_AND_STATUS_GUIDE.md)：正式错误码、状态机、可重试规则和平台展示建议。
 - [验收标准与验收套件](delivery/ACCEPTANCE.md)：本期统一验收标准和插件级验收脚本。
 - [交付包说明](delivery/DELIVERY_PACKAGE.md)：交付包边界、清理规则、打包方式和交付前检查。
-- 当前 SDK/OpenAPI 版本为 `1.2.0`；新增强类型 `getOcrFlowCapability()`，`question-package.v1` 保持兼容。TOGO 移交包可通过 `scripts/package_question_engine_delivery.py --release-name ...` 生成带版本名的压缩包和 manifest。
+- 当前 SDK/OpenAPI 版本为 `1.2.0`；新增顶层类型化 `getOcrFlowCapability()`，嵌套 provider/Post Process 契约保持可扩展 Map，`question-package.v1` 保持兼容。TOGO 移交包可通过 `scripts/package_question_engine_delivery.py --release-name ...` 生成带版本名的压缩包和 manifest。
 
 ## Server
 

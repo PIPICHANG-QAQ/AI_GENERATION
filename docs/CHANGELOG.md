@@ -2,9 +2,11 @@
 
 ## 2026-07-15
 
-- OCR provider 与题库后处理改为显式 `Provider -> Adapter -> CanonicalOcrBundle v1 -> Post Process` 边界；MinerU 私有字段收敛到 `MineruOcrBundleAdapter`，现有拆题、题图、公式、AI 调用顺序和 outputs 保持兼容。
+- OCR provider 与题库后处理改为显式 `Provider -> Adapter -> CanonicalOcrBundle v1 -> Post Process` 边界；MinerU 私有字段收敛到 `MineruOcrBundleAdapter`，确定性工件测试验证两条入口的归一化 outputs 一致。受控真实语料与性能不回退 gate 仍待完成。
 - `app.ocr` 公开 provider-neutral Python 嵌入式入口；新增 Post Process 使用说明书和 ADR，明确当前不发布第二套远程算法 SDK，平台继续使用 Question Engine Java/TypeScript SDK。
-- OpenAPI 升级到 `1.2.0`；OCR-Flow 能力描述增加 `providerContract` / `postProcessContract` 强类型，TypeScript/Java SDK 新增 `getOcrFlowCapability()`。
+- 兼容期 `CanonicalOcrBundle` 明确要求真实 `artifactRoot`，统一拒绝绝对、越界或不存在的声明工件路径；`sourceDocumentRef.path` 保持外部原文件引用语义。
+- OpenAPI 升级到 `1.2.0`；OCR-Flow 新增顶层类型化能力 descriptor，`providerContract` / `postProcessContract` 保持可扩展 Map，TypeScript/Java SDK 新增 `getOcrFlowCapability()`。
+- 当前已有结构、工具、golden replay 和确定性工件 parity 证据；`tests/ocrflow-performance/baseline-ref.json` 仍为 `pending-controlled-baseline`，受控性能与真实语料 gate 未完成。
 - 更新后端、worker、开发、产品、接口、交付、验收和运维文档；OCR 主流程、工作台、Engine 边界、平台 SDK 和服务器流程图同步 provider-neutral 后处理与 Java durable 全局标准化流程。
 
 ## 2026-07-13

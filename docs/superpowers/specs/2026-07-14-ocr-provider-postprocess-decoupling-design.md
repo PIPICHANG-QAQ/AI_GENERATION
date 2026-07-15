@@ -14,9 +14,9 @@
 
 ## 能力等级
 
-- L0：Markdown/文本；仅支持基础文本拆题。
+- L0：Markdown/文本 + 兼容期 `artifactRoot`；不要求 assets/layout，仅支持基础文本拆题。
 - L1：L0 加图片资源和稳定图片引用；支持基础图文题。
-- L2：L1 加页码、页面尺寸、阅读顺序、布局 bbox 与源文件或页面渲染引用；才允许声明与当前完整准确率对齐。
+- L2：L1 加页码、页面尺寸、阅读顺序、布局 bbox 与源文件或页面渲染引用；才具备进入完整准确率对齐 gate 的证据条件，不代表已经达标。
 
 缺少 L2 的输入不会被伪装为完整能力：应返回能力告警和人工复核提示。第一轮只实现契约记录与验证，不改变现有流程的降级行为。
 
@@ -24,11 +24,13 @@
 
 必填字段：
 
-- `schemaVersion`、`documentId`、`inputSha256`、`canonicalMarkdown`。
+- `schemaVersion`、`documentId`、`inputSha256`、`canonicalMarkdown`、`artifactRoot`。
+
+可选证据：
+
 - `assets[]`：稳定 ID、相对路径、URL、大小、类型。
 - `layoutBlocks[]`：文本/图片块、页码、bbox、页面尺寸、阅读顺序、图片路径。
 - `sourceDocumentRef`：当前可读取上传文件的引用。
-- `artifactRoot`：兼容期内只读制品根目录。
 - `producer` 与 `nativeArtifacts`：审计信息，不作为后处理分支条件。
 
 第一轮的 bundle 刻意保留 `artifactRoot`。这避免为了抽象而改变当前图片、页图与视觉 crop 的 I/O 路径；后续才由 Artifact Resolver 取代这个兼容字段。
@@ -40,8 +42,8 @@
 - 题图资产路径/文件名匹配和人工确认保护不变。
 - 视觉预处理与边界识别并行、视觉修复并发上限不变。
 - 高置信本地边界跳过 LLM；低置信 LLM 兜底和结构校验回退不变。
-- Provider 与 LLM 调用次数不因解耦增加。
-- 原 `outputs` 的字段、嵌套和业务语义不变。
+- 确定性工件 parity 不新增 Provider/LLM 调用，真实语料调用数 gate 待受控验证。
+- 原 `outputs` 的字段、嵌套和业务语义以结构/工具回归和确定性工件 parity 为当前证据；真实语料与性能 gate 待完成。
 
 ## 首轮范围
 
@@ -56,7 +58,7 @@
 ## 验收
 
 - 既有 OCR flow、processing、postprocess facade 测试保持通过。
-- 新 Bundle 输入与旧 `collect_outputs(jobId)` 对相同 MinerU 制品产生逐字段相同的 OCR outputs。
-- 缺少 `canonicalMarkdown`、缺少图片引用或非法 bbox 的 bundle 被明确拒绝。
+- 新 Bundle 输入与旧 `collect_outputs(jobId)` 对确定性 MinerU 制品产生归一化后相同的 OCR outputs，且两条路径执行真实 `collect_outputs_impl()`。
+- 缺少 `canonicalMarkdown` / `artifactRoot`、不存在的声明文件、绝对/越界路径、缺少图片引用或非法 bbox 的 bundle 被明确拒绝。
 - L2 bundle 能保留页面、布局块和源文件引用。
-- 不新增 OCR/LLM 调用；基准回放和性能门禁继续可执行。
+- 结构、工具和 golden replay 继续可执行；受控真实语料与性能门禁仍待完成，`baseline-ref` 保持 `pending-controlled-baseline`。

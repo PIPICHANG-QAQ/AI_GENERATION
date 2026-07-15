@@ -159,7 +159,7 @@ components:
   schemas:
     CanonicalOcrBundle:
       type: object
-      required: [schemaVersion, documentId, inputSha256, canonicalMarkdown]
+      required: [schemaVersion, documentId, inputSha256, canonicalMarkdown, artifactRoot]
       properties:
         schemaVersion: {type: string, const: canonical-ocr-bundle.v1}
         documentId: {type: string}
@@ -169,7 +169,7 @@ components:
         pages: {type: array, items: {$ref: '#/components/schemas/CanonicalOcrPage'}}
         layoutBlocks: {type: array, items: {$ref: '#/components/schemas/CanonicalOcrLayoutBlock'}}
         sourceDocumentRef: {$ref: '#/components/schemas/CanonicalSourceDocumentRef'}
-        artifactRoot: {type: string}
+        artifactRoot: {type: string, minLength: 1}
         markdownArtifactPath: {type: string}
         jsonArtifactPath: {type: string}
         producer: {type: object, additionalProperties: true}

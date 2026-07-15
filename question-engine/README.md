@@ -17,7 +17,7 @@
 - SDK 发布说明：`question-engine/sdk/RELEASE.md`
 - OCR Post Process 使用说明：`docs/delivery/POST_PROCESS_USAGE_GUIDE.md`
 - 生成型 SDK：`question-engine/sdk/generated/typescript`、`question-engine/sdk/generated/java`
-- 当前契约版本：`1.2.0`，SDK 新增强类型 `getOcrFlowCapability()` 并公开 provider/Post Process 边界；`question-package.v1` 保持兼容
+- 当前契约版本：`1.2.0`，SDK 新增顶层类型化 `getOcrFlowCapability()`，其中 provider/Post Process 契约保持可扩展 Map；`question-package.v1` 保持兼容
 - 手写 SDK 示例：`question-engine/sdk/examples`
 - 平台最小接入样例：`examples/platform-integration`
 - 开发者接口说明书：`docs/delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md`

@@ -25,7 +25,7 @@ class OcrFlowCapabilityServiceTest {
         assertEquals("ocr-flow", descriptor.get("code"));
         assertEquals("canonical-ocr-bundle.v1", providerContract.get("outputSchema"));
         assertEquals(
-                List.of("documentId", "inputSha256", "canonicalMarkdown"),
+                List.of("documentId", "inputSha256", "canonicalMarkdown", "artifactRoot"),
                 providerContract.get("requiredEvidence")
         );
         assertEquals("canonical-ocr-bundle.v1", postProcessContract.get("inputSchema"));

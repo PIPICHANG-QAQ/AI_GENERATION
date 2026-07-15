@@ -25,14 +25,12 @@ from app.question_boundary import (
 from app.image_placement import reconcile_structure_image_placements
 from app.question_layout import load_image_placement_evidence
 from app.visual_repair import apply_visual_repairs, prepare_visual_repair_context
-from app.ocr.contracts import CanonicalOcrBundle
+from app.ocr.contracts import CanonicalOcrBundle, validate_bundle_artifact_paths
 
 
 def build_postprocess_input(bundle: CanonicalOcrBundle) -> dict[str, Any]:
     """Convert provider-neutral evidence into the unchanged algorithm input shape."""
-    if not bundle.artifact_root:
-        raise ValueError("artifactRoot is required by the current visual-repair compatibility mode")
-    output_dir = Path(bundle.artifact_root)
+    output_dir = validate_bundle_artifact_paths(bundle)
     markdown_path = output_dir / bundle.markdown_artifact_path if bundle.markdown_artifact_path else None
     json_path = output_dir / bundle.json_artifact_path if bundle.json_artifact_path else None
     return {

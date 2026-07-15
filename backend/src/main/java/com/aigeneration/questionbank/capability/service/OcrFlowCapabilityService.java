@@ -74,7 +74,7 @@ public class OcrFlowCapabilityService {
                 "status", "返回 provider 是否可用、命令位置、版本和错误原因。",
                 "run", "输入 jobId、uploadPath 和 runtime，输出 provider 原生结果并适配为统一 OCR 证据包。",
                 "outputSchema", "canonical-ocr-bundle.v1",
-                "requiredEvidence", List.of("documentId", "inputSha256", "canonicalMarkdown"),
+                "requiredEvidence", List.of("documentId", "inputSha256", "canonicalMarkdown", "artifactRoot"),
                 "optionalEvidence", List.of("assets", "pages", "layoutBlocks", "sourceDocumentRef", "producer", "nativeArtifacts", "capabilities")
         ));
         descriptor.put("postProcessContract", Map.of(
