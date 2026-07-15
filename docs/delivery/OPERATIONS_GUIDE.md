@@ -7,7 +7,7 @@
 | 组件 | 必选 | 职责 |
 | --- | --- | --- |
 | Java backend | 必选 | 对外能力 API、任务状态、文件元数据、OpenAPI/SDK 契约、callback-flow |
-| Python worker | 必选 | OCR provider 调用、拆题、公式处理、AI 标准化/解析、DOCX/PDF 导出 |
+| Python worker | 必选 | OCR provider、adapter、CanonicalOcrBundle、Post Process、公式、AI 标准化/解析、DOCX/PDF 导出 |
 | MySQL | 生产必选 | Java 业务表、任务表、题目快照、callback event |
 | 对象存储 / MinIO | 生产必选 | 上传原文件、题图、OCR 产物、导出文件 |
 | Redis | 推荐 | 缓存、限流、分布式锁或后续任务队列辅助 |
@@ -30,9 +30,12 @@ Python worker 的 `.venv` 必须在目标机器本地创建，不得从开发机
      -> MinIO / 平台对象存储
      -> DeepSeek / OpenAI-compatible LLM
      -> MinerU / OCR provider
+     -> provider adapter -> CanonicalOcrBundle -> Post Process
 ```
 
 Python worker、MySQL、Redis、MQ、MinIO 不应暴露公网。
+
+Post Process 当前是 worker 内嵌能力，不单独开放公网端口。新 provider 的原生工件必须在 adapter 层归一；运维侧应分别监控 provider 不可用、bundle 校验失败和后处理失败，不能把三类错误合并为笼统的 OCR failed。
 
 ## 3. 环境要求
 

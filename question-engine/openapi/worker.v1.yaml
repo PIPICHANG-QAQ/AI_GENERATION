@@ -1,8 +1,14 @@
 openapi: 3.1.0
 info:
   title: Question Engine Worker API
-  version: 1.0.0
-  description: Additive, versioned transport contract for OCR and post-processing workers.
+  version: 1.1.0
+  description: Additive, versioned transport contract for OCR and post-processing workers. OCR providers are normalized to canonical-ocr-bundle.v1 before the existing outputs are produced.
+x-embedded-contracts:
+  postProcessInput:
+    schema: '#/components/schemas/CanonicalOcrBundle'
+    pythonEntrypoint: app.ocr.OcrPostProcessingPipeline.run_bundle
+    transportPublished: false
+    note: Embedded worker contract; this revision does not expose a standalone HTTP Post Process operation.
 servers:
   - url: /
 paths:
@@ -151,6 +157,67 @@ components:
       schema:
         type: string
   schemas:
+    CanonicalOcrBundle:
+      type: object
+      required: [schemaVersion, documentId, inputSha256, canonicalMarkdown]
+      properties:
+        schemaVersion: {type: string, const: canonical-ocr-bundle.v1}
+        documentId: {type: string}
+        inputSha256: {type: string}
+        canonicalMarkdown: {type: string, minLength: 1}
+        assets: {type: array, items: {$ref: '#/components/schemas/CanonicalOcrAsset'}}
+        pages: {type: array, items: {$ref: '#/components/schemas/CanonicalOcrPage'}}
+        layoutBlocks: {type: array, items: {$ref: '#/components/schemas/CanonicalOcrLayoutBlock'}}
+        sourceDocumentRef: {$ref: '#/components/schemas/CanonicalSourceDocumentRef'}
+        artifactRoot: {type: string}
+        markdownArtifactPath: {type: string}
+        jsonArtifactPath: {type: string}
+        producer: {type: object, additionalProperties: true}
+        nativeArtifacts: {type: array, items: {type: object, additionalProperties: true}}
+        capabilities: {type: array, items: {type: string}}
+        capabilityLevel: {type: string, enum: [L0, L1, L2], readOnly: true}
+        json: {}
+      additionalProperties: true
+    CanonicalOcrAsset:
+      type: object
+      required: [assetId, path]
+      properties:
+        assetId: {type: string}
+        name: {type: string}
+        path: {type: string}
+        url: {type: string}
+        sizeBytes: {type: integer, minimum: 0}
+        mediaType: {type: string}
+    CanonicalOcrPage:
+      type: object
+      required: [pageIndex, width, height]
+      properties:
+        pageIndex: {type: integer, minimum: 0}
+        width: {type: number, exclusiveMinimum: 0}
+        height: {type: number, exclusiveMinimum: 0}
+        renderRef: {type: string}
+    CanonicalOcrLayoutBlock:
+      type: object
+      required: [blockId, type, pageIndex, bbox, order]
+      properties:
+        blockId: {type: string}
+        type: {type: string}
+        text: {type: string}
+        imageRef: {type: string}
+        pageIndex: {type: integer, minimum: 0}
+        bbox: {type: array, minItems: 4, maxItems: 4, items: {type: number}}
+        pageWidth: {type: number, exclusiveMinimum: 0}
+        pageHeight: {type: number, exclusiveMinimum: 0}
+        order: {type: integer}
+        sourceOrder: {type: integer}
+        markdownStart: {type: integer, minimum: 0}
+        markdownEnd: {type: integer, minimum: 0}
+        coordinateSource: {type: string}
+    CanonicalSourceDocumentRef:
+      type: object
+      properties:
+        path: {type: string}
+        uri: {type: string}
     WorkerCapabilities:
       type: object
       required: [schemaVersion, operations]

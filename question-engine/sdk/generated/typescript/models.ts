@@ -42,6 +42,21 @@ export type QuestionProcessingDescriptor = {
   [key: string]: unknown;
 };
 
+export type OcrFlowDescriptor = {
+  code: "ocr-flow" | string;
+  name: string;
+  boundary: string;
+  defaultProvider: string;
+  providerContract: JsonObject;
+  postProcessContract: JsonObject;
+  preprocessors?: JsonObject[];
+  configKeys?: Record<string, string>;
+  javaEndpoints?: Record<string, string>;
+  workerEndpoints?: Record<string, string>;
+  replaceProviderStrategy?: string[];
+  [key: string]: unknown;
+};
+
 export type CreateProcessingJobInput = {
   paperFile: File | Blob;
   answerFile?: File | Blob;

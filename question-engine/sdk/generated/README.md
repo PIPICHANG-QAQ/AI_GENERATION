@@ -9,4 +9,4 @@
 
 当前轻量生成器只校验 OpenAPI 源文件和已检入 SDK 文件是否存在；在接入完整 OpenAPI Generator 前，新增能力必须同步更新 OpenAPI、TypeScript SDK、Java SDK、接口说明和回归测试。
 
-当前生成面覆盖 OpenAPI `1.1.0`，包括 `rescanImportTask(jobId)`、题图、AI 标准化、AI 解析和 callback 事件等平台集成主路径。
+当前生成面覆盖 OpenAPI `1.2.0`，包括 `getOcrFlowCapability()`、`rescanImportTask(jobId)`、题图、AI 标准化、AI 解析和 callback 事件等平台集成主路径。

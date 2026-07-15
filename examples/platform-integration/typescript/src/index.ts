@@ -25,6 +25,9 @@ async function main() {
 
   const interfaces = await client.getEngineInterfaces();
   console.log(`interfaces: ${interfaces.length}`);
+  const ocrFlow = await client.getOcrFlowCapability();
+  console.log(`ocr provider: ${ocrFlow.defaultProvider}`);
+  console.log(`post process input: ${String(ocrFlow.postProcessContract.inputSchema ?? "unknown")}`);
 
   const jobId = process.env.QUESTION_ENGINE_JOB_ID;
   if (!jobId) {

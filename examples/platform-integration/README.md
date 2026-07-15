@@ -36,7 +36,7 @@ import { QuestionEngineClient } from "../../../question-engine/sdk/generated/typ
 
 1. 创建 client。
 2. 检查能力目录。
-3. 读取 engine 接口清单。
+3. 读取 engine 接口清单和强类型 OCR provider/Post Process 能力描述。
 4. 轮询已有 job。
 5. 获取 `question-package.v1`。
 

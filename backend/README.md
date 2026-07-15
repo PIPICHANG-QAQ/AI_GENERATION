@@ -606,7 +606,7 @@ python-worker/app/
 Python worker 当前职责：
 
 - OCR provider 执行，当前默认 MinerU。
-- OCR 输出收集和结构化拆题。
+- provider adapter 输出 `CanonicalOcrBundle`，统一 Post Process 再执行结构化拆题。
 - LaTeX/数学公式规范化。
 - 大模型拆题、标准化和解析。
 - Pandoc/DOCX/PDF 导出。
@@ -618,8 +618,11 @@ Python worker 当前职责：
 - `worker_routes.py`：worker 路由和历史兼容路由。
 - `worker_base.py`：Pydantic 模型、本地 store、OCR job 文件和 runtime 辅助。
 - `ocr_flow.py`：OCR provider 抽象和 MinerU provider。
-- `ocr_execution.py`：OCR job 执行、Markdown 直通、DOC 转换、provider 调用。
-- `ocr_processing.py`：OCR 输出收集、结构化题目解析、语义修复。
+- `ocr/contracts.py`：provider-neutral `canonical-ocr-bundle.v1` 契约。
+- `ocr/mineru_adapter.py`：MinerU 私有工件适配器。
+- `ocr/postprocess_pipeline.py`：统一题库后处理入口。
+- `ocr_execution.py`：OCR job 执行、Markdown 直通、DOC 转换、provider、bundle 和后处理编排。
+- `ocr_processing.py`：兼容保留的结构化题目解析和语义修复算法实现。
 - `import_services.py`：历史本地导入任务、题库、组卷和题图服务。
 - `question_markdown.py`：题目 Markdown、题图引用、选项拆分和编辑回写。
 - `math_normalizer.py`：数学公式规范化和校验。
@@ -628,7 +631,7 @@ Python worker 当前职责：
 
 新增 Python 代码原则：
 
-- 新 OCR provider 放 `ocr_flow.py`，并保持输出结构与现有 `collect_outputs` 兼容。
+- 新 OCR provider 放 `ocr_flow.py`，新增独立 adapter 输出 `CanonicalOcrBundle`；不得让 Post Process 读取 provider 私有字段。
 - 新 AI worker 能力放 `/worker/*` 路由，不新增面向前端的 `/api/*` 业务接口。
 - 新导出格式优先扩展 `export_service.py` 和 `/worker/export/render`。
 - 任何 worker 输出结构变化，都必须同步 Java service、能力目录、OpenAPI 文档和测试。

@@ -1,4 +1,4 @@
-%% Version: 2026-07-13 / product v17 / LayoutChoiceAssignment
+%% Version: 2026-07-15 / OpenAPI 1.2.0 / CanonicalOcrBundle v1
 %% Status: current-primary
 %% Scope: authoritative end-to-end OCR-Flow algorithm, structure contract, LLM routing, first-return auto standardization, review, layout overlay isolation, rescan, global standardization, and AI assistance flow.
 flowchart TD
@@ -16,9 +16,12 @@ flowchart TD
   FlowConfig["OCR-Flow 配置<br/>OCR_FLOW_PROVIDER / OCR_FLOW_EXTENSIONS"]:::local
   GpuPolicy["服务器 GPU 策略<br/>MinerU / AI_GENERATION：物理 GPU0<br/>NVIDIA_VISIBLE_DEVICES=0，容器内 CUDA_VISIBLE_DEVICES=0<br/>vLLM / aux-qwen3：物理 GPU1"]:::gpu
   Provider["OCR provider<br/>默认 MinerU，可替换"]:::local
-  OcrPaper["provider 解析试卷<br/>输出 Markdown、JSON、图片资源"]:::local
-  OcrAnswer["可选：provider 解析答案文件<br/>作为答案与解析上下文"]:::local
-  Collect["ocr-collect<br/>保留 Markdown、content_list、页码、块顺序、图片 assets"]:::local
+  OcrPaper["provider 解析试卷<br/>输出 provider 原生结果"]:::local
+  OcrAnswer["可选：provider 解析答案文件<br/>输出 provider 原生结果"]:::local
+  ProviderAdapter["provider adapter<br/>MinerU 私有字段只在 mineru_adapter 解释"]:::local
+  CanonicalBundle["CanonicalOcrBundle v1<br/>Markdown、assets、pages、layoutBlocks、source ref<br/>L0 / L1 / L2 证据能力"]:::mixed
+  PostProcess["OcrPostProcessingPipeline.run_bundle<br/>provider-neutral 题库后处理<br/>兼容既有 collect_outputs 输出"]:::local
+  Collect["统一 OCR evidence<br/>保留 Markdown、布局、页码、块顺序、图片 assets"]:::local
   ImageLibrary["建立本导入任务题图库<br/>OCR 图片进入 imageLibrary"]:::local
 
   StructureContract["paper-structure-contract<br/>先抽取总题数、大题声明、每段题号范围<br/>后续拆题必须满足结构契约"]:::local
@@ -123,8 +126,9 @@ flowchart TD
   Jobs --> JavaSnapshot
   Jobs --> WorkerSafeStore
   Jobs --> FlowConfig --> GpuPolicy --> Provider
-  Provider --> OcrPaper --> Collect
-  Provider --> OcrAnswer --> Collect
+  Provider --> OcrPaper --> ProviderAdapter
+  Provider --> OcrAnswer --> ProviderAdapter
+  ProviderAdapter --> CanonicalBundle --> PostProcess --> Collect
   Collect --> ImageLibrary --> StructureContract --> LocalBoundary --> AnchorScore --> BoundaryConfidence --> BoundaryHigh
   BoundaryConfidence --> VisualRepairPreload
   BoundaryHigh -- "是" --> BoundarySkip --> BoundarySource

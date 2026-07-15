@@ -47,6 +47,16 @@ curl -fsS http://127.0.0.1/api/java/health
 curl --noproxy '*' -fsS http://120.211.112.121:5173/api/java/health
 ```
 
+检查 provider/Post Process 契约是否随当前版本发布：
+
+```bash
+curl -fsS http://127.0.0.1:5173/api/capabilities/ocr-flow \
+  | python3 -m json.tool \
+  | grep -E 'outputSchema|inputSchema|outputCompatibility'
+```
+
+期望包含 `canonical-ocr-bundle.v1` 和 `legacy-collect-outputs`。若缺失，表示服务器仍运行旧能力描述；这不等同于 OCR 失败，但需要按发布流程重建镜像后再做 provider 替换验收。
+
 ## 验证导入工作台 v15
 
 选择一个已存在导入任务 ID 后执行：

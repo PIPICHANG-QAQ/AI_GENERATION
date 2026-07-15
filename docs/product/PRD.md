@@ -21,7 +21,7 @@
 本期目标是提供一套可本地运行、可平台集成、边界清晰的题库加工能力：
 
 1. 接收试卷文件和可选答案文件。
-2. 执行 OCR-Flow，默认使用 MinerU provider，并预留替换其它 OCR provider 的边界。
+2. 执行 OCR-Flow，默认使用 MinerU；provider adapter 输出 `CanonicalOcrBundle` 后统一进入 Post Process，替换 OCR 引擎不改变题库后处理流程。
 3. 从 OCR 文本中拆分题目、提取题图、识别题型、选项和小问 / 子题。
 4. 对 Markdown + LaTeX 进行本地公式标准化、风险检测和 AI 语义修复。
 5. 使用大模型补全答案、解析、知识点候选、难度候选和分值候选；当 OCR 文本中包含答案解析时，优先基于原文证据匹配，不把模型自行求解结果当作教师原答案。

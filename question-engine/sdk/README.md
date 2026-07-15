@@ -7,6 +7,7 @@ Start here:
 
 - `USAGE.md`：面向平台开发者的 SDK 使用说明、TypeScript/Java 示例、任务轮询、标准题目包消费和接入边界。
 - `RELEASE.md`：SDK 版本、发布方式、兼容策略、升级流程和 breaking change 规则。
+- `../../docs/delivery/POST_PROCESS_USAGE_GUIDE.md`：OCR provider 接入、Post Process Python 嵌入式入口和为何暂不发布第二套远程 SDK。
 
 Source of truth:
 
@@ -27,6 +28,7 @@ Stable HTTP entry points:
 - `GET /api/capabilities`
 - `GET /api/engine`
 - `GET /api/engine/interfaces`
+- `GET /api/capabilities/ocr-flow`
 - `POST /api/capabilities/question-processing/jobs`
 - `GET /api/capabilities/question-processing/jobs/{jobId}`
 - `GET /api/capabilities/question-processing/jobs/{jobId}/question-package`
@@ -46,6 +48,10 @@ The SDKs intentionally cover the engine boundary only. Local admin pages, protot
 `local-platform` is only a demo shell and workflow example. See `../../docs/product/LOCAL_PLATFORM_AS_EXAMPLE.md` before reusing any local page behavior.
 
 Capability-specific APIs such as review-workbench OCR rescan, image libraries, file-flow image selection, AI standardize writeback, AI analysis, and callback events are part of the generated SDK surface. Export jobs and lower-level runtime diagnostics remain discoverable through `GET /api/capabilities` and can be expanded in SDK packages as platform usage stabilizes.
+
+OpenAPI `1.2.0` adds the typed `getOcrFlowCapability()` method. Its descriptor exposes `providerContract` and `postProcessContract`, so platform code can inspect the provider-neutral boundary without importing Python internals.
+
+The Post Process algorithm itself is not duplicated into this Java/TypeScript client SDK. Provider implementations inside the Python worker use the stable `app.ocr` exports; remote platform callers continue to use this Question Engine SDK.
 
 Review-workbench layout boxes are exposed as readonly `paperLayout` on `GET /api/import-tasks/{jobId}` plus page images from `GET /api/import-tasks/{jobId}/source/paper/pages/{pageIndex}`. Generated SDK packages may consume these APIs through direct HTTP until the platform decides whether to formalize them as first-class SDK methods.
 

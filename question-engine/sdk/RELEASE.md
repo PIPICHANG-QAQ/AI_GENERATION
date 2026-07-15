@@ -6,7 +6,7 @@
 
 当前 SDK 是检入仓库的 generated 源码，不是已发布 npm 包或 Maven artifact。
 
-当前 OpenAPI 契约版本：`1.1.0`。相对 `1.0.0` 的变化是非破坏性 MINOR 升级：新增 `POST /api/import-tasks/{jobId}/rescan` 和 SDK 方法 `rescanImportTask(jobId)`，已有接口和 `question-package.v1` 结构保持兼容。
+当前 OpenAPI 契约版本：`1.2.0`。相对 `1.1.0` 的变化是非破坏性 MINOR 升级：OCR-Flow 能力描述新增 `providerContract`、`postProcessContract` 的强类型契约，TypeScript/Java SDK 新增 `getOcrFlowCapability()`；已有接口、`rescanImportTask(jobId)` 和 `question-package.v1` 结构保持兼容。
 
 目录：
 

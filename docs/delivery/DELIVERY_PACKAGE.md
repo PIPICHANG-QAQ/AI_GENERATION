@@ -35,6 +35,7 @@
 | `backend/python-worker/README.md` | 必选 | Python worker 边界说明 |
 | `backend/python-worker/pyproject.toml` | 必选 | Python worker 依赖和可编辑安装配置 |
 | `backend/python-worker/app/` | 必选 | OCR、AI、导出 worker 源码 |
+| `backend/python-worker/app/ocr/` | 必选 | CanonicalOcrBundle、MinerU adapter 和统一 Post Process 入口 |
 | `backend/python-worker/app/question_layout.py` | 必选 | 复核工作台布局解析框能力，封装 `PaperLayoutCapability`、页图渲染和题目 bbox |
 | `backend/python-worker/tests/` | 必选 | Python worker 单元测试源码，供迁移后自检 |
 | `question-engine/README.md` | 必选 | engine 交付入口 |
@@ -45,6 +46,7 @@
 | `question-engine/sdk/generated/` | 必选 | 生成型 TypeScript / Java SDK |
 | `question-engine/sdk/examples/` | 可选 | 旧手写示例，仅参考 |
 | `docs/` | 必选 | 规格、交付、部署、安全、验收、运行手册 |
+| `docs/delivery/POST_PROCESS_USAGE_GUIDE.md` | 必选 | OCR provider/Post Process 接入契约、SDK 决策和质量门禁 |
 | `examples/platform-integration/` | 必选 | 平台最小接入样例 |
 | `scripts/check_question_engine_contract.py` | 必选 | 契约、SDK、文档同步检查 |
 | `scripts/check_project_portability.py` | 必选 | 迁移可用性检查，拦截绝对路径、坏 venv、坏 symlink 和运行产物泄漏 |

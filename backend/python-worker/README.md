@@ -20,7 +20,8 @@ python scripts/check_mineru.py
 
 ## 保留能力
 
-- OCR provider 调用和 OCR 产物收集。
+- OCR provider 调用、provider adapter 和统一 OCR 证据包。
+- Provider-neutral Post Process：拆题、选项/小问恢复、题图归属、公式与结构校验。
 - 大模型拆题、AI 标准化和 AI 解析。
 - LaTeX/Markdown 公式处理。
 - Pandoc/XeLaTeX DOCX/PDF 渲染。
@@ -31,13 +32,28 @@ python scripts/check_mineru.py
 - `app/main.py`：极薄 FastAPI 入口，只导入共享 app 并注册路由。
 - `app/worker_base.py`：共享配置、路径、模型和轻量 JSON 兼容存储。
 - `app/question_markdown.py`：题目 Markdown、题图和选项归一化。
-- `app/ocr_processing.py`：OCR 输出整理、拆题和公式校验。
+- `app/ocr/contracts.py`：`canonical-ocr-bundle.v1` 输入契约和强校验。
+- `app/ocr/mineru_adapter.py`：MinerU 私有工件到统一证据包的唯一适配器。
+- `app/ocr/postprocess_pipeline.py`：统一后处理入口，保持现有算法和 outputs 兼容。
+- `app/ocr_processing.py`：现有 OCR 后处理算法兼容实现；新 provider 不得直接依赖其内部细节。
 - `app/import_services.py`：导入任务兼容桥和入库辅助。
 - `app/export_service.py`：试卷 Markdown/DOCX/PDF 渲染。
 - `app/ocr_execution.py`：OCR job 执行。
 - `app/worker_routes.py`：Java 仍需调用的 worker 和兼容路由。
 
 新增平台业务逻辑不得放入 Python worker。
+
+## OCR Provider 与 Post Process
+
+当前执行链路为：
+
+```text
+OcrProvider -> provider adapter -> CanonicalOcrBundle -> OcrPostProcessingPipeline -> outputs
+```
+
+新 provider 必须输出 `canonical-ocr-bundle.v1`，不得要求后处理识别其私有目录或字段。稳定 Python 导入入口是 `app.ocr`；完整字段、示例、能力等级和测试门禁见 [OCR Post Process 使用说明书](../../docs/delivery/POST_PROCESS_USAGE_GUIDE.md)。
+
+当前入口属于同一 worker 进程内的嵌入式能力，不是无状态公网 API。平台远程调用继续使用 Question Engine OpenAPI/SDK。
 
 ## Legacy API 边界
 

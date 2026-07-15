@@ -216,15 +216,15 @@ rollback:
 
 ## 12. OCR Provider 插件开发模板
 
-替换或新增 OCR provider 时，必须保持 `ocr-flow` 统一 outputs 不变。最小开发模板：
+替换或新增 OCR provider 时，必须保持 `canonical-ocr-bundle.v1` 输入和 `ocr-flow` 统一 outputs 不变。最小开发模板：
 
 1. 在 `backend/python-worker/app/ocr_flow.py` 新增 provider 类。
-2. 实现 `name`、`status()`、`run(job_id, upload_path, runtime)`。
-3. 在 provider 注册表中注册。
-4. 新增配置项时同步 `.env.example`、`application.yml`、`docs/product/OCR_PHASE_1_SPEC.md` 和 `docs/delivery/OPERATIONS_GUIDE.md`。
-5. 确保输出目录能被 `collect_outputs()` 找到 Markdown、JSON 和图片资源。
-6. 更新 `GET /api/capabilities/ocr-flow/runtime` 相关测试或验收点。
-7. 用至少一份脱敏样卷验证 `questions`、`assets`、`mathValidation`、`sourceEvidence` 不退化。
+2. 实现 `name`、`status()`、`run(OcrProviderRequest)`。
+3. 新增 provider adapter，把原生结果转换为 `CanonicalOcrBundle`；provider 私有字段不能进入 Post Process。
+4. 在 provider 注册表中注册。
+5. 新增配置项时同步 `.env.example`、`application.yml`、OCR 规格、Post Process 使用说明和运维指南。
+6. 更新 `GET /api/capabilities/ocr-flow`、runtime、bundle 契约测试和 adapter 测试。
+7. 用黄金样本验证 `questions`、选项、小问、题图 placement、`mathValidation`、`sourceEvidence`、调用数和性能不退化。
 
 Provider 不允许直接写平台题库、用户权限、审核流或知识点主数据。
 

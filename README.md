@@ -15,7 +15,7 @@
 - Java 新增能力总目录 `/api/capabilities`，在 `ocr-flow`、`question-processing` 之外，继续封装 `review-workbench`、`ai-flow`、`export-flow`、`file-flow`、`callback-flow` 和 `sdk-openapi`，用于把核心能力与本地小平台页面隔离。
 - Java 新增 callback-flow HTTP 回调签名、事件记录和手动重试入口；SDK 草案位于 `question-engine/sdk`。
 - 后端接收文件并创建 OCR-Flow 任务。
-- OCR-Flow 默认调用 MinerU 命令行执行 OCR 和文档解析，同时通过 provider 边界预留替换其它 OCR 引擎的空间。
+- OCR-Flow 默认调用 MinerU；provider 原生结果由 adapter 归一为 `canonical-ocr-bundle.v1`，再进入同一套 Post Process，因此可替换腾讯 OCR 等引擎而不复制拆题、题图和公式算法。
 - OCR 成功后进入证据驱动拆题流水线：本地先识别大题/题号/小问/选项/题图候选边界；高置信边界直接跳过 `llm-boundary-refine`，低置信边界按题段分片并受控并发调用 OpenAI 兼容大模型确认边界；最后按 OCR 原文切片构建结构并做证据校验，未配置或失败时按分片回退本地规则。
 - OCR outputs 会返回 `boundaryConfidence`、`autoSemanticRepair` 和脱敏 `llmMetrics`；指标只包含调用类型、provider、model、状态、耗时和 chunk/item 数，不记录 prompt、密钥、完整 OCR 文本或图片 base64。
 - 对题干、选项和子题进行公式标准化与校验，减少 OCR 公式边界错误导致的渲染失败。
@@ -33,6 +33,8 @@
 - 组卷中心支持手动选题并导出 Word/PDF；导出优先生成 Markdown + LaTeX 中间文件，再通过 Pandoc 转为 DOCX/PDF，未安装 Pandoc 时回退旧导出。
 - 知识点库支持新增、编辑和删除知识点，基础 CRUD 已迁移到 Java 数据层。
 - 所有项目文档统一维护在 `/docs` 目录。
+
+Provider 接入、Post Process 输入格式、Python 嵌入式入口、SDK 决策和质量门禁见 [`docs/delivery/POST_PROCESS_USAGE_GUIDE.md`](docs/delivery/POST_PROCESS_USAGE_GUIDE.md)。平台远程接入继续使用 Question Engine OpenAPI `1.2.0` 与现有 Java/TypeScript SDK。
 
 用户账号、权限、题目版本、企业平台审核流、真实 MQ 异步编排、超时扫描器和 SDK 发布包仍属于后续范围。
 

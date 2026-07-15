@@ -85,6 +85,12 @@ class SystemControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("ocr-flow"))
                 .andExpect(jsonPath("$.defaultProvider").value("mineru"))
+                .andExpect(jsonPath("$.providerContract.outputSchema")
+                        .value("canonical-ocr-bundle.v1"))
+                .andExpect(jsonPath("$.postProcessContract.inputSchema")
+                        .value("canonical-ocr-bundle.v1"))
+                .andExpect(jsonPath("$.postProcessContract.outputCompatibility")
+                        .value("legacy-collect-outputs"))
                 .andExpect(jsonPath("$.configKeys.provider").value("OCR_FLOW_PROVIDER"))
                 .andExpect(jsonPath("$.workerEndpoints.runtime").value("/worker/ocr-flow"));
     }

@@ -2,7 +2,7 @@
 
 ## 状态
 
-已采纳，2026-06-30 补充 provider 边界。
+历史参考。默认使用 MinerU 的决定仍有效；provider 边界部分已由 ADR 0003 和 ADR 0006 取代。
 
 ## 背景
 
@@ -28,4 +28,4 @@ mineru -p <input_path> -o <output_path> -b pipeline
 - 后端不依赖 MinerU 内部 Python API，降低版本升级风险。
 - 模型下载和首次初始化属于本地环境问题。
 - Markdown、JSON 和图片资源输出可以先被人工复核，再进入后续题目结构化阶段。
-- 后续替换其它开源 OCR/版面解析项目时，应新增 provider 并保持 `collect_outputs` 的统一输出结构，不应改动题库业务层。
+- 当前实现的替换契约以 ADR 0006 的 `Provider -> Adapter -> CanonicalOcrBundle -> Post Process` 为准；本条仅保留历史背景。

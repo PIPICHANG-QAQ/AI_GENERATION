@@ -359,9 +359,9 @@ AI 标准化约束：
 
 ## OCR-Flow Provider 替换边界
 
-`ocr-flow` 是本项目最核心的能力边界，负责把原始试卷/答案文件加工成统一 OCR 产物，再进入拆题、公式标准化、AI 补全和人工校验。当前默认 OCR provider 是 MinerU，但业务层不应直接依赖 MinerU。业务层只依赖 `ocr-flow` 的统一输出：`markdown`、`json`、`assets`、`sections`、`questions` 和 `mathValidation`。
+`ocr-flow` 是本项目最核心的能力边界。OCR provider 先把原始试卷/答案转成原生结果，provider adapter 再输出 `canonical-ocr-bundle.v1`，统一 Post Process 才执行拆题、公式标准化、AI 补全和人工校验。当前默认 provider 是 MinerU，但业务层和 Post Process 都不直接依赖 MinerU 私有结构。
 
-Python worker 侧由 `backend/python-worker/app/ocr_flow.py` 定义 provider 抽象和默认 `MineruOcrProvider`；`ocr_execution.py` 和 `ocr_processing.py` 负责编排上传、Markdown 直读、`.doc` 预转换、provider 调用和产物收集。Java 主后端通过 `/api/capabilities/ocr-flow` 返回能力描述，通过 `/api/capabilities/ocr-flow/runtime` 代理读取 worker 运行时状态，外部平台不应直接对接 MinerU。
+Python worker 侧由 `backend/python-worker/app/ocr_flow.py` 定义 provider 抽象和默认 `MineruOcrProvider`；`app/ocr/contracts.py` 定义统一证据，`app/ocr/mineru_adapter.py` 是 MinerU 私有适配器，`app/ocr/postprocess_pipeline.py` 提供统一后处理入口。`ocr_execution.py` 负责编排上传、预处理、provider、bundle manifest 和 Post Process。Java 主后端通过 `/api/capabilities/ocr-flow` 返回能力描述，通过 `/api/capabilities/ocr-flow/runtime` 代理运行时状态，外部平台不应直接对接 MinerU。
 
 主要配置项：
 
@@ -373,22 +373,21 @@ MINERU_TIMEOUT_SECONDS=1800
 MINERU_VERSION_TIMEOUT_SECONDS=3
 ```
 
-新的 OCR provider 应实现三个稳定点：
+新的 OCR provider 应实现四个稳定点：
 
 - `name`：provider 名称，对应 `OCR_FLOW_PROVIDER`。
 - `status()`：返回可用性、版本、命令路径或错误原因。
-- `run(job_id, upload_path, runtime)`：执行 OCR，并把 job 写成统一状态和统一 outputs。
+- `run(OcrProviderRequest)`：执行 OCR 并返回 `OcrProviderResult`。
+- provider adapter：把原生结果转换为 `CanonicalOcrBundle`。
 
-Provider 不应负责导入任务业务状态、题库入库、用户权限租户、题目审核流或平台知识点主数据。Provider 应尽量只做 OCR 引擎适配，把输出交给 `collect_outputs` 进入统一结构化链路。
+Provider 不应负责后处理、导入任务业务状态、题库入库、用户权限租户、题目审核流或平台知识点主数据。Provider 只做 OCR 引擎调用，其 adapter 只做原生证据归一化。
 
 替换 MinerU 的最小路径：
 
 1. 在 `backend/python-worker/app/ocr_flow.py` 中新增一个 `OcrProvider` 实现。
-2. 在 `providers()` 注册新 provider。
-3. 在 `.env` 中设置 `OCR_FLOW_PROVIDER=新 provider 名称`。
-4. 如文件类型不同，设置 `OCR_FLOW_EXTENSIONS`。
-5. 确保新 provider 的输出目录里至少能被 `collect_outputs()` 找到 Markdown、JSON 和图片资源。
-6. 调用 `/api/system/ocr-flow` 和 `/api/capabilities/ocr-flow/runtime` 验证运行时状态。
-7. 运行导入任务，确认 `questions`、`assets`、`mathValidation` 结构不变。
+2. 新增 `<provider>_adapter.py`，输出 `canonical-ocr-bundle.v1`。
+3. 在 provider 注册表中注册，并设置 `OCR_FLOW_PROVIDER` / `OCR_FLOW_EXTENSIONS`。
+4. 调用 `/api/capabilities/ocr-flow` 和 runtime 接口验证契约与可用性。
+5. 运行契约测试和相同黄金样本，对比题数、选项、小问、题图、公式、调用数和性能。
 
-只要统一 outputs 不变，Java 能力层、前端人工校验页、题库中心、组卷中心都不需要跟着 OCR provider 替换而大改。
+只要 `CanonicalOcrBundle` 输入契约和统一 outputs 不变，Java 能力层、前端人工校验页、题库中心、组卷中心都不需要跟着 OCR provider 替换而大改。完整使用说明见 `docs/delivery/POST_PROCESS_USAGE_GUIDE.md`。

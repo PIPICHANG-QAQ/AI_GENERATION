@@ -1,4 +1,4 @@
-%% Version: 2026-07-10 / product v16 / GlobalStandardize
+%% Version: 2026-07-15 / OpenAPI 1.2.0 / ProviderPostProcess
 %% Status: current-primary
 %% Scope: import OCR workbench UX, task lifecycle, structure-contract extraction, first-return auto standardization, layout overlay isolation, rescan, global standardization, batch AI analysis, and manual review.
 flowchart TD
@@ -15,8 +15,10 @@ flowchart TD
   ReturnTask["返回处理中导入任务<br/>前端选中任务并进入工作台"]:::local
   TaskManage["历史任务列表<br/>支持重命名、删除、选择进入工作台"]:::local
 
-  PaperOcr["MinerU provider 解析试卷<br/>本地 CLI；服务器可复用常驻 mineru-api"]:::local
-  AnswerOcr["可选：MinerU provider 解析答案文件"]:::local
+  PaperOcr["OCR provider 解析试卷<br/>默认 MinerU，可替换"]:::local
+  AnswerOcr["可选：OCR provider 解析答案文件"]:::local
+  ProviderAdapter["provider adapter<br/>原生结果 -> CanonicalOcrBundle v1"]:::local
+  PostProcess["统一 Post Process<br/>拆题、选项/小问、题图、公式和结构校验"]:::mixed
   Poll["前端轮询 GET /api/import-tasks/{taskId}<br/>展示试卷/答案 OCR 状态"]:::local
   Collect["ocr-collect<br/>保留 Markdown、content_list、页码、块顺序、图片 assets"]:::local
   ImageLibrary["建立本卷题图库<br/>OCR 扫描图片自动进入 imageLibrary"]:::local
@@ -90,8 +92,9 @@ flowchart TD
   Persist --> PaperOcr
   Persist --> AnswerOcr
   ReturnTask --> Poll
-  PaperOcr --> Collect
-  AnswerOcr --> Collect
+  PaperOcr --> ProviderAdapter
+  AnswerOcr --> ProviderAdapter
+  ProviderAdapter --> PostProcess --> Collect
   Poll --> Collect
   Collect --> ImageLibrary --> StructureContract --> LocalBoundary --> AnchorCandidate --> BoundaryConfidence --> BoundaryHigh
   BoundaryConfidence --> VisualRepairPreload

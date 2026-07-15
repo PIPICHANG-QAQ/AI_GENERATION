@@ -62,6 +62,7 @@ GET /api/capabilities/sdk-openapi
 | `file-flow` | 原文件、题图、OCR 产物、导出文件的存储和访问协议 | Java 管 LOCAL/MINIO 文件存储、导入原文件、导入题图、题库题图和导出文件 | Python 只读取临时路径或 worker 产物 |
 | `callback-flow` | 任务完成、失败、可重试、超时等事件回调协议 | Java 已提供 HTTP 回调事件表、HMAC 签名、幂等键、失败记录、到期重试扫描和 dead_letter 状态 | 无 |
 | `sdk/openapi` | OpenAPI、Knife4j、能力目录和 SDK 生成边界 | 已提供静态 `question-engine.v1.yaml`、`/v3/api-docs`、`/doc.html` 和 generated TypeScript/Java SDK | 无 |
+| `ocr-post-process` | 接收 `CanonicalOcrBundle`，复用同一套拆题、题图、公式和结构校验 | Java 只暴露能力描述、任务与标准题目包，不复制算法 | Python `app.ocr` 嵌入式入口；provider 私有结果由 adapter 隔离 |
 
 ## 本轮已新增稳定入口
 
@@ -99,12 +100,13 @@ OpenAPI 和 SDK 已放在：
 - `question-engine/sdk/generated/typescript`
 - `question-engine/sdk/generated/java`
 - `question-engine/sdk/README.md`
+- `docs/delivery/POST_PROCESS_USAGE_GUIDE.md`
 
 面向其他开发者的接口使用说明见：
 
 - `docs/delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md`
 
-该说明书解释 `question-engine` 的作用、OCR-Flow 在加工链路中的调用位置、平台推荐调用顺序、核心接口出入参、AI/题图/导出/callback-flow 使用方式和不推荐的接入方式。
+接口说明解释平台调用方式；Post Process 使用说明解释 provider-neutral bundle、嵌入式入口和为何暂不新增第二套远程 SDK。
 
 ## 建议交付代码范围
 

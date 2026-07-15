@@ -4,6 +4,7 @@ import com.aigeneration.questionengine.sdk.QuestionEngineClient;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.CapabilitySummary;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.ProcessingJob;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.QuestionPackage;
+import com.aigeneration.questionengine.sdk.QuestionEngineModels.OcrFlowDescriptor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +34,9 @@ public class PlatformIntegrationExample {
         }
         System.out.println("capabilities=" + capabilities.size());
         System.out.println("interfaces=" + client.getEngineInterfaces().size());
+        OcrFlowDescriptor ocrFlow = client.getOcrFlowCapability();
+        System.out.println("ocrProvider=" + ocrFlow.defaultProvider());
+        System.out.println("postProcessInput=" + ocrFlow.postProcessContract().get("inputSchema"));
 
         String jobId = System.getenv("QUESTION_ENGINE_JOB_ID");
         if (jobId == null || jobId.isBlank()) {

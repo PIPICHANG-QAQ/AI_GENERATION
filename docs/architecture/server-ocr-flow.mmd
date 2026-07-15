@@ -1,4 +1,4 @@
-%% Version: 2026-07-10 / server deployment v16
+%% Version: 2026-07-15 / server deployment / CanonicalOcrBundle v1
 %% Status: current-support
 %% Scope: server deployment OCR/AI compute boundary, GPU assignment, MinerU API, first-return auto standardization, layout overlay isolation, global standardization, and public demo runtime.
 flowchart TD
@@ -22,7 +22,9 @@ flowchart TD
   Preprocess["preprocess 预处理<br/>识别扩展名，Markdown 直读或 DOC 转 DOCX"]:::local
   OcrProvider["ocr-provider OCR 引擎<br/>OCR_FLOW_PROVIDER=mineru"]:::gpu
   MinerU["常驻 MinerU API + CLI 调用<br/>mineru-api :8002，CLI 追加 --api-url<br/>GPU0 复用模型，避免每任务重新初始化"]:::gpu
-  Collect["collect-outputs 收集产物<br/>Markdown、content_list、页码、图片 assets"]:::local
+  ProviderAdapter["MinerU adapter<br/>原生工件 -> CanonicalOcrBundle v1<br/>其它 provider 使用各自 adapter"]:::local
+  PostProcess["统一 Post Process<br/>拆题、选项/小问、题图、公式、结构校验<br/>兼容既有 outputs"]:::local
+  Collect["统一 OCR evidence<br/>Markdown、layoutBlocks、页码、图片 assets"]:::local
   StructureContract["paper-structure-contract<br/>总题数、大题声明、每段题号范围<br/>先过滤卷头和说明区编号"]:::local
   LocalBoundary["local-boundary-detect 本地边界候选<br/>大题、题号、小问、选项、题图候选"]:::local
   AnchorScore["anchor candidate scoring<br/>数字锚点先评分<br/>合法范围、正文区、连续性和题干语义"]:::hybrid
@@ -66,7 +68,7 @@ flowchart TD
   Worker --> WorkerStore
   Worker --> ServerData
 
-  Java --> Upload --> Preprocess --> OcrProvider --> MinerU --> Collect
+  Java --> Upload --> Preprocess --> OcrProvider --> MinerU --> ProviderAdapter --> PostProcess --> Collect
   Collect --> StructureContract --> LocalBoundary --> AnchorScore --> Confidence
   Confidence -- 高置信 --> SkipBoundaryLlm --> BuildStructure
   Confidence --> VisualRepairPreload

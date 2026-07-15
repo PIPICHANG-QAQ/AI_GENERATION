@@ -59,6 +59,22 @@ public final class QuestionEngineModels {
     ) {
     }
 
+    public record OcrFlowDescriptor(
+            String code,
+            String name,
+            String boundary,
+            String defaultProvider,
+            Map<String, Object> providerContract,
+            Map<String, Object> postProcessContract,
+            List<Map<String, Object>> preprocessors,
+            Map<String, String> configKeys,
+            Map<String, String> javaEndpoints,
+            Map<String, String> workerEndpoints,
+            List<String> replaceProviderStrategy,
+            Map<String, Object> raw
+    ) {
+    }
+
     public record SourceFile(String kind, String filename, String previewUrl) {
     }
 

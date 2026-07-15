@@ -1,4 +1,4 @@
-%% Version: 2026-07-08 / OpenAPI 1.1.0
+%% Version: 2026-07-15 / OpenAPI 1.2.0 / Post Process embedded SDK
 %% Status: current-primary
 %% Scope: platform integration contract, OpenAPI, generated SDKs, and engine capabilities.
 flowchart LR
@@ -8,6 +8,7 @@ flowchart LR
   OpenApi["question-engine OpenAPI<br/>question-engine.v1.yaml<br/>能力契约优先，不绑定本地页面"]:::contract
   TsSdk["TypeScript SDK<br/>generated/typescript<br/>Web 应用 / 管理端调用"]:::sdk
   JavaSdk["Java SDK<br/>generated/java<br/>平台服务端调用"]:::sdk
+  PostProcessSdk["Python 嵌入式 Post Process 入口<br/>app.ocr / CanonicalOcrBundle v1<br/>只供 worker 内 provider 集成"]:::sdk
   EmbeddedWorkbench["可嵌入 review-workbench<br/>人工校验编辑工作台"]:::sdk
 
   EngineGateway["backend Java question-engine<br/>统一能力入口 :8018<br/>平台集成时由网关或内网服务暴露"]:::engine
@@ -20,12 +21,14 @@ flowchart LR
   ExportFlow["export-flow<br/>Markdown / DOCX / PDF 导出"]:::capability
   FileFlow["file-flow<br/>原文件 / 题图 / OCR 产物 / 导出文件"]:::capability
   CallbackFlow["callback-flow<br/>状态回调 / 签名 / 重试 / 幂等键"]:::capability
-  RescanSdk["rescanImportTask(jobId)<br/>OpenAPI 1.1.0<br/>重新投递原始 OCR job，不覆盖已编辑题目"]:::sdk
+  RescanSdk["getOcrFlowCapability / rescanImportTask<br/>OpenAPI 1.2.0<br/>能力描述强类型；重扫不覆盖已编辑题目"]:::sdk
 
   EngineDb[("engine 元数据<br/>任务 / job / 文件 / callback 事件<br/>本地 H2 或企业 MySQL")]:::store
   ObjectStorage[("对象存储协议<br/>本地文件或 MinIO<br/>平台可替换为文件中心")]:::store
   InternalWorker["Python 内部 worker<br/>只执行 OCR / AI / 公式分隔符修复 / 导出<br/>不直接暴露前端业务 API"]:::worker
-  OcrProvider["OCR provider<br/>默认 MinerU<br/>未来替换其它 OCR 引擎只改 provider 层"]:::worker
+  OcrProvider["OCR provider<br/>默认 MinerU<br/>未来可替换腾讯 OCR 等引擎"]:::worker
+  ProviderAdapter["provider adapter<br/>私有结果 -> CanonicalOcrBundle"]:::worker
+  PostProcess["统一 Post Process<br/>拆题 / 选项 / 小问 / 题图 / 公式<br/>兼容既有 outputs"]:::worker
   AiProvider["AI provider<br/>DeepSeek / OpenAI 兼容模型"]:::external
   ExportProvider["导出 provider<br/>Pandoc / XeLaTeX"]:::worker
 
@@ -61,9 +64,11 @@ flowchart LR
   FileFlow --> ObjectStorage
   EngineGateway --> InternalWorker
   InternalWorker --> OcrProvider
+  OcrProvider --> ProviderAdapter --> PostProcess
+  PostProcessSdk --> PostProcess
   InternalWorker --> AiProvider
   InternalWorker --> ExportProvider
-  OcrProvider --> InternalWorker
+  PostProcess --> InternalWorker
   AiProvider --> InternalWorker
   ExportProvider --> InternalWorker
 

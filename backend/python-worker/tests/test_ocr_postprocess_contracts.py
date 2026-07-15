@@ -2,6 +2,10 @@ import json
 
 import pytest
 
+from app.ocr import (
+    CanonicalOcrBundle as PublicCanonicalOcrBundle,
+    OcrPostProcessingPipeline,
+)
 from app.ocr.contracts import (
     CanonicalOcrBundle,
     CanonicalOcrBundleError,
@@ -10,6 +14,11 @@ from app.ocr.contracts import (
     OcrPage,
     SourceDocumentRef,
 )
+
+
+def test_ocr_package_exposes_stable_postprocess_entrypoints() -> None:
+    assert PublicCanonicalOcrBundle is CanonicalOcrBundle
+    assert callable(OcrPostProcessingPipeline.run_bundle)
 
 
 def test_l2_bundle_serializes_layout_assets_and_source_reference() -> None:

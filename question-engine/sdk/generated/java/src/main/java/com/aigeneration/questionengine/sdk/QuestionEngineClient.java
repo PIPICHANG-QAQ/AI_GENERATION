@@ -7,6 +7,7 @@ import com.aigeneration.questionengine.sdk.QuestionEngineModels.DeliveryBoundary
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.EngineCatalog;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.EngineInterfaceDescriptor;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.ImportTaskRescanResult;
+import com.aigeneration.questionengine.sdk.QuestionEngineModels.OcrFlowDescriptor;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.AiAnalysisRequest;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.AiAnalysisResult;
 import com.aigeneration.questionengine.sdk.QuestionEngineModels.AiStandardizeRequest;
@@ -74,6 +75,10 @@ public class QuestionEngineClient {
 
     public QuestionProcessingDescriptor getQuestionProcessingCapability() throws IOException, InterruptedException {
         return objectMapper.readValue(get("/api/capabilities/question-processing"), QuestionProcessingDescriptor.class);
+    }
+
+    public OcrFlowDescriptor getOcrFlowCapability() throws IOException, InterruptedException {
+        return objectMapper.readValue(get("/api/capabilities/ocr-flow"), OcrFlowDescriptor.class);
     }
 
     public ProcessingJob getProcessingJob(String jobId) throws IOException, InterruptedException {

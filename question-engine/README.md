@@ -15,8 +15,9 @@
 - OpenAPI 契约：`question-engine/openapi/question-engine.v1.yaml`
 - SDK 使用说明：`question-engine/sdk/USAGE.md`
 - SDK 发布说明：`question-engine/sdk/RELEASE.md`
+- OCR Post Process 使用说明：`docs/delivery/POST_PROCESS_USAGE_GUIDE.md`
 - 生成型 SDK：`question-engine/sdk/generated/typescript`、`question-engine/sdk/generated/java`
-- 当前契约版本：`1.1.0`，新增 `rescanImportTask(jobId)` 重扫接口，`question-package.v1` 保持兼容
+- 当前契约版本：`1.2.0`，SDK 新增强类型 `getOcrFlowCapability()` 并公开 provider/Post Process 边界；`question-package.v1` 保持兼容
 - 手写 SDK 示例：`question-engine/sdk/examples`
 - 平台最小接入样例：`examples/platform-integration`
 - 开发者接口说明书：`docs/delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md`

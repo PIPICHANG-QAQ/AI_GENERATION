@@ -13,6 +13,7 @@ import type {
   EngineCatalog,
   EngineInterfaceDescriptor,
   ImportTaskRescanResult,
+  OcrFlowDescriptor,
   ProcessingJob,
   QuestionImageLibrary,
   QuestionImageMutationResult,
@@ -55,6 +56,10 @@ export class QuestionEngineClient {
 
   getQuestionProcessingCapability(): Promise<QuestionProcessingDescriptor> {
     return this.getJson("/api/capabilities/question-processing");
+  }
+
+  getOcrFlowCapability(): Promise<OcrFlowDescriptor> {
+    return this.getJson("/api/capabilities/ocr-flow");
   }
 
   listProcessingJobs(): Promise<ProcessingJob[]> {

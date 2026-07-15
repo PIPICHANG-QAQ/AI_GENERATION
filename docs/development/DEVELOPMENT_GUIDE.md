@@ -31,6 +31,7 @@
 | 5 | [SDK 使用说明](../../question-engine/sdk/USAGE.md) | 了解平台如何用 SDK 创建任务、轮询和取题目包 |
 | 6 | [后端结构说明](../../backend/README.md) | 理解 Java backend 和 Python worker 代码放置规则 |
 | 7 | [OCR 阶段规格](../product/OCR_PHASE_1_SPEC.md) | 改 OCR、AI、公式、题图或人工校验前读 |
+| 7A | [OCR Post Process 使用说明书](../delivery/POST_PROCESS_USAGE_GUIDE.md) | 开发新 OCR provider、adapter 或后处理集成前读 |
 | 8 | [题库二期规格](../product/QUESTION_BANK_PHASE_2_SPEC.md) | 改导入、题库、组卷、知识点或导出前读 |
 | 9 | [部署与运维指南](../delivery/OPERATIONS_GUIDE.md) | 部署、排障、性能评估和生产配置前读 |
 | 10 | [贡献与同步规则](CONTRIBUTING.md) | 每次改代码前读，避免接口、SDK、文档和测试漏同步 |
@@ -45,7 +46,7 @@
 | 新增或修改 Java 接口 | [后端结构说明](../../backend/README.md)、[技术设计](../architecture/TECHNICAL_DESIGN.md)、[贡献与同步规则](CONTRIBUTING.md) | Controller、Service、Model、OpenAPI、SDK、测试如何同步 |
 | 修改 `/api/engine` 或能力目录 | [Engine 交付边界](../architecture/ENGINE_DELIVERY_BOUNDARY.md)、[接口清单](../delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md) | 模块、能力目录和平台职责如何保持一致 |
 | 修改 question-processing | [接口清单](../delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)、[SDK 使用说明](../../question-engine/sdk/USAGE.md)、[验收标准](../delivery/ACCEPTANCE.md) | 加工任务、任务视图、标准题目包和验收脚本是否一致 |
-| 替换 MinerU 或改 OCR provider | [OCR 阶段规格](../product/OCR_PHASE_1_SPEC.md)、[Python worker README](../../backend/python-worker/README.md)、[运维指南](../delivery/OPERATIONS_GUIDE.md) | provider 输入输出、配置、runtime 和替换路径 |
+| 替换 MinerU 或改 OCR provider | [Post Process 使用说明书](../delivery/POST_PROCESS_USAGE_GUIDE.md)、[OCR 阶段规格](../product/OCR_PHASE_1_SPEC.md)、[Python worker README](../../backend/python-worker/README.md)、[运维指南](../delivery/OPERATIONS_GUIDE.md) | provider adapter、CanonicalOcrBundle、配置、runtime、质量门禁和替换路径 |
 | 修改 AI 标准化、AI 解析、答案解析匹配 | [OCR 阶段规格](../product/OCR_PHASE_1_SPEC.md)、[技术设计](../architecture/TECHNICAL_DESIGN.md)、[后端结构说明](../../backend/README.md) | AI worker、Java job、标准化候选、写回闸门、题图上下文和验收点 |
 | 修改题图、图片库、文件访问 | [接口清单](../delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)、[技术设计](../architecture/TECHNICAL_DESIGN.md)、[安全契约](../delivery/SECURITY_AND_INTEGRATION_CONTRACT.md) | file-flow、访问权限、SDK 方法和平台文件边界 |
 | 修改组卷或导出 | [题库二期规格](../product/QUESTION_BANK_PHASE_2_SPEC.md)、[技术设计](../architecture/TECHNICAL_DESIGN.md)、[运维指南](../delivery/OPERATIONS_GUIDE.md) | 组卷流程、试卷数据、导出 job、DOCX Pandoc 和 PDF XeLaTeX worker 边界 |
@@ -74,6 +75,7 @@ Architecture 文档回答“代码和系统边界怎么分”：
 Delivery 文档回答“平台如何接入、部署、验收、运维”：
 
 - [接口清单](../delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)：平台接口和 SDK。
+- [OCR Post Process 使用说明书](../delivery/POST_PROCESS_USAGE_GUIDE.md)：provider-neutral 输入契约、Python 嵌入式入口和服务化前置条件。
 - [安全契约](../delivery/SECURITY_AND_INTEGRATION_CONTRACT.md)：生产鉴权、上下文、签名、文件访问和限流。
 - [部署与运维指南](../delivery/OPERATIONS_GUIDE.md)：部署、回滚、排障和性能容量建议。
 - [错误码与状态机](../delivery/ERROR_AND_STATUS_GUIDE.md)：状态、错误码、重试规则和展示建议。

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Question Engine API
-  version: 1.1.0
+  version: 1.2.0
   description: >
     question-engine 本期稳定能力契约。该契约面向公司教育生态平台，
     覆盖能力目录、题目加工任务、标准题目包、OCR/AI/导出/file/callback
@@ -186,8 +186,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/OcrFlowDescriptor"
   /api/capabilities/ocr-flow/runtime:
     get:
       tags: [runtime]
@@ -763,6 +762,44 @@ components:
           type: object
           additionalProperties:
             type: string
+      additionalProperties: true
+    OcrFlowDescriptor:
+      type: object
+      required: [code, name, boundary, defaultProvider, providerContract, postProcessContract]
+      properties:
+        code:
+          type: string
+          example: ocr-flow
+        name:
+          type: string
+        boundary:
+          type: string
+        defaultProvider:
+          type: string
+          example: mineru
+        providerContract:
+          type: object
+          description: OCR provider 及其 adapter 必须输出 canonical-ocr-bundle.v1。
+          additionalProperties: true
+        postProcessContract:
+          type: object
+          description: Provider-neutral Post Process 的稳定输入、入口与兼容输出说明。
+          additionalProperties: true
+        preprocessors:
+          type: array
+          items: { type: object, additionalProperties: true }
+        configKeys:
+          type: object
+          additionalProperties: { type: string }
+        javaEndpoints:
+          type: object
+          additionalProperties: { type: string }
+        workerEndpoints:
+          type: object
+          additionalProperties: { type: string }
+        replaceProviderStrategy:
+          type: array
+          items: { type: string }
       additionalProperties: true
     CreateProcessingJobRequest:
       type: object

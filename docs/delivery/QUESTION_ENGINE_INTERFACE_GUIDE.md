@@ -10,7 +10,7 @@
 - 创建加工任务、查询任务、获取标准题目包、人工校验、AI 解析、题图、导出和回调的出入参。
 - Python worker 在工程中的职责，以及平台侧不应直接依赖的兼容接口。
 
-本说明书是开发者使用入口；正式机器可读契约以 `question-engine/openapi/question-engine.v1.yaml` 为准。当前 OpenAPI 契约版本为 `1.1.0`，`question-package.v1` 输出包结构保持兼容。
+本说明书是开发者使用入口；正式机器可读契约以 `question-engine/openapi/question-engine.v1.yaml` 为准。当前 OpenAPI 契约版本为 `1.2.0`，新增强类型 OCR provider/Post Process 能力描述，`question-package.v1` 输出包结构保持兼容。
 
 ## 2. question-engine 作用
 
@@ -32,7 +32,7 @@
 - 导入题继续使用既有 `images[]` 和 `imagePlacements[]`，没有新增破坏性 API 字段。
 - worker/Java 题目原始快照可附带 `imagePlacementValidation`，其中 `blockingReasons` 是稳定机器码；Java 会将其放入单题和全局标准化的 `structuredHints`。
 - `POST /api/import-tasks/{taskId}/canonicalization/preview` 可附带 `structureDiffs[]`，列出 `optionCountBefore/After`、题图 `oldTarget/newTarget`、confidence 和 alternatives。apply/rollback 路径不变。
-- 本次没有修改 `question-engine.v1.yaml`：上述字段均位于既有可扩展题目快照/preview 响应中，`question-package.v1` 的 `images` 与 `imagePlacements` 结构保持兼容。
+- OpenAPI `1.2.0` 只增强 OCR-Flow 能力描述类型；题目快照/preview 的可扩展字段以及 `question-package.v1` 的 `images` 与 `imagePlacements` 结构保持兼容。
 
 平台负责：
 
@@ -406,8 +406,12 @@ GET /api/capabilities/ocr-flow
 | --- | --- |
 | `defaultProvider` | 默认 provider，目前是 `mineru` |
 | `providerContract.status` | provider 可用性、命令位置、版本和错误原因 |
-| `providerContract.run` | 输入 jobId、uploadPath、runtime，输出统一 OCR job outputs |
-| `providerContract.outputs` | markdown、json、assets、sections、questions、mathValidation |
+| `providerContract.run` | 输入 jobId、uploadPath、runtime，原生结果经 adapter 转成统一 OCR 证据包 |
+| `providerContract.outputSchema` | 固定为 `canonical-ocr-bundle.v1` |
+| `providerContract.requiredEvidence` | documentId、inputSha256、canonicalMarkdown |
+| `postProcessContract.inputSchema` | Post Process 接收的统一证据包版本 |
+| `postProcessContract.entrypoint` | Python worker 内的稳定嵌入式入口 |
+| `postProcessContract.outputCompatibility` | 兼容现有 `collect_outputs` 外观 |
 | `configKeys` | OCR provider 相关环境变量 |
 | `workerEndpoints` | Java 内部调用的 worker 接口 |
 
@@ -437,7 +441,7 @@ GET /api/capabilities/ocr-flow/runtime
 | `GET` | `/worker/ocr/{jobId}/result` | 获取 OCR 结果 |
 | `POST` | `/worker/ocr/{jobId}/retry` | 重试 OCR job |
 
-未来替换 MinerU 时，应优先新增 Python `OcrProvider` 实现并保持 worker 输出不变，而不是改 Java 业务 API。
+未来替换 MinerU 时，应新增 Python `OcrProvider` 和 provider adapter，输出 `CanonicalOcrBundle` 后进入统一 Post Process，而不是改 Java 业务 API。详细字段和示例见 [OCR Post Process 使用说明书](POST_PROCESS_USAGE_GUIDE.md)。
 
 ## 9. 人工校验和原文件预览
 

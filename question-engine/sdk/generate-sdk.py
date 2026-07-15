@@ -15,7 +15,7 @@ OPENAPI = ROOT / "openapi" / "question-engine.v1.yaml"
 
 REQUIRED_OPENAPI_ITEMS = [
     "openapi: 3.0.3",
-    "version: 1.1.0",
+    "version: 1.2.0",
     "securitySchemes:",
     "PlatformBearerAuth:",
     "TenantHeader:",
@@ -84,6 +84,7 @@ EXPECTED_SDK_METHODS = [
     "getEngineInterfaces",
     "getDeliveryBoundary",
     "getQuestionProcessingCapability",
+    "getOcrFlowCapability",
     "getProcessingJob",
     "getQuestionPackage",
     "rescanImportTask",
@@ -117,6 +118,7 @@ REQUIRED_SCHEMA_FIELDS = {
     "CanonicalizationPreview": ["applyToken", "summary", "questions", "blockingIssues"],
     "CanonicalizationApplyRequest": ["applyToken"],
     "StandardizationBatchJob": ["id", "taskId", "status", "totalQuestions", "totalItems", "maxConcurrency"],
+    "OcrFlowDescriptor": ["code", "name", "boundary", "defaultProvider", "providerContract", "postProcessContract"],
 }
 
 

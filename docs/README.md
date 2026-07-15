@@ -7,6 +7,7 @@
 - [开发手册](development/DEVELOPMENT_GUIDE.md)：新开发者先读，说明 question-engine/SDK 能解决什么问题、阅读顺序、按任务查文档方式和项目搭建路径。
 - [贡献与同步规则](development/CONTRIBUTING.md)：每次改代码前读，说明接口、OpenAPI、SDK、测试、文档和部署配置的固定同步流程。
 - [接口清单](delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)：平台开发者对接 question-engine 时读，说明核心接口、出入参、回调、SDK 和不推荐接入方式。
+- [OCR Post Process 使用说明书](delivery/POST_PROCESS_USAGE_GUIDE.md)：接入 MinerU、腾讯 OCR 或其它 provider 时读，说明 `CanonicalOcrBundle`、嵌入式入口、校验和质量门禁。
 - [交付包说明](delivery/DELIVERY_PACKAGE.md)：交付给平台团队前读，说明包含/排除目录、打包命令和验收规则。
 
 ## 文档版本管理
@@ -44,7 +45,7 @@ docs/
 - [架构图索引与版本治理](architecture/README.md)：说明 `docs/architecture` 下每张流程图的状态、用途、重复边界、合并建议和 Mermaid 渲染规则。
 - [技术设计](architecture/TECHNICAL_DESIGN.md)：后端、前端、存储、MinerU、大模型拆题、OCR-Flow 结构契约、LLM 置信度门控与耗时指标、选择题/空位题结构保护、题目 crop 视觉修复、公式标准化、首次返回前自动标准化、AI 标准化可靠候选、布局解析框只读定位、AI 语义修复、试卷 DOCX/PDF 导出和人工编辑集成设计。
 - [Engine 交付边界](architecture/ENGINE_DELIVERY_BOUNDARY.md)：题库能力发动机交付边界、平台职责、Java/Python 分工和本地小平台排除范围。
-- [架构决策记录](architecture/decisions/README.md)：Java 主后端、Python worker、MinerU provider、本地 H2 模式等关键 ADR。
+- [架构决策记录](architecture/decisions/README.md)：Java 主后端、Python worker、MinerU provider、provider-neutral Post Process、本地 H2 模式等关键 ADR。
 - [OCR-Flow 主链路图](architecture/ocr-flow.mmd)：导入、OCR、结构契约拆题、视觉修复、公式校验、首次返回前自动标准化、布局解析框解耦、AI 增强和人工校验的端到端流程。
 - [服务器 OCR-Flow 算力边界图](architecture/server-ocr-flow.mmd)：服务器部署视角的 OCR-Flow，标注本地 CPU/GPU 算力、可选本地基础设施和外部大模型 API。
 - `architecture/*.mmd` / `architecture/*.svg`：Mermaid 架构图和流程图。
@@ -52,12 +53,13 @@ docs/
 ## Delivery
 
 - [接口清单](delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md)：question-engine 封装接口说明书，包含 `question-package.v1`、选择题/空位题输出约束、小问字段和组卷 `subSelections`。
+- [OCR Post Process 使用说明书](delivery/POST_PROCESS_USAGE_GUIDE.md)：统一 OCR 证据包、provider adapter、Python 嵌入式入口、SDK 决策和替换 provider 的验证方法。
 - [安全与集成契约](delivery/SECURITY_AND_INTEGRATION_CONTRACT.md)：平台鉴权、上下文 header、callback 签名、文件访问和限流责任边界。
 - [部署与运维指南](delivery/OPERATIONS_GUIDE.md)：生产部署、环境变量、OCR/LLM 并发与效率开关、启动顺序、健康检查、回滚、排障树和性能基准。
 - [错误码与状态机](delivery/ERROR_AND_STATUS_GUIDE.md)：正式错误码、状态机、可重试规则和平台展示建议。
 - [验收标准与验收套件](delivery/ACCEPTANCE.md)：本期统一验收标准和插件级验收脚本。
 - [交付包说明](delivery/DELIVERY_PACKAGE.md)：交付包边界、清理规则、打包方式和交付前检查。
-- 当前 SDK/OpenAPI 版本为 `1.1.0`；TOGO 移交包可通过 `scripts/package_question_engine_delivery.py --release-name ...` 生成带版本名的压缩包和 manifest。
+- 当前 SDK/OpenAPI 版本为 `1.2.0`；新增强类型 `getOcrFlowCapability()`，`question-package.v1` 保持兼容。TOGO 移交包可通过 `scripts/package_question_engine_delivery.py --release-name ...` 生成带版本名的压缩包和 manifest。
 
 ## Server
 

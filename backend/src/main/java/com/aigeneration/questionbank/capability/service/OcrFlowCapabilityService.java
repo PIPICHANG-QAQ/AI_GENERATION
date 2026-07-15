@@ -68,12 +68,20 @@ public class OcrFlowCapabilityService {
         Map<String, Object> descriptor = new LinkedHashMap<>();
         descriptor.put("code", CAPABILITY_CODE);
         descriptor.put("name", "OCR-Flow 试卷识别加工能力");
-        descriptor.put("boundary", "接收原始试卷/答案文件，完成预处理、OCR provider 调用、输出收集、结构化拆题、公式标准化和 AI 补全；不负责平台用户、权限、最终题库主数据和业务审核流。");
+        descriptor.put("boundary", "接收原始试卷/答案文件，完成预处理、OCR provider 调用、统一证据适配、后处理、结构化拆题、公式标准化和 AI 补全；不负责平台用户、权限、最终题库主数据和业务审核流。");
         descriptor.put("defaultProvider", "mineru");
         descriptor.put("providerContract", Map.of(
                 "status", "返回 provider 是否可用、命令位置、版本和错误原因。",
-                "run", "输入 jobId、uploadPath 和 runtime，输出统一 OCR job outputs。",
-                "outputs", List.of("markdown", "json", "assets", "sections", "questions", "mathValidation")
+                "run", "输入 jobId、uploadPath 和 runtime，输出 provider 原生结果并适配为统一 OCR 证据包。",
+                "outputSchema", "canonical-ocr-bundle.v1",
+                "requiredEvidence", List.of("documentId", "inputSha256", "canonicalMarkdown"),
+                "optionalEvidence", List.of("assets", "pages", "layoutBlocks", "sourceDocumentRef", "producer", "nativeArtifacts", "capabilities")
+        ));
+        descriptor.put("postProcessContract", Map.of(
+                "inputSchema", "canonical-ocr-bundle.v1",
+                "entrypoint", "app.ocr.OcrPostProcessingPipeline.run_bundle",
+                "outputCompatibility", "legacy-collect-outputs",
+                "responsibilities", List.of("assets", "sections", "questions", "mathValidation", "questionImages")
         ));
         descriptor.put("preprocessors", List.of(
                 Map.of("name", "markdown-direct", "extensions", List.of(".md", ".markdown")),
@@ -97,9 +105,10 @@ public class OcrFlowCapabilityService {
         ));
         descriptor.put("replaceProviderStrategy", List.of(
                 "在 Python worker 增加新的 OcrProvider 实现。",
+                "使用 provider adapter 把原生结果转换为 canonical-ocr-bundle.v1。",
                 "通过 OCR_FLOW_PROVIDER 切换 provider 名称。",
                 "通过 OCR_FLOW_EXTENSIONS 调整 provider 可接收的文件后缀。",
-                "保持 collect_outputs 输出结构不变，避免改动 Java 业务 API 和前端。"
+                "保持 CanonicalOcrBundle 输入契约和后处理输出兼容层稳定，避免改动 Java 业务 API 和前端。"
         ));
         return descriptor;
     }

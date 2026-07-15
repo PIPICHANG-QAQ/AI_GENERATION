@@ -1,12 +1,14 @@
 # 代码结构与可迁移性评审
 
-日期：2026-07-14
+日期：2026-07-15
 
 ## 结论
 
 当前项目仍然基本保持最初的可迁移、模块化交付方向：`question-engine` 作为能力发动机，Java 主后端提供稳定 API、状态和文件编排，Python worker 承担 OCR / AI / LaTeX / 导出等可替换执行能力，`local-platform` 保持为本地演示工作台。
 
 本轮已把“布局解析框”在代码层封装为 `PaperLayoutCapability`，它对外只暴露 `paperLayout`、页图渲染和题图几何辅助能力；前端和 Java bridge 不需要理解 MinerU 的内部目录、`_middle.json` 或 `content_list` 差异。
+
+本轮同时明确 SDK 交付边界：平台远程调用统一使用 Question Engine Java/TypeScript SDK；Python worker 内的新 provider 使用 `app.ocr` 的 `CanonicalOcrBundle` / `OcrPostProcessingPipeline` 嵌入式入口。当前不复制第二套远程算法 SDK，待 Artifact Resolver、异步 job、安全和配额契约完备后再评估 Post Process 服务化。
 
 整体评级：
 
@@ -15,6 +17,7 @@
 | 可迁移性 | 基本达标 | 有 TOGO/交付脚本、OpenAPI/SDK、portability check、Docker server compose；真实密钥和运行数据未纳入交付包 |
 | 模块化 | 基本达标 | Java capability / engine / domain 分层清晰；Python worker 能力模块已拆分，但部分模块仍偏大 |
 | OCR provider 可替换性 | 基本达标（兼容期） | Provider 成功后返回 `CanonicalOcrBundle v1`；MinerU 的现有工件由 `MineruOcrBundleAdapter` 归一，统一后处理才开始执行。视觉修复仍通过只读 `artifactRoot` 兼容当前本地文件 I/O。 |
+| SDK 边界 | 基本达标 | OpenAPI `1.2.0` 和 Java/TypeScript SDK 提供远程能力调用；`app.ocr` 提供 Python worker 内嵌 Post Process 入口，未重复发布算法 SDK。 |
 | 前端可替换性 | 中等 | `local-platform` 是演示壳，API adapter 相对集中；但工作台组件仍较大，后续嵌入正式平台时建议拆出 layout overlay / question editor 子组件包 |
 | 服务器可复现性 | 基本达标 | `docker-compose.server.yml`、`docs/server`、GPU 分配和 MinerU 缓存策略已文档化；公网 80 入站仍受上游网络限制 |
 
@@ -86,6 +89,10 @@
 5. 文档和流程图需要随能力边界持续版本化。
    - 风险：功能快速迭代后，流程图容易滞后于代码。
    - 建议：每次新增或改能力时同步检查 `docs/architecture/README.md` 中列出的 current-primary 图，以及 `docs/delivery/QUESTION_ENGINE_INTERFACE_GUIDE.md`。
+
+6. Post Process 尚未成为独立无状态服务。
+   - 风险：`artifactRoot`、worker job 和本地工件上下文使其不能安全地被远程 SDK 直接调用。
+   - 建议：先实现 Artifact Resolver、异步幂等任务、安全/配额和黄金样本门禁，再讨论独立服务或第二套 SDK。
 
 ## 下一步建议
 
