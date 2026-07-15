@@ -269,12 +269,30 @@ class VenvRelocationTest(unittest.TestCase):
                 self._write_entrypoint(bin_dir / name, staging_python)
             non_executable = bin_dir / "not-an-entrypoint"
             non_executable.write_text(f"#!{staging_python}\n", encoding="utf-8")
+            activation_text_files = [
+                bin_dir / name
+                for name in (
+                    "activate",
+                    "activate.csh",
+                    "activate.fish",
+                    "Activate.ps1",
+                    "activate.bat",
+                    "activate_this.py",
+                )
+            ]
+            for activation_file in activation_text_files:
+                activation_file.write_text(f"VIRTUAL_ENV={paths.staging}\n", encoding="utf-8")
             binary = bin_dir / "binary-tool"
             binary.write_bytes(b"\x00\xff" + os.fsencode(paths.staging))
             binary.chmod(0o755)
+            binary_activation = bin_dir / "activate.xsh"
+            binary_activation.write_bytes(b"\xff" + os.fsencode(paths.staging))
             symlink_target = root / "outside-entrypoint"
             self._write_entrypoint(symlink_target, staging_python)
             (bin_dir / "linked-tool").symlink_to(symlink_target)
+            symlink_activation_target = root / "outside-activate"
+            symlink_activation_target.write_text(f"VIRTUAL_ENV={paths.staging}\n", encoding="utf-8")
+            (bin_dir / "activate.nu").symlink_to(symlink_activation_target)
             pyvenv_cfg = paths.staging / "pyvenv.cfg"
             pyvenv_cfg.write_text(f"command = python -m venv {paths.staging}\n", encoding="utf-8")
             pth = site_packages / "editable.pth"
@@ -294,6 +312,7 @@ class VenvRelocationTest(unittest.TestCase):
                 pyvenv_cfg,
                 pth,
                 egg_link,
+                *activation_text_files,
             }
             self.assertEqual(expected_rewritten, set(rewritten))
             for name in ("mineru", "mineru-api", "other-tool"):
@@ -301,10 +320,48 @@ class VenvRelocationTest(unittest.TestCase):
             self.assertIn(str(paths.active), pyvenv_cfg.read_text(encoding="utf-8"))
             self.assertIn(str(paths.active), pth.read_text(encoding="utf-8"))
             self.assertIn(str(paths.active), egg_link.read_text(encoding="utf-8"))
+            for activation_file in activation_text_files:
+                activation_text = activation_file.read_text(encoding="utf-8")
+                self.assertIn(str(paths.active), activation_text)
+                self.assertNotIn(str(paths.staging), activation_text)
             self.assertEqual(f"#!{staging_python}\n", non_executable.read_text(encoding="utf-8"))
             self.assertEqual(b"\x00\xff" + os.fsencode(paths.staging), binary.read_bytes())
+            self.assertEqual(b"\xff" + os.fsencode(paths.staging), binary_activation.read_bytes())
             self.assertEqual(f"#!{staging_python}\nprint('ok')\n", symlink_target.read_text(encoding="utf-8"))
+            self.assertEqual(
+                f"VIRTUAL_ENV={paths.staging}\n",
+                symlink_activation_target.read_text(encoding="utf-8"),
+            )
             self.assertEqual(b"\xff" + os.fsencode(paths.staging), binary_pth.read_bytes())
+
+    def test_relocation_assertion_rejects_known_activation_and_config_text_residuals(self) -> None:
+        relative_candidates = (
+            Path("bin/activate"),
+            Path("bin/activate.csh"),
+            Path("bin/activate.fish"),
+            Path("bin/Activate.ps1"),
+            Path("bin/activate.bat"),
+            Path("bin/activate.nu"),
+            Path("bin/activate.xsh"),
+            Path("bin/activate_this.py"),
+            Path("pyvenv.cfg"),
+            Path("lib/python3.12/site-packages/editable.pth"),
+            Path("lib/python3.12/site-packages/editable.egg-link"),
+        )
+        for relative in relative_candidates:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as tmp:
+                paths = rebuild_mineru_venv.build_paths(Path(tmp) / "vendor" / "mineru-venv", "fixed")
+                bin_dir = paths.staging / "bin"
+                bin_dir.mkdir(parents=True)
+                active_python = paths.active / "bin" / "python"
+                self._write_entrypoint(bin_dir / "mineru", active_python)
+                self._write_entrypoint(bin_dir / "mineru-api", active_python)
+                candidate = paths.staging / relative
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                candidate.write_text(f"reference={paths.staging}\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(RuntimeError, "activation/config"):
+                    rebuild_mineru_venv.assert_relocated(paths.staging, paths.active)
 
     def test_relocation_assertion_rejects_staging_shebang_and_wrong_required_entrypoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -378,7 +435,43 @@ class VenvRelocationTest(unittest.TestCase):
 
             rebuild_mineru_venv.relocate_venv(paths.staging, paths.active)
             rebuild_mineru_venv.assert_relocated(paths.staging, paths.active)
+            activation_names = (
+                "activate",
+                "activate.csh",
+                "activate.fish",
+                "Activate.ps1",
+                "activate.bat",
+                "activate.nu",
+                "activate.xsh",
+                "activate_this.py",
+            )
+            for name in activation_names:
+                activation_file = paths.staging / "bin" / name
+                if activation_file.is_file() and not activation_file.is_symlink():
+                    activation_text = activation_file.read_text(encoding="utf-8")
+                    self.assertNotIn(str(paths.staging), activation_text)
             rebuild_mineru_venv.activate(paths)
+
+            activation_probe = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1/bin/activate"\n'
+                    'printf "%s\\n" "$VIRTUAL_ENV"\n'
+                    "command -v python\n"
+                    "python -c 'import sys; print(sys.prefix)'\n",
+                    "bash",
+                    str(paths.active),
+                ],
+                check=True,
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+            )
+            virtual_env, resolved_python, activated_prefix = activation_probe.stdout.splitlines()
+            self.assertEqual(str(paths.active), virtual_env)
+            self.assertEqual(str(paths.active / "bin" / "python"), resolved_python)
+            self.assertEqual(paths.active.resolve(), Path(activated_prefix).resolve())
 
             after = subprocess.run(
                 [str(paths.active / "bin" / "mineru")],
@@ -419,6 +512,48 @@ class VenvValidationTest(unittest.TestCase):
             ),
             rebuild_mineru_venv.RUNTIME_IMPORT_PROBE,
         )
+
+    def test_version_parser_accepts_one_exact_line_with_unrelated_warnings(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["mineru", "--version"],
+            0,
+            stdout="startup warning\n  MiNeRu  ,  VERSION   3.4.2  \ncache warning\n",
+            stderr="optional dependency warning\n",
+        )
+
+        rebuild_mineru_venv._require_version(completed, "3.4.2")
+
+    def test_version_parser_rejects_nonexact_missing_and_ambiguous_output(self) -> None:
+        invalid_outputs = {
+            "prerelease": ("mineru, version 3.4.2rc1\n", ""),
+            "postrelease": ("mineru, version 3.4.2.post1\n", ""),
+            "warning_mentions_expected": (
+                "warning: expected 3.4.2\nmineru, version 3.4.1\n",
+                "",
+            ),
+            "missing_line_mentions_expected": ("installed MinerU package 3.4.2\n", ""),
+            "missing_line": ("MinerU version is unavailable\n", ""),
+            "malformed_line": ("mineru, version 3.4.2 extra\n", ""),
+            "duplicate_lines": (
+                "mineru, version 3.4.2\nmineru, version 3.4.2\n",
+                "",
+            ),
+            "conflicting_lines": (
+                "mineru, version 3.4.2\n",
+                "mineru, version 3.4.1\n",
+            ),
+        }
+        for name, (stdout, stderr) in invalid_outputs.items():
+            with self.subTest(name=name):
+                completed = subprocess.CompletedProcess(
+                    ["mineru", "--version"],
+                    0,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+                with self.assertRaises(RuntimeError):
+                    rebuild_mineru_venv._require_version(completed, "3.4.2")
 
     def test_staging_validation_uses_exact_commands_and_explicit_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

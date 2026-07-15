@@ -30,6 +30,21 @@ RUNTIME_IMPORT_PROBE = "\n".join(
         "assert Markup and Environment and transformers and read_fn",
     )
 )
+ACTIVATION_FILE_NAMES = (
+    "activate",
+    "activate.csh",
+    "activate.fish",
+    "Activate.ps1",
+    "activate.ps1",
+    "activate.bat",
+    "activate.nu",
+    "activate.xsh",
+    "activate_this.py",
+)
+MINERU_VERSION_LINE = re.compile(
+    r"^\s*mineru\s*,\s*version\s+(\S+)\s*$",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -184,17 +199,20 @@ def _regular_file_mode(path: Path) -> int | None:
 
 
 def _rewrite_utf8_file(path: Path, old: str, new: str) -> bool:
-    if _regular_file_mode(path) is None:
-        return False
-    data = path.read_bytes()
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    if old not in text:
+    text = _read_utf8_regular_file(path)
+    if text is None or old not in text:
         return False
     path.write_text(text.replace(old, new), encoding="utf-8")
     return True
+
+
+def _read_utf8_regular_file(path: Path) -> str | None:
+    if _regular_file_mode(path) is None:
+        return None
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _executable_bin_files(venv: Path):
@@ -207,6 +225,21 @@ def _executable_bin_files(venv: Path):
             yield path
 
 
+def _relocation_text_files(venv: Path) -> list[Path]:
+    candidates = [
+        venv / "pyvenv.cfg",
+        *(venv / "bin" / name for name in ACTIVATION_FILE_NAMES),
+    ]
+    for root, _directories, files in os.walk(venv, followlinks=False):
+        root_path = Path(root)
+        candidates.extend(
+            root_path / filename
+            for filename in files
+            if filename.endswith((".pth", ".egg-link"))
+        )
+    return sorted(set(candidates), key=lambda item: item.as_posix())
+
+
 def relocate_venv(staging: Path, active: Path) -> list[Path]:
     old = str(staging)
     new = str(active)
@@ -217,15 +250,7 @@ def relocate_venv(staging: Path, active: Path) -> list[Path]:
             if _rewrite_utf8_file(path, old, new):
                 rewritten.append(path)
 
-    config_files = [staging / "pyvenv.cfg"]
-    for root, _directories, files in os.walk(staging, followlinks=False):
-        root_path = Path(root)
-        config_files.extend(
-            root_path / filename
-            for filename in files
-            if filename.endswith((".pth", ".egg-link"))
-        )
-    for path in sorted(set(config_files), key=lambda item: item.as_posix()):
+    for path in _relocation_text_files(staging):
         if _rewrite_utf8_file(path, old, new):
             rewritten.append(path)
     return rewritten
@@ -237,6 +262,11 @@ def assert_relocated(staging: Path, active: Path) -> None:
         first_line = path.read_bytes().splitlines()[:1]
         if first_line and first_line[0].startswith(b"#!") and staging_bytes in first_line[0]:
             raise RuntimeError(f"executable retains staging shebang: {path}")
+
+    for path in _relocation_text_files(staging):
+        text = _read_utf8_regular_file(path)
+        if text is not None and str(staging) in text:
+            raise RuntimeError(f"activation/config text retains staging prefix: {path}")
 
     expected = f"#!{active / 'bin' / 'python'}"
     for name in ("mineru", "mineru-api"):
@@ -281,9 +311,19 @@ def _run_checked(
 
 def _require_version(completed: subprocess.CompletedProcess[str], expected_version: str) -> None:
     output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
-    pattern = rf"(?<![\d.]){re.escape(expected_version)}(?![\d.])"
-    if re.search(pattern, output) is None:
-        raise RuntimeError(f"MinerU version check expected {expected_version}, got: {output or '<empty>'}")
+    versions = [
+        match.group(1)
+        for line in output.splitlines()
+        if (match := MINERU_VERSION_LINE.fullmatch(line)) is not None
+    ]
+    if len(versions) != 1:
+        raise RuntimeError(
+            f"MinerU version check expected exactly one version line for {expected_version}, "
+            f"found {len(versions)}: {output or '<empty>'}"
+        )
+    actual_version = versions[0]
+    if actual_version != expected_version:
+        raise RuntimeError(f"MinerU version check expected {expected_version}, got {actual_version}")
 
 
 def write_manifest(venv: Path, mineru_version: str, package_list: str) -> Path:
