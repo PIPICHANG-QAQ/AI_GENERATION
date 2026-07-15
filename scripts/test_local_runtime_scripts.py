@@ -223,6 +223,105 @@ class LocalRuntimeScriptsTest(unittest.TestCase):
             self.assertIn(record_call, section)
             self.assertLess(section.index(record_call), section.index("exec "))
 
+    def test_deploy_fails_closed_when_port_stop_fails_before_port_appears_free(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            scripts_dir = root / "scripts"
+            scripts_dir.mkdir()
+            deploy = scripts_dir / "deploy_local.sh"
+            identity = scripts_dir / "local_process_identity.sh"
+            shutil.copy2(DEPLOY_LOCAL_SCRIPT, deploy)
+            shutil.copy2(LOCAL_PROCESS_IDENTITY_SCRIPT, identity)
+            deploy.chmod(0o755)
+            identity.chmod(0o755)
+            stop = scripts_dir / "stop_local.sh"
+            stop.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            stop.chmod(0o755)
+
+            worker_python = root / "backend" / "python-worker" / ".venv" / "bin" / "python"
+            worker_python.parent.mkdir(parents=True)
+            worker_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            worker_python.chmod(0o755)
+
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            port_reads = root / "port-reads"
+            identity_reads = root / "identity-reads"
+            start_calls = root / "start-calls"
+            (fake_bin / "lsof").write_text(
+                f"""#!/usr/bin/env bash
+if [[ "$*" == *'-tiTCP:8000'* ]]; then
+  reads=0
+  if [[ -f "$PORT_READS" ]]; then reads="$(<\"$PORT_READS\")"; fi
+  reads=$((reads + 1))
+  printf '%s\\n' "$reads" > "$PORT_READS"
+  if (( reads <= 3 )); then printf '4242\\n'; fi
+  exit 0
+fi
+if [[ "$*" == *'-d cwd'* ]]; then printf 'p4242\\nn{root}\\n'; fi
+""",
+                encoding="utf-8",
+            )
+            (fake_bin / "ps").write_text(
+                f"""#!/usr/bin/env bash
+case "$*" in
+  *'stat='*) printf 'S\\n' ;;
+  *'lstart='*)
+    reads=0
+    if [[ -f "$IDENTITY_READS" ]]; then reads="$(<\"$IDENTITY_READS\")"; fi
+    reads=$((reads + 1))
+    printf '%s\\n' "$reads" > "$IDENTITY_READS"
+    if (( reads == 1 )); then printf 'Mon Jan 1 00:00:00 2024\\n'; fi
+    ;;
+  *'command='*) printf '%s\\n' '{root}/backend/python-worker/.venv/bin/python -m uvicorn app.main:app --app-dir backend/python-worker' ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            (fake_bin / "kill").write_text(
+                "#!/usr/bin/env bash\n[[ \"$1\" == \"-0\" ]] && exit 0\nexit 1\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "screen").write_text(
+                """#!/usr/bin/env bash
+if [[ "$1" == "-dmS" ]]; then printf '%s\n' "$*" >> "$START_CALLS"; fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            (fake_bin / "curl").write_text(
+                "#!/usr/bin/env bash\nprintf '{\"reachable\":true}\\n'\n",
+                encoding="utf-8",
+            )
+            for command in ("python", "mvn", "sleep"):
+                (fake_bin / command).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            for path in fake_bin.iterdir():
+                path.chmod(0o755)
+            bash_env = root / "bash-env"
+            bash_env.write_text("enable -n kill\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                ["bash", str(deploy), "--strict-ports", "--skip-smoke"],
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "BASH_ENV": str(bash_env),
+                    "PORT_READS": str(port_reads),
+                    "IDENTITY_READS": str(identity_reads),
+                    "START_CALLS": str(start_calls),
+                    "STOP_LOCAL_WAIT_ATTEMPTS": "1",
+                    "STOP_LOCAL_WAIT_INTERVAL": "0",
+                },
+                text=True,
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertFalse(start_calls.exists())
+            self.assertNotIn("Deploy OK", completed.stdout)
+
     def test_pid_record_writer_uses_version_and_atomic_replace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "python-worker.pid"

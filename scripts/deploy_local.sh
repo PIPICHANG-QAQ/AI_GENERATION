@@ -164,7 +164,10 @@ resolve_port() {
 
   if all_port_pids_belong_to_service "${service}" "${requested}"; then
     echo "Port ${requested} for ${label} is used by this project; restarting it." >&2
-    stop_service_pids_on_port "${service}" "${requested}"
+    if ! stop_service_pids_on_port "${service}" "${requested}"; then
+      echo "Could not safely stop ${label} on port ${requested}." >&2
+      return 1
+    fi
     sleep 1
     if ! port_is_free "${requested}"; then
       echo "Port ${requested} for ${label} is still occupied after stop." >&2
@@ -406,10 +409,19 @@ install_dependencies
 
 stop_current_project_pids
 
-PYTHON_WORKER_PORT="$(resolve_port "python-worker" "Python worker" "${PYTHON_WORKER_PORT}")"
-JAVA_BACKEND_PORT="$(resolve_port "java-backend" "Java backend" "${JAVA_BACKEND_PORT}")"
+if ! PYTHON_WORKER_PORT="$(resolve_port "python-worker" "Python worker" "${PYTHON_WORKER_PORT}")"; then
+  echo "Failed to resolve Python worker port." >&2
+  exit 1
+fi
+if ! JAVA_BACKEND_PORT="$(resolve_port "java-backend" "Java backend" "${JAVA_BACKEND_PORT}")"; then
+  echo "Failed to resolve Java backend port." >&2
+  exit 1
+fi
 if [[ "${FRONTEND_AVAILABLE}" == "true" ]]; then
-  FRONTEND_PORT="$(resolve_port "frontend" "frontend" "${FRONTEND_PORT}")"
+  if ! FRONTEND_PORT="$(resolve_port "frontend" "frontend" "${FRONTEND_PORT}")"; then
+    echo "Failed to resolve frontend port." >&2
+    exit 1
+  fi
 fi
 
 PYTHON_WORKER_URL="http://127.0.0.1:${PYTHON_WORKER_PORT}"
