@@ -102,6 +102,8 @@ REQUIRED_IN_PACKAGE = [
     "deploy/nginx.conf",
     "scripts/deploy_local.sh",
     "scripts/build_mineru_wheelhouse.sh",
+    "scripts/check_mineru.py",
+    "scripts/test_check_mineru.py",
     "scripts/acceptance_question_engine_plugin.py",
     "scripts/check_project_portability.py",
     "scripts/smoke_deploy_basic.py",

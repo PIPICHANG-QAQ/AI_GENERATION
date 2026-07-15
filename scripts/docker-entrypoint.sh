@@ -42,11 +42,23 @@ terminate() {
 trap terminate INT TERM
 
 if [[ "${MINERU_API_ENABLED}" == "true" ]]; then
+  /opt/question-engine/venv/bin/python /app/scripts/check_mineru.py --json --skip-api
   "${MINERU_API_COMMAND}" \
     --host "${MINERU_API_HOST}" \
     --port "${MINERU_API_PORT}" \
     --enable-vlm-preload "${MINERU_API_ENABLE_VLM_PRELOAD}" &
   pids+=("$!")
+  for attempt in $(seq 1 90); do
+    if /opt/question-engine/venv/bin/python /app/scripts/check_mineru.py --json --check-api; then
+      break
+    fi
+    if [[ "${attempt}" -eq 90 ]]; then
+      echo "MinerU API readiness failed" >&2
+      terminate
+      exit 1
+    fi
+    sleep 2
+  done
 fi
 
 /opt/question-engine/venv/bin/uvicorn app.main:app \

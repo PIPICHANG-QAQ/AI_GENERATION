@@ -72,8 +72,15 @@ services:
       - ./server-data/modelscope-cache:/root/.cache/modelscope
       - ${HOST_MINERU_VENV:-/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv}:${HOST_MINERU_VENV:-/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv}:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/java/health >/dev/null"]
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:8080/api/java/health >/dev/null &&
+          curl -fsS http://127.0.0.1:8018/api/capabilities/ocr-flow/runtime |
+          /opt/question-engine/venv/bin/python -c
+          'import json,sys; s=json.load(sys.stdin)["providerStatus"];
+          assert s["installed"] and s["runtimeProbeOk"] and s["apiReady"]'
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 5
-      start_period: 120s
+      start_period: 180s

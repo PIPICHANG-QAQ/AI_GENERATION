@@ -45,9 +45,9 @@ RUN python3 -m venv /opt/question-engine/venv \
 COPY backend/target/ai-question-bank-*.jar /app/backend/app.jar
 COPY local-platform/dist /usr/share/nginx/html
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
-COPY scripts/docker-entrypoint.sh /app/scripts/docker-entrypoint.sh
+COPY scripts/docker-entrypoint.sh scripts/check_mineru.py /app/scripts/
 
-RUN chmod +x /app/scripts/docker-entrypoint.sh \
+RUN chmod +x /app/scripts/docker-entrypoint.sh /app/scripts/check_mineru.py \
     && mkdir -p /data /app/backend/storage /run/nginx \
     && chown -R www-data:www-data /usr/share/nginx/html
 

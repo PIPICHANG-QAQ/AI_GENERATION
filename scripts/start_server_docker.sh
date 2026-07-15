@@ -37,6 +37,12 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ "${MINERU_API_ENABLED:-false}" == "true" ]]; then
+  echo "==> 检查宿主机 MinerU runtime"
+  MINERU_COMMAND="${MINERU_HOST_COMMAND:-$ROOT_DIR/vendor/mineru-venv/bin/mineru}" \
+    python3 scripts/check_mineru.py --json --skip-api
+fi
+
 echo "==> 构建 Java backend jar"
 if command -v mvn >/dev/null 2>&1; then
   (cd backend && mvn -DskipTests package)
@@ -73,6 +79,15 @@ for i in $(seq 1 60); do
   fi
   sleep 2
 done
+
+ocr_runtime_url="http://127.0.0.1:${HTTP_PORT}/api/capabilities/ocr-flow/runtime"
+if ! curl -fsS "$ocr_runtime_url" \
+  | python3 -c 'import json,sys; s=json.load(sys.stdin)["providerStatus"]; assert s["installed"] and s["runtimeProbeOk"] and s["apiReady"]'; then
+  echo "OCR runtime 检查失败：$ocr_runtime_url" >&2
+  docker compose -f docker-compose.server.yml ps >&2 || true
+  docker compose -f docker-compose.server.yml logs --tail=120 question-engine >&2 || true
+  exit 1
+fi
 
 echo
 echo "启动完成。"

@@ -4,6 +4,8 @@ import sys
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
@@ -84,6 +86,24 @@ class MineruOcrProviderTest(unittest.TestCase):
 
         return run
 
+    @staticmethod
+    def _healthy_resolution(command: ProviderCommand) -> dict[str, object]:
+        return {
+            "selectedSource": command.source,
+            "selectedCommand": command.display,
+            "version": "3.4.2",
+            "versionProbeOk": True,
+            "runtimeProbeOk": True,
+            "runtimePython": str(command.args[0]),
+            "candidates": [],
+        }
+
+    @staticmethod
+    def _openapi_response(payload: bytes, status: int = 200):
+        response = BytesIO(payload)
+        response.status = status
+        return response
+
     def _write_non_utf8_runtime(self, app_root: Path) -> tuple[ProviderCommand, Path]:
         runtime_python = app_root / "env" / "bin" / "python"
         runtime_python.parent.mkdir(parents=True)
@@ -161,6 +181,160 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertTrue(status["runtimeProbeOk"])
         self.assertEqual(str(runtime_python.absolute()), status["runtimePython"])
         self.assertIsNone(status["error"])
+
+    def test_status_check_api_accepts_valid_openapi_document(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, _runtime_python = self._write_local_python_mineru(app_root)
+            command = self._provider_command(command_path)
+            provider = MineruOcrProvider(app_root, 5)
+            response = self._openapi_response(b'{"openapi":"3.1.0","paths":{}}')
+
+            with patch.dict(
+                os.environ,
+                {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "http://127.0.0.1:8002/"},
+                clear=False,
+            ), patch.object(
+                provider,
+                "resolve_command",
+                return_value=(command, self._healthy_resolution(command)),
+            ), patch.object(urllib.request, "urlopen", return_value=response) as urlopen:
+                status = provider.status(check_api=True)
+
+        self.assertTrue(status["installed"])
+        self.assertTrue(status["runtimeProbeOk"])
+        self.assertTrue(status["apiEnabled"])
+        self.assertTrue(status["apiReady"])
+        self.assertEqual("http://127.0.0.1:8002/openapi.json", status["apiUrl"])
+        self.assertIsNone(status["apiError"])
+        urlopen.assert_called_once_with("http://127.0.0.1:8002/openapi.json", timeout=3.0)
+
+    def test_api_probe_rejects_invalid_json_paths_and_http_status(self):
+        cases = [
+            (b"not-json", 200),
+            (b"[]", 200),
+            (b'{"paths":[]}', 200),
+            (b'{"paths":{}}', 503),
+        ]
+        for payload, http_status in cases:
+            with self.subTest(payload=payload, http_status=http_status), tempfile.TemporaryDirectory() as tmp:
+                provider = MineruOcrProvider(Path(tmp), 5)
+                response = self._openapi_response(payload, http_status)
+                with patch.dict(
+                    os.environ,
+                    {"MINERU_API_URL": "http://127.0.0.1:8002"},
+                    clear=False,
+                ), patch.object(urllib.request, "urlopen", return_value=response):
+                    probe = provider._probe_api()
+
+                self.assertFalse(probe["apiReady"])
+                self.assertIn("apiEnabled", probe)
+                self.assertEqual("http://127.0.0.1:8002/openapi.json", probe["apiUrl"])
+                self.assertTrue(probe["apiError"])
+
+    def test_api_probe_reports_connection_refusal(self):
+        provider = MineruOcrProvider(Path("."), 5)
+        refused = urllib.error.URLError(ConnectionRefusedError("connection refused"))
+
+        with patch.dict(
+            os.environ,
+            {"MINERU_API_URL": "http://127.0.0.1:8002"},
+            clear=False,
+        ), patch.object(urllib.request, "urlopen", side_effect=refused):
+            probe = provider._probe_api()
+
+        self.assertFalse(probe["apiReady"])
+        self.assertIn("apiEnabled", probe)
+        self.assertIn("connection refused", probe["apiError"])
+
+    def test_status_check_api_false_skips_http_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, _runtime_python = self._write_local_python_mineru(app_root)
+            command = self._provider_command(command_path)
+            provider = MineruOcrProvider(app_root, 5)
+
+            with patch.dict(
+                os.environ,
+                {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "http://127.0.0.1:8002"},
+                clear=False,
+            ), patch.object(
+                provider,
+                "resolve_command",
+                return_value=(command, self._healthy_resolution(command)),
+            ), patch.object(urllib.request, "urlopen") as urlopen:
+                status = provider.status(check_api=False)
+
+        self.assertTrue(status["installed"])
+        self.assertTrue(status["runtimeProbeOk"])
+        self.assertTrue(status["apiEnabled"])
+        self.assertFalse(status["apiReady"])
+        urlopen.assert_not_called()
+
+    def test_status_default_checks_api_only_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, _runtime_python = self._write_local_python_mineru(app_root)
+            command = self._provider_command(command_path)
+            provider = MineruOcrProvider(app_root, 5)
+
+            with patch.dict(
+                os.environ,
+                {"MINERU_API_ENABLED": "false", "MINERU_API_URL": "http://127.0.0.1:8002"},
+                clear=False,
+            ), patch.object(
+                provider,
+                "resolve_command",
+                return_value=(command, self._healthy_resolution(command)),
+            ), patch.object(urllib.request, "urlopen") as urlopen:
+                disabled_status = provider.status()
+
+            response = self._openapi_response(b'{"paths":{}}')
+            with patch.dict(
+                os.environ,
+                {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "http://127.0.0.1:8002"},
+                clear=False,
+            ), patch.object(
+                provider,
+                "resolve_command",
+                return_value=(command, self._healthy_resolution(command)),
+            ), patch.object(urllib.request, "urlopen", return_value=response) as enabled_urlopen:
+                enabled_status = provider.status()
+
+        self.assertTrue(disabled_status["installed"])
+        self.assertFalse(disabled_status["apiEnabled"])
+        urlopen.assert_not_called()
+        self.assertTrue(enabled_status["installed"])
+        self.assertTrue(enabled_status["apiEnabled"])
+        self.assertTrue(enabled_status["apiReady"])
+        enabled_urlopen.assert_called_once()
+
+    def test_required_api_failure_marks_uninstalled_but_keeps_runtime_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, runtime_python = self._write_local_python_mineru(app_root)
+            command = self._provider_command(command_path)
+            provider = MineruOcrProvider(app_root, 5)
+            refused = urllib.error.URLError(ConnectionRefusedError("connection refused"))
+
+            with patch.dict(
+                os.environ,
+                {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "http://127.0.0.1:8002"},
+                clear=False,
+            ), patch.object(
+                provider,
+                "resolve_command",
+                return_value=(command, self._healthy_resolution(command)),
+            ), patch.object(urllib.request, "urlopen", side_effect=refused):
+                status = provider.status(check_api=True)
+
+        self.assertFalse(status["installed"])
+        self.assertTrue(status["runtimeProbeOk"])
+        self.assertEqual(str(command_path), status["command"][0])
+        self.assertEqual(str(command_path), status["runtimePython"])
+        self.assertFalse(status["apiReady"])
+        self.assertIn("connection refused", status["apiError"])
+        self.assertIn("connection refused", status["error"])
 
     def test_status_rejects_command_when_runtime_import_probe_fails(self):
         runtime_error = "ImportError: cannot import name 'Markup' from 'markupsafe'"
@@ -866,7 +1040,12 @@ class MineruOcrProviderTest(unittest.TestCase):
             request.output_dir.mkdir(parents=True)
             (request.output_dir / "paper.md").write_text("1. 题目", encoding="utf-8")
 
-            with patch.dict(os.environ, {"MINERU_API_URL": "http://127.0.0.1:8002"}), patch(
+            response = self._openapi_response(b'{"paths":{}}')
+            with patch.dict(os.environ, {"MINERU_API_URL": "http://127.0.0.1:8002"}), patch.object(
+                urllib.request,
+                "urlopen",
+                return_value=response,
+            ) as urlopen, patch(
                 "app.ocr_flow.subprocess.run",
                 return_value=subprocess.CompletedProcess([str(command_path)], 0, "", ""),
             ) as run:
@@ -878,6 +1057,44 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertEqual("http://127.0.0.1:8002", result.metadata["mineruApiUrl"])
         self.assertTrue(result.success)
         self.assertIsNotNone(result.bundle)
+        urlopen.assert_called_once_with("http://127.0.0.1:8002/openapi.json", timeout=3.0)
+
+    def test_run_aborts_before_output_and_ocr_when_configured_api_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, _runtime_python = self._write_local_python_mineru(app_root)
+            command = self._provider_command(command_path)
+            provider = MineruOcrProvider(app_root, 5)
+            request = OcrProviderRequest(
+                document_id="job-api-down",
+                input_path="paper.pdf",
+                output_dir=app_root / "outputs" / "job-api-down",
+                timeout_seconds=30,
+            )
+            refused = urllib.error.URLError(ConnectionRefusedError("connection refused"))
+
+            with patch.dict(
+                os.environ,
+                {"MINERU_API_ENABLED": "false", "MINERU_API_URL": "http://127.0.0.1:8002"},
+                clear=False,
+            ), patch.object(
+                provider,
+                "resolve_command",
+                return_value=(command, self._healthy_resolution(command)),
+            ), patch.object(
+                urllib.request,
+                "urlopen",
+                side_effect=refused,
+            ) as urlopen, patch(
+                "app.ocr_flow.subprocess.run",
+            ) as run:
+                result = provider.run(request)
+
+        self.assertFalse(result.success)
+        self.assertIn("connection refused", result.error)
+        self.assertFalse(request.output_dir.exists())
+        run.assert_not_called()
+        urlopen.assert_called_once_with("http://127.0.0.1:8002/openapi.json", timeout=3.0)
 
     def test_provider_success_only_generates_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

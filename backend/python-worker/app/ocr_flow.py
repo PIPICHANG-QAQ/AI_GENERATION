@@ -6,6 +6,7 @@ Provider 只负责把输入文件转换为 OCR 工件。题库后处理由执行
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -14,6 +15,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
@@ -185,6 +188,40 @@ class MineruOcrProvider(OcrProvider):
         """Return the optional persistent MinerU API URL."""
         value = os.getenv("MINERU_API_URL", "").strip()
         return value or None
+
+    @staticmethod
+    def _api_enabled() -> bool:
+        return os.getenv("MINERU_API_ENABLED", "").strip().lower() == "true"
+
+    def _api_openapi_url(self) -> str | None:
+        api_url = self._api_url()
+        return f"{api_url.rstrip('/')}/openapi.json" if api_url else None
+
+    def _probe_api(self) -> dict[str, Any]:
+        openapi_url = self._api_openapi_url()
+        result: dict[str, Any] = {
+            "apiEnabled": self._api_enabled(),
+            "apiReady": False,
+            "apiUrl": openapi_url,
+            "apiError": None,
+        }
+        if openapi_url is None:
+            result["apiError"] = "MINERU_API_URL is not configured."
+            return result
+
+        try:
+            with urllib.request.urlopen(openapi_url, timeout=3.0) as response:
+                status = response.status
+                payload = json.load(response)
+            if status != 200:
+                result["apiError"] = f"MinerU OpenAPI returned HTTP {status}."
+            elif not isinstance(payload, dict) or not isinstance(payload.get("paths"), dict):
+                result["apiError"] = "Invalid MinerU OpenAPI document: expected an object with dict paths."
+            else:
+                result["apiReady"] = True
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            result["apiError"] = str(exc)
+        return result
 
     def _command_availability_error(self, command: ProviderCommand) -> str | None:
         """检查命令入口本身是否可启动，版本探测不参与可用性判定。"""
@@ -559,12 +596,27 @@ class MineruOcrProvider(OcrProvider):
         resolved, _ = self.resolve_command()
         return resolved.display if resolved else None
 
-    def status(self) -> dict[str, Any]:
+    def status(self, check_api: bool | None = None) -> dict[str, Any]:
         """执行 status 逻辑。"""
         command, resolution = self.resolve_command()
+        api_enabled = self._api_enabled()
+        api_required = api_enabled if check_api is None else check_api
+        if api_required:
+            api_status = self._probe_api()
+        else:
+            api_status = {
+                "apiEnabled": api_enabled,
+                "apiReady": False,
+                "apiUrl": self._api_openapi_url(),
+                "apiError": None,
+            }
+        installed = command is not None and (not api_required or bool(api_status["apiReady"]))
+        error = resolution.get("error")
+        if command is not None and api_required and not api_status["apiReady"]:
+            error = api_status["apiError"] or "MinerU API is not ready."
         status: dict[str, Any] = {
             "provider": self.name,
-            "installed": command is not None,
+            "installed": installed,
             "command": list(command.args) if command else None,
             "source": command.source if command else None,
             "commandDisplay": command.display if command else None,
@@ -573,8 +625,9 @@ class MineruOcrProvider(OcrProvider):
             "versionProbeOk": bool(resolution.get("versionProbeOk", False)),
             "runtimeProbeOk": bool(resolution.get("runtimeProbeOk", False)),
             "runtimePython": resolution.get("runtimePython"),
-            "error": resolution.get("error"),
+            "error": error,
             "candidates": resolution.get("candidates", []),
+            **api_status,
         }
         return status
 
@@ -592,8 +645,22 @@ class MineruOcrProvider(OcrProvider):
                 error=resolution.get("error") or "MinerU CLI is not installed or not available.",
             )
 
-        request.output_dir.mkdir(parents=True, exist_ok=True)
         api_url = self._api_url()
+        if self._api_enabled() or api_url is not None:
+            api_status = self._probe_api()
+            if not api_status["apiReady"]:
+                return OcrProviderResult(
+                    success=False,
+                    metadata={
+                        "ocrFlowProvider": self.name,
+                        "ocrProvider": self.name,
+                        "ocrFlowProviderResolution": {**resolution, **api_status},
+                        "mineruApiUrl": api_url,
+                    },
+                    error=api_status["apiError"] or "MinerU API is not ready.",
+                )
+
+        request.output_dir.mkdir(parents=True, exist_ok=True)
         provider_metadata = {
             "ocrFlowProvider": self.name,
             "ocrProvider": self.name,
