@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Behavior tests for safe MinerU virtualenv rollback."""
+"""Behavior tests for the MinerU rollback shell delegate."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -12,13 +13,11 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 ROLLBACK_SCRIPT = ROOT / "scripts" / "rollback_mineru_venv.sh"
+REBUILD_SCRIPT = ROOT / "scripts" / "rebuild_mineru_venv.py"
 
 
 class RollbackMineruVenvShellTest(unittest.TestCase):
-    def test_shell_syntax_is_valid(self) -> None:
-        subprocess.run(["bash", "-n", str(ROLLBACK_SCRIPT)], check=True, env=os.environ.copy())
-
-    def _layout(self, root: Path, operation_id: str = "testcase") -> dict[str, object]:
+    def _layout(self, root: Path) -> dict[str, object]:
         root = root.resolve()
         target = root / "vendor" / "mineru-venv"
         backup = target.with_name(f"{target.name}.bak-20260715T120000.000000Z-aaaaaaaa")
@@ -26,46 +25,24 @@ class RollbackMineruVenvShellTest(unittest.TestCase):
         backup.mkdir()
         (target / "identity").write_text("prior", encoding="utf-8")
         (backup / "identity").write_text("candidate", encoding="utf-8")
-        (backup / "ready").write_text("yes", encoding="utf-8")
-        (backup / "version-output").write_text("mineru, version 3.4.2\n", encoding="utf-8")
         check_script = root / "scripts" / "check_mineru.py"
         check_script.parent.mkdir()
-        check_script.write_text("# fake readiness path\n", encoding="utf-8")
-        verifier = root / "fake_verify.py"
-        verifier.write_text(
+        check_script.write_text("# readiness\n", encoding="utf-8")
+        args_log = root / "args.log"
+        start_log = root / "start.log"
+        fake_rebuilder = root / "fake_rebuilder.py"
+        fake_rebuilder.write_text(
             "#!/usr/bin/env python3\n"
-            "import argparse\n"
+            "import os\n"
             "from pathlib import Path\n"
-            "import subprocess\n"
             "import sys\n"
-            f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
-            "import rebuild_mineru_venv\n"
-            "parser = argparse.ArgumentParser()\n"
-            "parser.add_argument('--verify-only', action='store_true', required=True)\n"
-            "parser.add_argument('--target', type=Path, required=True)\n"
-            "parser.add_argument('--mineru-version', required=True)\n"
-            "parser.add_argument('--check-script', type=Path, required=True)\n"
-            "args = parser.parse_args()\n"
-            "if not (args.target / 'ready').is_file():\n"
-            "    raise SystemExit(1)\n"
-            "output = (args.target / 'version-output').read_text(encoding='utf-8')\n"
-            "completed = subprocess.CompletedProcess(['mineru', '--version'], 0, stdout=output, stderr='')\n"
-            "try:\n"
-            "    rebuild_mineru_venv._require_version(completed, args.mineru_version)\n"
-            "except RuntimeError as exc:\n"
-            "    print(exc, file=sys.stderr)\n"
-            "    raise SystemExit(1)\n",
+            "Path(os.environ['ARGS_LOG']).write_text('\\n'.join(sys.argv[1:]) + '\\n', encoding='utf-8')\n"
+            "raise SystemExit(int(os.environ.get('REBUILDER_STATUS', '0')))\n",
             encoding="utf-8",
         )
-        verifier.chmod(0o755)
-        start_log = root / "start.log"
+        fake_rebuilder.chmod(0o755)
         env = os.environ.copy()
-        env.update(
-            {
-                "MINERU_ROLLBACK_OPERATION_ID": operation_id,
-                "START_LOG": str(start_log),
-            }
-        )
+        env.update({"ARGS_LOG": str(args_log), "START_LOG": str(start_log)})
         args = [
             "--target",
             str(target),
@@ -74,7 +51,7 @@ class RollbackMineruVenvShellTest(unittest.TestCase):
             "--check-script",
             str(check_script),
             "--rebuild-script",
-            str(verifier),
+            str(fake_rebuilder),
             "--mineru-version",
             "3.4.2",
         ]
@@ -82,19 +59,15 @@ class RollbackMineruVenvShellTest(unittest.TestCase):
             "target": target,
             "backup": backup,
             "check_script": check_script,
-            "verifier": verifier,
+            "fake_rebuilder": fake_rebuilder,
+            "args_log": args_log,
             "start_log": start_log,
             "env": env,
             "args": args,
-            "prior": Path(f"{target}.failed-{operation_id}"),
-            "rejected": Path(f"{target}.rejected-{operation_id}"),
         }
 
     def _run(self, layout: dict[str, object]) -> subprocess.CompletedProcess[str]:
-        wrapper = (
-            'if "$@"; then printf "start\\n" >> "$START_LOG"; '
-            'else status=$?; exit "$status"; fi'
-        )
+        wrapper = 'if "$@"; then printf "start\\n" >> "$START_LOG"; else exit "$?"; fi'
         return subprocess.run(
             ["bash", "-c", wrapper, "rollback-test", "bash", str(ROLLBACK_SCRIPT), *layout["args"]],
             env=layout["env"],
@@ -104,135 +77,95 @@ class RollbackMineruVenvShellTest(unittest.TestCase):
             timeout=10,
         )
 
-    def test_good_candidate_succeeds_and_only_then_allows_start(self) -> None:
+    def test_shell_syntax_is_valid(self) -> None:
+        subprocess.run(["bash", "-n", str(ROLLBACK_SCRIPT)], check=True, env=os.environ.copy())
+
+    def test_execs_python_rebuilder_with_exact_rollback_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            layout = self._layout(Path(tmp), "good")
+            layout = self._layout(Path(tmp))
 
             completed = self._run(layout)
 
             self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertEqual("candidate", (layout["target"] / "identity").read_text(encoding="utf-8"))
-            self.assertEqual("prior", (layout["prior"] / "identity").read_text(encoding="utf-8"))
-            self.assertFalse(layout["backup"].exists())
             self.assertEqual("start\n", layout["start_log"].read_text(encoding="utf-8"))
-            self.assertIn(str(layout["prior"]), completed.stdout)
-
-    def test_bad_readiness_is_rejected_prior_is_restored_and_start_is_blocked(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            layout = self._layout(Path(tmp), "bad-ready")
-            (layout["backup"] / "ready").unlink()
-
-            completed = self._run(layout)
-
-            self.assertNotEqual(0, completed.returncode)
-            self.assertEqual("prior", (layout["target"] / "identity").read_text(encoding="utf-8"))
-            self.assertEqual("candidate", (layout["rejected"] / "identity").read_text(encoding="utf-8"))
-            self.assertFalse(layout["prior"].exists())
-            self.assertFalse(layout["start_log"].exists())
-            self.assertIn(str(layout["rejected"]), completed.stderr)
-
-    def test_nonexact_versions_are_rejected_and_never_allow_start(self) -> None:
-        invalid_outputs = {
-            "wrong": "mineru, version 3.4.1\n",
-            "rc": "mineru, version 3.4.2rc1\n",
-            "post": "mineru, version 3.4.2.post1\n",
-            "duplicate": "mineru, version 3.4.2\nmineru, version 3.4.2\n",
-            "conflict": "mineru, version 3.4.2\nmineru, version 3.4.1\n",
-        }
-        for name, output in invalid_outputs.items():
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
-                layout = self._layout(Path(tmp), f"version-{name}")
-                (layout["backup"] / "version-output").write_text(output, encoding="utf-8")
-
-                completed = self._run(layout)
-
-                self.assertNotEqual(0, completed.returncode)
-                self.assertEqual("prior", (layout["target"] / "identity").read_text(encoding="utf-8"))
-                self.assertEqual("candidate", (layout["rejected"] / "identity").read_text(encoding="utf-8"))
-                self.assertFalse(layout["start_log"].exists())
-
-    def test_candidate_move_failure_restores_prior_and_blocks_start(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            layout = self._layout(Path(tmp), "move-fail")
-            fake_bin = Path(tmp) / "bin"
-            fake_bin.mkdir()
-            fake_mv = fake_bin / "mv"
-            fake_mv.write_text(
-                "#!/usr/bin/env bash\n"
-                "if [[ \"${2:-}\" == \"$FAIL_MV_SOURCE\" ]]; then exit 71; fi\n"
-                "exec /bin/mv \"$@\"\n",
-                encoding="utf-8",
+            self.assertEqual(
+                [
+                    "--rollback-backup",
+                    str(layout["backup"]),
+                    "--target",
+                    str(layout["target"]),
+                    "--mineru-version",
+                    "3.4.2",
+                    "--check-script",
+                    str(layout["check_script"]),
+                ],
+                layout["args_log"].read_text(encoding="utf-8").splitlines(),
             )
-            fake_mv.chmod(0o755)
-            layout["env"]["PATH"] = f"{fake_bin}:{layout['env']['PATH']}"
-            layout["env"]["FAIL_MV_SOURCE"] = str(layout["backup"])
-
-            completed = self._run(layout)
-
-            self.assertNotEqual(0, completed.returncode)
             self.assertEqual("prior", (layout["target"] / "identity").read_text(encoding="utf-8"))
             self.assertEqual("candidate", (layout["backup"] / "identity").read_text(encoding="utf-8"))
-            self.assertFalse(layout["prior"].exists())
-            self.assertFalse(layout["start_log"].exists())
-            self.assertIn("restored", completed.stderr.lower())
 
-    def test_restore_move_failure_reports_exact_manual_recovery_paths(self) -> None:
+    def test_rebuilder_failure_is_propagated_and_blocks_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            layout = self._layout(Path(tmp), "restore-fail")
-            fake_bin = Path(tmp) / "bin"
-            fake_bin.mkdir()
-            fake_mv = fake_bin / "mv"
-            fake_mv.write_text(
-                "#!/usr/bin/env bash\n"
-                "if [[ \"${2:-}\" == \"$FAIL_MV_SOURCE\" || \"${2:-}\" == \"$FAIL_RESTORE_SOURCE\" ]]; then exit 72; fi\n"
-                "exec /bin/mv \"$@\"\n",
-                encoding="utf-8",
-            )
-            fake_mv.chmod(0o755)
-            layout["env"]["PATH"] = f"{fake_bin}:{layout['env']['PATH']}"
-            layout["env"]["FAIL_MV_SOURCE"] = str(layout["backup"])
-            layout["env"]["FAIL_RESTORE_SOURCE"] = str(layout["prior"])
+            layout = self._layout(Path(tmp))
+            layout["env"]["REBUILDER_STATUS"] = "23"
+
+            completed = self._run(layout)
+
+            self.assertEqual(23, completed.returncode)
+            self.assertFalse(layout["start_log"].exists())
+
+    def test_helper_contains_no_move_logic_and_execs_the_rebuilder(self) -> None:
+        shell = ROLLBACK_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIsNone(re.search(r"\bmv\b", shell))
+        self.assertIn("exec", shell)
+        self.assertIn("--rollback-backup", shell)
+
+    def test_relative_required_path_is_rejected_before_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            layout = self._layout(Path(tmp))
+            args = list(layout["args"])
+            args[1] = "relative/mineru-venv"
+            layout["args"] = args
 
             completed = self._run(layout)
 
             self.assertNotEqual(0, completed.returncode)
-            self.assertFalse(layout["target"].exists())
-            self.assertEqual("prior", (layout["prior"] / "identity").read_text(encoding="utf-8"))
-            self.assertIn(str(layout["prior"]), completed.stderr)
-            self.assertIn(str(layout["target"]), completed.stderr)
+            self.assertFalse(layout["args_log"].exists())
+            self.assertFalse(layout["start_log"].exists())
 
-    def test_rejects_unsafe_paths_names_symlinks_and_reserved_path_collision(self) -> None:
-        cases = ("relative", "wrong-name", "wrong-parent", "target-symlink", "backup-symlink", "collision")
-        for case in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
-                layout = self._layout(Path(tmp), f"unsafe-{case}")
-                args = list(layout["args"])
-                if case == "relative":
-                    args[1] = "relative/mineru-venv"
-                elif case == "wrong-name":
-                    wrong = Path(tmp).resolve() / "vendor" / "other-backup"
-                    wrong.mkdir()
-                    args[3] = str(wrong)
-                elif case == "wrong-parent":
-                    wrong = Path(tmp).resolve() / "other" / f"{layout['target'].name}.bak-safe"
-                    wrong.mkdir(parents=True)
-                    args[3] = str(wrong)
-                elif case == "target-symlink":
-                    real = Path(f"{layout['target']}.real")
-                    layout["target"].rename(real)
-                    layout["target"].symlink_to(real, target_is_directory=True)
-                elif case == "backup-symlink":
-                    real = Path(f"{layout['backup']}.real")
-                    layout["backup"].rename(real)
-                    layout["backup"].symlink_to(real, target_is_directory=True)
-                else:
-                    layout["prior"].mkdir()
-                layout["args"] = args
+    def test_duplicate_and_unknown_arguments_are_rejected(self) -> None:
+        for extra in (("--target", "/tmp/duplicate"), ("--unknown", "value")):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as tmp:
+                layout = self._layout(Path(tmp))
+                layout["args"] = [*layout["args"], *extra]
 
                 completed = self._run(layout)
 
                 self.assertNotEqual(0, completed.returncode)
+                self.assertFalse(layout["args_log"].exists())
                 self.assertFalse(layout["start_log"].exists())
+
+    def test_python_rejects_ancestor_symlink_without_moving_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            real = root / "real"
+            layout = self._layout(real)
+            alias = root / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            args = list(layout["args"])
+            args[1] = str(alias / "vendor" / layout["target"].name)
+            args[3] = str(alias / "vendor" / layout["backup"].name)
+            args[7] = str(REBUILD_SCRIPT)
+            layout["args"] = args
+
+            completed = self._run(layout)
+
+            self.assertNotEqual(0, completed.returncode)
+            self.assertIn("symlink", completed.stderr.lower())
+            self.assertEqual("prior", (layout["target"] / "identity").read_text(encoding="utf-8"))
+            self.assertEqual("candidate", (layout["backup"] / "identity").read_text(encoding="utf-8"))
+            self.assertFalse(layout["start_log"].exists())
 
 
 if __name__ == "__main__":

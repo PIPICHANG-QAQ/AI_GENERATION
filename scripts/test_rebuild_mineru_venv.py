@@ -145,6 +145,8 @@ class CrashRecoveryJournalTest(unittest.TestCase):
                 journal = self._journal(paths, "prepared", had_active=True)
 
             payload = json.loads(journal.read_text(encoding="utf-8"))
+            self.assertEqual(2, payload["schemaVersion"])
+            self.assertEqual("rebuild", payload["operation"])
             self.assertEqual(str(paths.active), payload["active"])
             self.assertEqual(str(paths.staging), payload["staging"])
             self.assertEqual(str(paths.backup), payload["backup"])
@@ -255,7 +257,8 @@ class CrashRecoveryJournalTest(unittest.TestCase):
                     outside.mkdir()
                     paths.staging.symlink_to(outside, target_is_directory=True)
                 payload = {
-                    "schemaVersion": 1,
+                    "schemaVersion": 2,
+                    "operation": "rebuild",
                     "active": str(paths.active),
                     "staging": str(staging),
                     "backup": str(paths.backup),
@@ -270,6 +273,208 @@ class CrashRecoveryJournalTest(unittest.TestCase):
 
                 self.assertEqual("old", (paths.active / "old-marker").read_text(encoding="utf-8"))
                 self.assertTrue(journal.exists())
+
+
+class RollbackTransactionTest(unittest.TestCase):
+    def _layout(
+        self,
+        root: Path,
+        operation_id: str = "20260716T120000.000000Z-a1b2c3d4",
+    ) -> tuple[object, Path]:
+        root = root.resolve()
+        target = root / "vendor" / "mineru-venv"
+        candidate = target.with_name(f"{target.name}.bak-20260715T120000.000000Z-aaaaaaaa")
+        target.mkdir(parents=True)
+        candidate.mkdir()
+        (target / "identity").write_text("prior", encoding="utf-8")
+        (candidate / "identity").write_text("candidate", encoding="utf-8")
+        check_script = root / "scripts" / "check_mineru.py"
+        check_script.parent.mkdir()
+        check_script.write_text("# readiness\n", encoding="utf-8")
+        paths = rebuild_mineru_venv.build_rollback_paths(target, candidate, operation_id)
+        return paths, check_script
+
+    def _assert_prior_active(self, paths: object) -> None:
+        self.assertEqual("prior", (paths.target / "identity").read_text(encoding="utf-8"))
+        self.assertFalse(paths.prior.exists())
+        self.assertFalse(rebuild_mineru_venv.transaction_journal_path(paths.target).exists())
+
+    def test_rollback_journal_records_exact_paths_without_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _check_script = self._layout(Path(tmp))
+
+            journal = rebuild_mineru_venv.write_rollback_journal(paths, "prepared")
+
+            payload = json.loads(journal.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    "schemaVersion": 2,
+                    "operation": "rollback",
+                    "phase": "prepared",
+                    "target": str(paths.target),
+                    "candidate": str(paths.candidate),
+                    "prior": str(paths.prior),
+                    "rejected": str(paths.rejected),
+                },
+                payload,
+            )
+            self.assertNotIn("secret", journal.read_text(encoding="utf-8").lower())
+
+    def test_rollback_success_uses_shared_lock_verifies_and_retains_prior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, check_script = self._layout(Path(tmp))
+            validator = mock.Mock()
+
+            result = rebuild_mineru_venv.rollback_venv(
+                paths.target,
+                paths.candidate,
+                "3.4.2",
+                check_script,
+                operation_id=paths.prior.name.removeprefix(f"{paths.target.name}.failed-"),
+                base_env={"PATH": "/test/bin"},
+                validator=validator,
+            )
+
+            self.assertEqual(paths, result)
+            self.assertEqual("candidate", (paths.target / "identity").read_text(encoding="utf-8"))
+            self.assertEqual("prior", (paths.prior / "identity").read_text(encoding="utf-8"))
+            self.assertFalse(paths.candidate.exists())
+            self.assertFalse(paths.rejected.exists())
+            self.assertFalse(rebuild_mineru_venv.transaction_journal_path(paths.target).exists())
+            validator.assert_called_once_with(
+                paths.target,
+                check_script,
+                "3.4.2",
+                base_env={"PATH": "/test/bin"},
+                check_timeout=rebuild_mineru_venv.DEFAULT_CHECK_TIMEOUT,
+                runner=subprocess.run,
+            )
+
+    def test_rollback_lock_contention_is_nonzero_and_moves_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, check_script = self._layout(Path(tmp))
+
+            with rebuild_mineru_venv.rebuild_lock(paths.target):
+                with self.assertRaisesRegex(RuntimeError, "already in progress"):
+                    rebuild_mineru_venv.rollback_venv(
+                        paths.target,
+                        paths.candidate,
+                        "3.4.2",
+                        check_script,
+                        operation_id="lock-test",
+                        validator=mock.Mock(),
+                    )
+
+            self.assertEqual("prior", (paths.target / "identity").read_text(encoding="utf-8"))
+            self.assertEqual("candidate", (paths.candidate / "identity").read_text(encoding="utf-8"))
+            self.assertFalse(paths.prior.exists())
+            self.assertFalse(paths.rejected.exists())
+
+    def test_bad_readiness_or_wrong_version_rejects_candidate_and_restores_prior(self) -> None:
+        for failure in ("readiness failed", "MinerU version check expected 3.4.2, got 3.4.1"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                paths, check_script = self._layout(Path(tmp), f"failure-{failure.split()[0]}")
+
+                with self.assertRaisesRegex(RuntimeError, failure.split()[0]):
+                    rebuild_mineru_venv.rollback_venv(
+                        paths.target,
+                        paths.candidate,
+                        "3.4.2",
+                        check_script,
+                        operation_id=paths.prior.name.removeprefix(f"{paths.target.name}.failed-"),
+                        validator=mock.Mock(side_effect=RuntimeError(failure)),
+                    )
+
+                self._assert_prior_active(paths)
+                self.assertEqual("candidate", (paths.rejected / "identity").read_text(encoding="utf-8"))
+                self.assertFalse(paths.candidate.exists())
+
+    def test_candidate_move_failure_restores_prior_and_keeps_candidate_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, check_script = self._layout(Path(tmp), "candidate-move-failure")
+
+            def fail_candidate(source: Path, target: Path) -> None:
+                if source == paths.candidate:
+                    raise OSError("candidate move failed")
+                source.rename(target)
+
+            with self.assertRaisesRegex(OSError, "candidate move failed"):
+                rebuild_mineru_venv.rollback_venv(
+                    paths.target,
+                    paths.candidate,
+                    "3.4.2",
+                    check_script,
+                    operation_id="candidate-move-failure",
+                    rename=fail_candidate,
+                    validator=mock.Mock(),
+                )
+
+            self._assert_prior_active(paths)
+            self.assertEqual("candidate", (paths.candidate / "identity").read_text(encoding="utf-8"))
+            self.assertFalse(paths.rejected.exists())
+
+    def test_each_rollback_crash_phase_recovers_prior_safely(self) -> None:
+        scenarios = (
+            ("after-first-rename", "prepared", "candidate"),
+            ("after-second-rename", "prior_saved", "candidate"),
+            ("after-rejected-rename", "candidate_active", "rejected"),
+            ("after-prior-restore", "candidate_rejected", "rejected"),
+            ("after-verified-before-clear", "candidate_verified", "candidate"),
+        )
+        for name, phase, diagnostic in scenarios:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                paths, _check_script = self._layout(Path(tmp), name)
+                rebuild_mineru_venv.write_rollback_journal(paths, phase)
+                paths.target.rename(paths.prior)
+                if name != "after-first-rename":
+                    paths.candidate.rename(paths.target)
+                if name in {"after-rejected-rename", "after-prior-restore"}:
+                    paths.target.rename(paths.rejected)
+                if name == "after-prior-restore":
+                    paths.prior.rename(paths.target)
+
+                recovered = rebuild_mineru_venv.recover_transaction(paths.target)
+
+                self.assertEqual(paths, recovered)
+                self._assert_prior_active(paths)
+                diagnostic_path = paths.candidate if diagnostic == "candidate" else paths.rejected
+                self.assertEqual("candidate", (diagnostic_path / "identity").read_text(encoding="utf-8"))
+
+    def test_rollback_recovery_rejects_ambiguous_state_with_exact_manual_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _check_script = self._layout(Path(tmp), "ambiguous")
+            paths.prior.mkdir()
+            rebuild_mineru_venv.write_rollback_journal(paths, "prepared")
+
+            with self.assertRaises(RuntimeError) as raised:
+                rebuild_mineru_venv.recover_transaction(paths.target)
+
+            message = str(raised.exception)
+            for path in (paths.target, paths.candidate, paths.prior, paths.rejected):
+                self.assertIn(str(path), message)
+
+    def test_rollback_rejects_symlink_ancestor_before_any_move(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            real = root / "real"
+            paths, check_script = self._layout(real, "symlink-ancestor")
+            alias = root / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            linked_target = alias / "vendor" / paths.target.name
+            linked_candidate = alias / "vendor" / paths.candidate.name
+
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                rebuild_mineru_venv.rollback_venv(
+                    linked_target,
+                    linked_candidate,
+                    "3.4.2",
+                    check_script,
+                    operation_id="symlink-ancestor",
+                    validator=mock.Mock(),
+                )
+
+            self.assertEqual("prior", (paths.target / "identity").read_text(encoding="utf-8"))
+            self.assertEqual("candidate", (paths.candidate / "identity").read_text(encoding="utf-8"))
 
 
 class RebuildSafetyTest(unittest.TestCase):
@@ -505,6 +710,25 @@ class RebuildSafetyTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "keep-failed-staging"):
                 rebuild_mineru_venv.prune_failed_staging(target, keep_failed_staging=-1)
+
+    def test_prune_failed_staging_never_removes_the_current_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp).resolve() / "vendor" / "mineru-venv"
+            target.parent.mkdir()
+            current = target.with_name(f"{target.name}.new-20260716T120000.000000Z-aaaaaaaa")
+            older = target.with_name(f"{target.name}.new-20260715T120000.000000Z-bbbbbbbb")
+            current.mkdir()
+            older.mkdir()
+
+            removed = rebuild_mineru_venv.prune_failed_staging(
+                target,
+                keep_failed_staging=0,
+                exclude=current,
+            )
+
+            self.assertEqual([older], removed)
+            self.assertTrue(current.is_dir())
+            self.assertFalse(older.exists())
 
 
 class VenvRelocationTest(unittest.TestCase):
@@ -1384,7 +1608,7 @@ class RebuildOrchestrationTest(unittest.TestCase):
             self.assertEqual("old", (paths.active / "old-marker").read_text(encoding="utf-8"))
             self.assertEqual("new", (paths.staging / "new-marker").read_text(encoding="utf-8"))
             self.assertFalse(paths.backup.exists())
-            prune_failed.assert_not_called()
+            prune_failed.assert_called_once_with(paths.active, 1, exclude=paths.staging)
             with rebuild_mineru_venv.rebuild_lock(paths.active):
                 pass
 
@@ -1423,6 +1647,48 @@ class RebuildOrchestrationTest(unittest.TestCase):
                 self.assertFalse(paths.backup.exists())
                 timeout_calls = [kwargs["timeout"] for _command, kwargs in calls if "timeout" in kwargs]
                 self.assertTrue(timeout_calls)
+
+    def test_three_consecutive_install_timeouts_keep_only_one_failed_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            target = root / "vendor" / "mineru-venv"
+            target.mkdir(parents=True)
+            (target / "old-marker").write_text("old", encoding="utf-8")
+            check_script = root / "scripts" / "check_mineru.py"
+            check_script.parent.mkdir()
+            check_script.write_text("# readiness\n", encoding="utf-8")
+            timestamps = (
+                "20260716T120001.000000Z-aaaaaaaa",
+                "20260716T120002.000000Z-bbbbbbbb",
+                "20260716T120003.000000Z-cccccccc",
+            )
+
+            def timing_out(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command[1:3] == ["-m", "venv"]:
+                    staging = Path(command[-1])
+                    (staging / "bin").mkdir(parents=True)
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+            for timestamp in timestamps:
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    rebuild_mineru_venv.rebuild_venv(
+                        target,
+                        Path("/usr/bin/python3"),
+                        "3.4.2",
+                        check_script,
+                        2,
+                        timestamp=timestamp,
+                        base_env={},
+                        runner=timing_out,
+                        disk_usage=lambda _path: SimpleNamespace(free=100 * 1024**3),
+                        keep_failed_staging=1,
+                        install_timeout=1,
+                    )
+
+            failures = sorted(target.parent.glob(f"{target.name}.new-*"))
+            self.assertEqual([target.with_name(f"{target.name}.new-{timestamps[-1]}")], failures)
+            self.assertEqual("old", (target / "old-marker").read_text(encoding="utf-8"))
 
     def test_post_activation_failure_preserves_failed_new_and_restores_backup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1575,8 +1841,9 @@ class RebuildOrchestrationTest(unittest.TestCase):
                     prune_failed=mock.Mock(side_effect=KeyboardInterrupt()),
                 )
 
-            self.assertEqual("new", (paths.active / "new-marker").read_text(encoding="utf-8"))
-            self.assertEqual("old", (paths.backup / "old-marker").read_text(encoding="utf-8"))
+            self.assertEqual("old", (paths.active / "old-marker").read_text(encoding="utf-8"))
+            self.assertFalse(paths.staging.exists())
+            self.assertFalse(paths.backup.exists())
 
     def test_cli_defaults_match_server_contract(self) -> None:
         args = rebuild_mineru_venv.parse_args(
@@ -1613,7 +1880,7 @@ class RebuildOrchestrationTest(unittest.TestCase):
                 with self.subTest(option=option, value=value), self.assertRaises(SystemExit):
                     rebuild_mineru_venv.parse_args([*base, option, value])
 
-    def test_cli_failed_staging_retention_accepts_zero_and_rejects_negative(self) -> None:
+    def test_cli_failed_staging_retention_rejects_zero_and_negative(self) -> None:
         base = [
             "--target",
             "/srv/vendor/mineru-venv",
@@ -1623,10 +1890,54 @@ class RebuildOrchestrationTest(unittest.TestCase):
             "/srv/scripts/check_mineru.py",
         ]
 
-        args = rebuild_mineru_venv.parse_args([*base, "--keep-failed-staging", "0"])
-        self.assertEqual(0, args.keep_failed_staging)
+        for value in ("0", "-1"):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                rebuild_mineru_venv.parse_args([*base, "--keep-failed-staging", value])
+
+    def test_rollback_cli_is_mutually_exclusive_and_does_not_require_python(self) -> None:
+        base = [
+            "--target",
+            "/srv/vendor/mineru-venv",
+            "--rollback-backup",
+            "/srv/vendor/mineru-venv.bak-20260715T120000.000000Z-aaaaaaaa",
+            "--check-script",
+            "/srv/scripts/check_mineru.py",
+        ]
+
+        args = rebuild_mineru_venv.parse_args(base)
+        self.assertIsNone(args.python)
+        self.assertEqual(
+            Path("/srv/vendor/mineru-venv.bak-20260715T120000.000000Z-aaaaaaaa"),
+            args.rollback_backup,
+        )
         with self.assertRaises(SystemExit):
-            rebuild_mineru_venv.parse_args([*base, "--keep-failed-staging", "-1"])
+            rebuild_mineru_venv.parse_args([*base, "--verify-only"])
+        with self.assertRaises(SystemExit):
+            rebuild_mineru_venv.parse_args([*base, "--python", "/usr/bin/python3"])
+
+    def test_main_dispatches_rollback_mode_without_running_rebuild(self) -> None:
+        argv = [
+            "--target",
+            "/srv/vendor/mineru-venv",
+            "--rollback-backup",
+            "/srv/vendor/mineru-venv.bak-20260715T120000.000000Z-aaaaaaaa",
+            "--mineru-version",
+            "3.4.2",
+            "--check-script",
+            "/srv/scripts/check_mineru.py",
+        ]
+        result_paths = SimpleNamespace(prior=Path("/srv/vendor/mineru-venv.failed-fixed"))
+
+        with mock.patch.object(
+            rebuild_mineru_venv,
+            "rollback_venv",
+            return_value=result_paths,
+        ) as rollback, mock.patch.object(rebuild_mineru_venv, "rebuild_venv") as rebuild:
+            result = rebuild_mineru_venv.main(argv)
+
+        self.assertEqual(0, result)
+        rollback.assert_called_once()
+        rebuild.assert_not_called()
 
     def test_main_returns_nonzero_and_reports_timeout(self) -> None:
         timeout = subprocess.TimeoutExpired(["pip", "install"], 10, output="partial install")
@@ -1882,6 +2193,7 @@ class ServerRunbookTest(unittest.TestCase):
 
         self.assertIn("--keep-failed-staging", runbook)
         self.assertIn("默认保留最近 2 个", runbook)
+        self.assertNotIn("参数设为 `0`", runbook)
         self.assertIn("mineru-venv.new-*", runbook)
         self.assertIn("test ! -L", runbook)
         self.assertIn("rm -rf --", runbook)

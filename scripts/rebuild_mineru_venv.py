@@ -65,6 +65,14 @@ class BuildPaths:
     backup: Path
 
 
+@dataclass(frozen=True)
+class RollbackPaths:
+    target: Path
+    candidate: Path
+    prior: Path
+    rejected: Path
+
+
 Rename = Callable[[Path, Path], None]
 JOURNAL_PHASES = {
     "prepared",
@@ -74,6 +82,15 @@ JOURNAL_PHASES = {
     "rollback_started",
     "rollback_new_saved",
 }
+ROLLBACK_JOURNAL_PHASES = {
+    "prepared",
+    "prior_saved",
+    "candidate_active",
+    "candidate_rejected",
+    "prior_restored",
+    "candidate_verified",
+}
+SAFE_PATH_SUFFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _rename(source: Path, target: Path) -> None:
@@ -85,6 +102,17 @@ def build_paths(target: Path, timestamp: str) -> BuildPaths:
         active=target,
         staging=target.with_name(f"{target.name}.new-{timestamp}"),
         backup=target.with_name(f"{target.name}.bak-{timestamp}"),
+    )
+
+
+def build_rollback_paths(target: Path, candidate: Path, operation_id: str) -> RollbackPaths:
+    if SAFE_PATH_SUFFIX.fullmatch(operation_id) is None:
+        raise ValueError(f"unsafe rollback operation id: {operation_id}")
+    return RollbackPaths(
+        target=target,
+        candidate=candidate,
+        prior=target.with_name(f"{target.name}.failed-{operation_id}"),
+        rejected=target.with_name(f"{target.name}.rejected-{operation_id}"),
     )
 
 
@@ -127,6 +155,7 @@ def _validate_static_request(paths: BuildPaths, check_script: Path, keep_backups
         raise ValueError(f"target must be a directory when it exists: {paths.active}")
     if not paths.active.parent.is_dir():
         raise ValueError(f"target parent must be an existing directory: {paths.active.parent}")
+    _reject_symlink_components(check_script, "check-script")
     if check_script.is_symlink():
         raise ValueError(f"check-script must not be a symlink: {check_script}")
     if not check_script.is_file():
@@ -139,6 +168,43 @@ def validate_request(paths: BuildPaths, check_script: Path, keep_backups: int) -
         raise FileExistsError(f"staging path already exists: {paths.staging}")
     if paths.backup.exists() or paths.backup.is_symlink():
         raise FileExistsError(f"backup path already exists: {paths.backup}")
+
+
+def _validate_rollback_path_set(paths: RollbackPaths) -> None:
+    members = (paths.target, paths.candidate, paths.prior, paths.rejected)
+    if any(not path.is_absolute() or ".." in path.parts for path in members):
+        raise ValueError("rollback journal paths must be absolute without traversal")
+    if len(paths.target.parts) < 4:
+        raise ValueError(f"unsafe target path: {paths.target}")
+    if any(path.parent != paths.target.parent for path in members[1:]):
+        raise ValueError("rollback paths must be target siblings")
+    if len(set(members)) != len(members):
+        raise ValueError("rollback paths must not collide")
+    expected_names = {
+        "candidate": (paths.candidate, f"{paths.target.name}.bak-"),
+        "prior": (paths.prior, f"{paths.target.name}.failed-"),
+        "rejected": (paths.rejected, f"{paths.target.name}.rejected-"),
+    }
+    for label, (path, prefix) in expected_names.items():
+        if not path.name.startswith(prefix):
+            raise ValueError(f"rollback {label} name must match {prefix}*")
+        suffix = path.name[len(prefix) :]
+        if SAFE_PATH_SUFFIX.fullmatch(suffix) is None:
+            raise ValueError(f"rollback {label} suffix is unsafe: {path}")
+    for path in members:
+        _reject_symlink_components(path, "rollback")
+
+
+def validate_rollback_request(paths: RollbackPaths, check_script: Path) -> None:
+    _validate_static_request(build_paths(paths.target, "rollback-validation"), check_script, 0)
+    _validate_rollback_path_set(paths)
+    if not paths.target.is_dir():
+        raise ValueError(f"target must be an existing active venv: {paths.target}")
+    if not paths.candidate.is_dir():
+        raise ValueError(f"rollback candidate must be an existing directory: {paths.candidate}")
+    for reserved in (paths.prior, paths.rejected):
+        if reserved.exists() or reserved.is_symlink():
+            raise FileExistsError(f"rollback reserved path already exists: {reserved}")
 
 
 def directory_size_bytes(path: Path) -> int:
@@ -231,12 +297,31 @@ def write_transaction_journal(paths: BuildPaths, phase: str, *, had_active: bool
         raise ValueError(f"invalid transaction journal phase: {phase}")
     journal = transaction_journal_path(paths.active)
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "operation": "rebuild",
         "active": str(paths.active),
         "staging": str(paths.staging),
         "backup": str(paths.backup),
         "phase": phase,
         "hadActive": had_active,
+    }
+    _atomic_write_json(journal, payload)
+    return journal
+
+
+def write_rollback_journal(paths: RollbackPaths, phase: str) -> Path:
+    if phase not in ROLLBACK_JOURNAL_PHASES:
+        raise ValueError(f"invalid rollback journal phase: {phase}")
+    _validate_rollback_path_set(paths)
+    journal = transaction_journal_path(paths.target)
+    payload = {
+        "schemaVersion": 2,
+        "operation": "rollback",
+        "phase": phase,
+        "target": str(paths.target),
+        "candidate": str(paths.candidate),
+        "prior": str(paths.prior),
+        "rejected": str(paths.rejected),
     }
     _atomic_write_json(journal, payload)
     return journal
@@ -254,8 +339,15 @@ def _clear_transaction_journal(target: Path) -> None:
 def _journal_paths(target: Path, payload: object) -> tuple[BuildPaths, str, bool]:
     if not isinstance(payload, dict):
         raise ValueError("journal must contain a JSON object")
-    expected_keys = {"schemaVersion", "active", "staging", "backup", "phase", "hadActive"}
-    if set(payload) != expected_keys or payload.get("schemaVersion") != 1:
+    legacy_keys = {"schemaVersion", "active", "staging", "backup", "phase", "hadActive"}
+    current_keys = {*legacy_keys, "operation"}
+    is_legacy = set(payload) == legacy_keys and payload.get("schemaVersion") == 1
+    is_current = (
+        set(payload) == current_keys
+        and payload.get("schemaVersion") == 2
+        and payload.get("operation") == "rebuild"
+    )
+    if not (is_legacy or is_current):
         raise ValueError("journal has an unsupported schema")
     if not all(isinstance(payload.get(key), str) for key in ("active", "staging", "backup", "phase")):
         raise ValueError("journal paths and phase must be strings")
@@ -283,29 +375,74 @@ def _journal_paths(target: Path, payload: object) -> tuple[BuildPaths, str, bool
     if not staging_suffix or staging_suffix != backup_suffix:
         raise ValueError("journal staging and backup timestamps do not match")
     for path in (paths.active, paths.staging, paths.backup):
-        if ".." in path.parts or path.is_symlink():
+        if not path.is_absolute() or ".." in path.parts or path.is_symlink():
             raise ValueError(f"journal path is unsafe: {path}")
     return paths, phase, payload["hadActive"]
 
 
-def _load_transaction_journal(target: Path) -> tuple[BuildPaths, str, bool] | None:
+def _read_transaction_journal(target: Path) -> object | None:
     journal = transaction_journal_path(target)
     if journal.is_symlink():
         raise ValueError(f"journal must not be a symlink: {journal}")
     if not journal.exists():
         return None
     try:
-        payload = json.loads(journal.read_text(encoding="utf-8"))
+        return json.loads(journal.read_text(encoding="utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"journal is not valid UTF-8 JSON: {journal}") from exc
+
+
+def _load_transaction_journal(target: Path) -> tuple[BuildPaths, str, bool] | None:
+    payload = _read_transaction_journal(target)
+    if payload is None:
+        return None
+    if isinstance(payload, dict) and payload.get("operation", "rebuild") != "rebuild":
+        raise RuntimeError("expected rebuild transaction journal")
     return _journal_paths(target, payload)
 
 
-def recover_transaction(target: Path, *, rename: Rename = _rename) -> BuildPaths | None:
-    loaded = _load_transaction_journal(target)
-    if loaded is None:
-        return None
-    paths, _phase, had_active = loaded
+def _rollback_journal_paths(target: Path, payload: object) -> tuple[RollbackPaths, str]:
+    if not isinstance(payload, dict):
+        raise ValueError("journal must contain a JSON object")
+    expected_keys = {
+        "schemaVersion",
+        "operation",
+        "phase",
+        "target",
+        "candidate",
+        "prior",
+        "rejected",
+    }
+    if (
+        set(payload) != expected_keys
+        or payload.get("schemaVersion") != 2
+        or payload.get("operation") != "rollback"
+    ):
+        raise ValueError("rollback journal has an unsupported schema")
+    if not all(isinstance(payload.get(key), str) for key in expected_keys - {"schemaVersion"}):
+        raise ValueError("rollback journal fields must be strings")
+    phase = payload["phase"]
+    if phase not in ROLLBACK_JOURNAL_PHASES:
+        raise ValueError(f"rollback journal has invalid phase: {phase}")
+    paths = RollbackPaths(
+        target=Path(payload["target"]),
+        candidate=Path(payload["candidate"]),
+        prior=Path(payload["prior"]),
+        rejected=Path(payload["rejected"]),
+    )
+    if paths.target != target:
+        raise ValueError("rollback journal target does not match requested target")
+    _validate_rollback_path_set(paths)
+    return paths, phase
+
+
+def _recover_rebuild_transaction(
+    target: Path,
+    payload: object,
+    *,
+    rename: Rename,
+) -> BuildPaths:
+    paths, _phase, had_active = _journal_paths(target, payload)
     active_exists = paths.active.exists()
     staging_exists = paths.staging.exists()
     backup_exists = paths.backup.exists()
@@ -338,6 +475,74 @@ def recover_transaction(target: Path, *, rename: Rename = _rename) -> BuildPaths
     return paths
 
 
+def _rollback_recovery_error(paths: RollbackPaths, phase: str) -> RuntimeError:
+    facts = ", ".join(
+        f"{label}={path} exists={path.exists() or path.is_symlink()}"
+        for label, path in (
+            ("target", paths.target),
+            ("candidate", paths.candidate),
+            ("prior", paths.prior),
+            ("rejected", paths.rejected),
+        )
+    )
+    return RuntimeError(
+        f"rollback journal state is not safely recoverable; phase={phase}; {facts}. "
+        "Keep the service stopped and recover these exact paths manually."
+    )
+
+
+def _recover_rollback_transaction(
+    target: Path,
+    payload: object,
+    *,
+    rename: Rename,
+) -> RollbackPaths:
+    paths, phase = _rollback_journal_paths(target, payload)
+    members = (paths.target, paths.candidate, paths.prior, paths.rejected)
+    for path in members:
+        if path.exists() and not path.is_dir():
+            raise _rollback_recovery_error(paths, phase)
+    state = tuple(path.exists() for path in members)
+    initial = (True, True, False, False)
+    prior_saved = (False, True, True, False)
+    candidate_active = (True, False, True, False)
+    candidate_rejected = (False, False, True, True)
+    prior_restored = (True, False, False, True)
+    allowed_states = {
+        "prepared": {initial, prior_saved},
+        "prior_saved": {initial, prior_saved, candidate_active},
+        "candidate_active": {initial, prior_saved, candidate_active, candidate_rejected, prior_restored},
+        "candidate_rejected": {candidate_rejected, prior_restored},
+        "prior_restored": {prior_restored},
+        "candidate_verified": {initial, prior_saved, candidate_active},
+    }
+    if state not in allowed_states[phase]:
+        raise _rollback_recovery_error(paths, phase)
+
+    if state == prior_saved:
+        rename_and_sync(paths.prior, paths.target, rename=rename)
+    elif state == candidate_active:
+        rename_and_sync(paths.target, paths.candidate, rename=rename)
+        rename_and_sync(paths.prior, paths.target, rename=rename)
+    elif state == candidate_rejected:
+        rename_and_sync(paths.prior, paths.target, rename=rename)
+
+    _clear_transaction_journal(target)
+    return paths
+
+
+def recover_transaction(target: Path, *, rename: Rename = _rename) -> BuildPaths | RollbackPaths | None:
+    payload = _read_transaction_journal(target)
+    if payload is None:
+        return None
+    operation = payload.get("operation", "rebuild") if isinstance(payload, dict) else None
+    if operation == "rebuild":
+        return _recover_rebuild_transaction(target, payload, rename=rename)
+    if operation == "rollback":
+        return _recover_rollback_transaction(target, payload, rename=rename)
+    raise ValueError(f"journal has unsupported operation: {operation}")
+
+
 def prune_backups(target: Path, keep_backups: int) -> list[Path]:
     if keep_backups < 0:
         raise ValueError("keep-backups must be zero or greater")
@@ -356,7 +561,12 @@ def prune_backups(target: Path, keep_backups: int) -> list[Path]:
     return remove
 
 
-def prune_failed_staging(target: Path, keep_failed_staging: int) -> list[Path]:
+def prune_failed_staging(
+    target: Path,
+    keep_failed_staging: int,
+    *,
+    exclude: Path | None = None,
+) -> list[Path]:
     if keep_failed_staging < 0:
         raise ValueError("keep-failed-staging must be zero or greater")
     name_pattern = re.compile(
@@ -364,6 +574,8 @@ def prune_failed_staging(target: Path, keep_failed_staging: int) -> list[Path]:
     )
     candidates: list[tuple[int, str, Path]] = []
     for path in target.parent.iterdir():
+        if exclude is not None and path == exclude:
+            continue
         if name_pattern.fullmatch(path.name) is None:
             continue
         try:
@@ -893,6 +1105,65 @@ def verify_active_venv(
     )
 
 
+def rollback_venv(
+    target: Path,
+    candidate: Path,
+    mineru_version: str,
+    check_script: Path,
+    *,
+    operation_id: str | None = None,
+    base_env: dict[str, str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    rename: Rename = _rename,
+    validator: Callable[..., None] = validate_active,
+    check_timeout: int = DEFAULT_CHECK_TIMEOUT,
+) -> RollbackPaths:
+    paths = build_rollback_paths(target, candidate, operation_id or utc_timestamp())
+    _validate_static_request(build_paths(target, "rollback-validation"), check_script, 0)
+    _validate_rollback_path_set(paths)
+    env = sanitized_environment(dict(os.environ if base_env is None else base_env))
+    with rebuild_lock(target):
+        recover_transaction(target, rename=rename)
+        validate_rollback_request(paths, check_script)
+        write_rollback_journal(paths, "prepared")
+        try:
+            rename_and_sync(paths.target, paths.prior, rename=rename)
+            write_rollback_journal(paths, "prior_saved")
+            rename_and_sync(paths.candidate, paths.target, rename=rename)
+            write_rollback_journal(paths, "candidate_active")
+        except BaseException as activation_error:
+            try:
+                recover_transaction(paths.target, rename=rename)
+            except BaseException as recovery_error:
+                raise RuntimeError(
+                    f"rollback activation failed and automatic recovery also failed: {recovery_error}; "
+                    f"target={paths.target}; candidate={paths.candidate}; prior={paths.prior}; "
+                    f"rejected={paths.rejected}"
+                ) from activation_error
+            raise
+
+        try:
+            validator(
+                paths.target,
+                check_script,
+                mineru_version,
+                base_env=env,
+                check_timeout=check_timeout,
+                runner=runner,
+            )
+        except BaseException:
+            rename_and_sync(paths.target, paths.rejected, rename=rename)
+            write_rollback_journal(paths, "candidate_rejected")
+            rename_and_sync(paths.prior, paths.target, rename=rename)
+            write_rollback_journal(paths, "prior_restored")
+            _clear_transaction_journal(paths.target)
+            raise
+
+        write_rollback_journal(paths, "candidate_verified")
+        _clear_transaction_journal(paths.target)
+    return paths
+
+
 def activate(paths: BuildPaths, rename: Rename = _rename) -> None:
     had_active = paths.active.exists()
     write_transaction_journal(paths, "prepared", had_active=had_active)
@@ -935,18 +1206,26 @@ def rebuild_venv(
     directory_size: Callable[[Path], int] = directory_size_bytes,
     rename: Rename = _rename,
     prune: Callable[[Path, int], list[Path]] = prune_backups,
-    prune_failed: Callable[[Path, int], list[Path]] = prune_failed_staging,
+    prune_failed: Callable[..., list[Path]] = prune_failed_staging,
     keep_failed_staging: int = 2,
     install_timeout: int = DEFAULT_INSTALL_TIMEOUT,
     check_timeout: int = DEFAULT_CHECK_TIMEOUT,
 ) -> BuildPaths:
-    if keep_failed_staging < 0:
-        raise ValueError("keep-failed-staging must be zero or greater")
+    if keep_failed_staging < 1:
+        raise ValueError("keep-failed-staging must be at least 1")
     paths = build_paths(target, timestamp or utc_timestamp())
     _validate_static_request(paths, check_script, keep_backups)
     env = sanitized_environment(dict(os.environ if base_env is None else base_env))
     with rebuild_lock(target):
         recover_transaction(target, rename=rename)
+        try:
+            prune_failed(
+                paths.active,
+                keep_failed_staging - 1,
+                exclude=paths.staging,
+            )
+        except Exception as exc:
+            print(f"WARNING: MinerU failed-staging pre-pruning failed: {exc}", file=sys.stderr)
         validate_request(paths, check_script, keep_backups)
         ensure_disk_space(paths, directory_size=directory_size, disk_usage=disk_usage)
         for command in build_install_commands(source_python, paths.staging, mineru_version):
@@ -985,7 +1264,7 @@ def rebuild_venv(
         except Exception as exc:
             print(f"WARNING: MinerU backup pruning failed after healthy activation: {exc}", file=sys.stderr)
         try:
-            prune_failed(paths.active, keep_failed_staging)
+            prune_failed(paths.active, keep_failed_staging, exclude=paths.staging)
         except Exception as exc:
             print(f"WARNING: MinerU failed-staging pruning failed after healthy activation: {exc}", file=sys.stderr)
     return paths
@@ -1005,26 +1284,49 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
+def _at_least_one_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path, required=True)
     parser.add_argument("--python", type=Path)
-    parser.add_argument("--verify-only", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--verify-only", action="store_true")
+    mode.add_argument("--rollback-backup", type=Path)
     parser.add_argument("--mineru-version", default="3.4.2")
     parser.add_argument("--check-script", type=Path, required=True)
     parser.add_argument("--keep-backups", type=int, default=2)
-    parser.add_argument("--keep-failed-staging", type=_nonnegative_int, default=2)
+    parser.add_argument("--keep-failed-staging", type=_at_least_one_int, default=2)
     parser.add_argument("--install-timeout", type=_positive_int, default=DEFAULT_INSTALL_TIMEOUT)
     parser.add_argument("--check-timeout", type=_positive_int, default=DEFAULT_CHECK_TIMEOUT)
     args = parser.parse_args(argv)
-    if not args.verify_only and args.python is None:
-        parser.error("--python is required unless --verify-only is used")
+    if args.verify_only or args.rollback_backup is not None:
+        if args.python is not None:
+            parser.error("--python is only valid for normal rebuild mode")
+    elif args.python is None:
+        parser.error("--python is required unless --verify-only or --rollback-backup is used")
     return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        if args.rollback_backup is not None:
+            rollback_paths = rollback_venv(
+                args.target,
+                args.rollback_backup,
+                args.mineru_version,
+                args.check_script,
+                check_timeout=args.check_timeout,
+            )
+            print(f"Rollback candidate verified: {args.target}")
+            print(f"Prior active retained at: {rollback_paths.prior}")
+            return 0
         if args.verify_only:
             verify_active_venv(
                 args.target,

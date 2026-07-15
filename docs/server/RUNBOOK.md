@@ -61,7 +61,7 @@ sudo docker compose -f docker-compose.server.yml up -d question-engine
 sudo docker compose -f docker-compose.server.yml ps
 ```
 
-安装、staging 验证、active 复验或严格版本检查失败时，`set -e` 会阻止容器启动。脚本保留本次失败 staging 供诊断；若切换后复验失败，会把新环境移回原 staging 路径并恢复旧 active（如果旧 active 存在）。一次重建成功后，`--keep-failed-staging 2` 默认保留最近 2 个严格匹配的旧失败 staging；可将参数设为 `0`，在成功验收后清理全部旧失败 staging。
+安装、staging 验证、active 复验或严格版本检查失败时，`set -e` 会阻止容器启动。脚本保留本次失败 staging 供诊断；若切换后复验失败，会把新环境移回原 staging 路径并恢复旧 active（如果旧 active 存在）。`--keep-failed-staging` 必须至少为 `1`，默认保留最近 2 个：每次新尝试前先清理旧失败 staging，为本次诊断目录预留一个名额；成功验收后再次收敛到指定数量。
 
 安全查看失败 staging：
 
