@@ -99,9 +99,14 @@ class MineruOcrProviderTest(unittest.TestCase):
         }
 
     @staticmethod
-    def _openapi_response(payload: bytes, status: int = 200):
+    def _openapi_response(
+        payload: bytes,
+        status: int = 200,
+        url: str = "http://127.0.0.1:8002/openapi.json",
+    ):
         response = BytesIO(payload)
         response.status = status
+        response.geturl = lambda: url
         return response
 
     def _write_non_utf8_runtime(self, app_root: Path) -> tuple[ProviderCommand, Path]:
@@ -247,6 +252,54 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertIn("apiEnabled", probe)
         self.assertIn("connection refused", probe["apiError"])
 
+    def test_api_probe_rejects_redirected_openapi_response(self):
+        provider = MineruOcrProvider(Path("."), 5)
+        response = self._openapi_response(
+            b'{"paths":{}}',
+            url="http://127.0.0.1:8002/docs/openapi.json",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "http://127.0.0.1:8002"},
+            clear=False,
+        ), patch.object(urllib.request, "urlopen", return_value=response):
+            probe = provider._probe_api()
+
+        self.assertFalse(probe["apiReady"])
+        self.assertIn("redirect", probe["apiError"].lower())
+
+    def test_api_probe_rejects_non_http_url_without_request(self):
+        provider = MineruOcrProvider(Path("."), 5)
+
+        with patch.dict(
+            os.environ,
+            {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "file:///tmp/mineru"},
+            clear=False,
+        ), patch.object(urllib.request, "urlopen") as urlopen:
+            probe = provider._probe_api()
+
+        self.assertFalse(probe["apiReady"])
+        self.assertIn("http", probe["apiError"].lower())
+        urlopen.assert_not_called()
+
+    def test_api_probe_reports_malformed_response_attributes(self):
+        provider = MineruOcrProvider(Path("."), 5)
+        response = BytesIO(b'{"paths":{}}')
+
+        with patch.dict(
+            os.environ,
+            {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "http://127.0.0.1:8002"},
+            clear=False,
+        ), patch.object(urllib.request, "urlopen", return_value=response):
+            try:
+                probe = provider._probe_api()
+            except Exception as exc:
+                self.fail(f"malformed HTTP response escaped API probe: {exc!r}")
+
+        self.assertFalse(probe["apiReady"])
+        self.assertTrue(probe["apiError"])
+
     def test_status_check_api_false_skips_http_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp)
@@ -271,7 +324,7 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertFalse(status["apiReady"])
         urlopen.assert_not_called()
 
-    def test_status_default_checks_api_only_when_enabled(self):
+    def test_status_api_mode_is_authoritative_even_when_check_is_forced(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp)
             command_path, _runtime_python = self._write_local_python_mineru(app_root)
@@ -287,7 +340,7 @@ class MineruOcrProviderTest(unittest.TestCase):
                 "resolve_command",
                 return_value=(command, self._healthy_resolution(command)),
             ), patch.object(urllib.request, "urlopen") as urlopen:
-                disabled_status = provider.status()
+                disabled_status = provider.status(check_api=True)
 
             response = self._openapi_response(b'{"paths":{}}')
             with patch.dict(
@@ -1026,7 +1079,7 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertFalse(resolution["candidates"][0]["valid"])
         self.assertIn("Script interpreter does not exist", resolution["candidates"][0]["error"])
 
-    def test_run_uses_configured_mineru_api_url(self):
+    def test_run_uses_configured_mineru_api_url_when_api_is_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp)
             command_path, _runtime_python = self._write_local_python_mineru(app_root)
@@ -1041,7 +1094,10 @@ class MineruOcrProviderTest(unittest.TestCase):
             (request.output_dir / "paper.md").write_text("1. 题目", encoding="utf-8")
 
             response = self._openapi_response(b'{"paths":{}}')
-            with patch.dict(os.environ, {"MINERU_API_URL": "http://127.0.0.1:8002"}), patch.object(
+            with patch.dict(
+                os.environ,
+                {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "http://127.0.0.1:8002"},
+            ), patch.object(
                 urllib.request,
                 "urlopen",
                 return_value=response,
@@ -1059,7 +1115,44 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertIsNotNone(result.bundle)
         urlopen.assert_called_once_with("http://127.0.0.1:8002/openapi.json", timeout=3.0)
 
-    def test_run_aborts_before_output_and_ocr_when_configured_api_is_unavailable(self):
+    def test_run_ignores_configured_api_url_when_api_is_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, _runtime_python = self._write_local_python_mineru(app_root)
+            command = self._provider_command(command_path)
+            provider = MineruOcrProvider(app_root, 5)
+            request = OcrProviderRequest(
+                document_id="job-api-down",
+                input_path="paper.pdf",
+                output_dir=app_root / "outputs" / "job-api-down",
+                timeout_seconds=30,
+            )
+            request.output_dir.mkdir(parents=True)
+            (request.output_dir / "paper.md").write_text("1. 题目", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {"MINERU_API_ENABLED": "false", "MINERU_API_URL": "http://127.0.0.1:8002"},
+                clear=False,
+            ), patch.object(
+                provider,
+                "resolve_command",
+                return_value=(command, self._healthy_resolution(command)),
+            ), patch.object(
+                urllib.request,
+                "urlopen",
+            ) as urlopen, patch(
+                "app.ocr_flow.subprocess.run",
+                return_value=subprocess.CompletedProcess([str(command_path)], 0, "", ""),
+            ) as run:
+                result = provider.run(request)
+
+        self.assertTrue(result.success)
+        self.assertNotIn("--api-url", run.call_args.args[0])
+        self.assertIsNone(result.metadata["mineruApiUrl"])
+        urlopen.assert_not_called()
+
+    def test_run_aborts_before_output_and_ocr_when_enabled_api_is_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp)
             command_path, _runtime_python = self._write_local_python_mineru(app_root)
@@ -1075,7 +1168,7 @@ class MineruOcrProviderTest(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"MINERU_API_ENABLED": "false", "MINERU_API_URL": "http://127.0.0.1:8002"},
+                {"MINERU_API_ENABLED": "true", "MINERU_API_URL": "http://127.0.0.1:8002"},
                 clear=False,
             ), patch.object(
                 provider,

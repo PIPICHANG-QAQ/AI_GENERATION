@@ -5,6 +5,8 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -66,6 +68,10 @@ class CheckMineruCliTest(unittest.TestCase):
             self.assertEqual(0, check_mineru.main(["--json", "--check-api"]))
             provider_status.assert_called_once_with(check_api=True)
 
+    def test_check_api_succeeds_when_api_mode_is_disabled(self):
+        with mock.patch.object(check_mineru, "provider_status", return_value=self.RUNTIME_READY):
+            self.assertEqual(0, check_mineru.main(["--json", "--check-api"]))
+
     def test_skip_api_succeeds_without_api_readiness(self):
         with mock.patch.object(check_mineru, "provider_status", return_value=self.RUNTIME_READY):
             self.assertEqual(0, check_mineru.main(["--skip-api"]))
@@ -91,75 +97,90 @@ class CheckMineruCliTest(unittest.TestCase):
 
     def test_calling_main_with_argv_does_not_reexec(self):
         with mock.patch.object(check_mineru, "provider_status", return_value=self.RUNTIME_READY), mock.patch.object(
-            check_mineru.subprocess,
-            "run",
-        ) as run:
+            check_mineru.os,
+            "execve",
+        ) as execve:
             exit_code = check_mineru.main(["--json", "--skip-api"])
 
         self.assertEqual(0, exit_code)
-        run.assert_not_called()
+        execve.assert_not_called()
 
-    def test_entrypoint_reexec_forwards_arguments_and_streams(self):
+    def test_entrypoint_execves_worker_python_with_exact_arguments_and_environment(self):
+        class ExecCalled(RuntimeError):
+            pass
+
         with tempfile.TemporaryDirectory() as tmp:
             worker_python = Path(tmp) / "python"
             worker_python.touch()
-            completed = subprocess.CompletedProcess(
-                args=[],
-                returncode=7,
-                stdout='{"installed":false}\n',
-                stderr="runtime failed\n",
-            )
-            stdout = io.StringIO()
-            stderr = io.StringIO()
             argv = ["--json", "--check-api"]
             with mock.patch.object(check_mineru, "WORKER_PYTHON", worker_python), mock.patch.dict(
                 os.environ,
                 {"CHECK_MINERU_IN_WORKER_VENV": "0"},
                 clear=False,
             ), mock.patch.object(
-                check_mineru.subprocess,
-                "run",
-                return_value=completed,
-            ) as run, mock.patch(
-                "sys.stdout",
-                stdout,
-            ), mock.patch(
-                "sys.stderr",
-                stderr,
-            ):
-                exit_code = check_mineru.entrypoint(argv)
+                check_mineru.os,
+                "execve",
+                side_effect=ExecCalled("exec invoked"),
+            ) as execve:
+                with self.assertRaisesRegex(ExecCalled, "exec invoked"):
+                    check_mineru.entrypoint(argv)
 
-        self.assertEqual(7, exit_code)
-        self.assertEqual('{"installed":false}\n', stdout.getvalue())
-        self.assertEqual("runtime failed\n", stderr.getvalue())
         self.assertEqual(
             [str(worker_python), str(SCRIPT_PATH.resolve()), *argv],
-            run.call_args.args[0],
+            execve.call_args.args[1],
         )
-        self.assertEqual("1", run.call_args.kwargs["env"]["CHECK_MINERU_IN_WORKER_VENV"])
+        self.assertEqual(str(worker_python), execve.call_args.args[0])
+        self.assertEqual("1", execve.call_args.args[2]["CHECK_MINERU_IN_WORKER_VENV"])
 
-    def test_entrypoint_preserves_zero_exit_for_arbitrary_child_output(self):
+    def test_entrypoint_returns_one_only_when_exec_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             worker_python = Path(tmp) / "python"
             worker_python.touch()
-            completed = subprocess.CompletedProcess(
-                args=[],
-                returncode=0,
-                stdout="",
-                stderr="Traceback (most recent call last):\nRuntimeError: broken\n",
-            )
+            error_output = io.StringIO()
             with mock.patch.object(check_mineru, "WORKER_PYTHON", worker_python), mock.patch.dict(
                 os.environ,
                 {"CHECK_MINERU_IN_WORKER_VENV": "0"},
                 clear=False,
             ), mock.patch.object(
-                check_mineru.subprocess,
-                "run",
-                return_value=completed,
-            ), mock.patch("sys.stderr", io.StringIO()):
+                check_mineru.os,
+                "execve",
+                side_effect=OSError("exec format error"),
+            ), mock.patch("sys.stderr", error_output):
                 exit_code = check_mineru.entrypoint(["--json", "--skip-api"])
 
-        self.assertEqual(0, exit_code)
+        self.assertEqual(1, exit_code)
+        self.assertIn("exec format error", error_output.getvalue())
+
+    def test_entrypoint_exec_preserves_binary_streams_and_signal_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script_dir = root / "scripts"
+            script_dir.mkdir()
+            copied_script = script_dir / "check_mineru.py"
+            shutil.copy2(SCRIPT_PATH, copied_script)
+            worker_python = root / "backend" / "python-worker" / ".venv" / "bin" / "python"
+            worker_python.parent.mkdir(parents=True)
+            worker_python.write_text(
+                "#!/bin/sh\n"
+                "printf '\\377stdout\\n'\n"
+                "printf '\\376stderr\\n' >&2\n"
+                "kill -TERM $$\n",
+                encoding="utf-8",
+            )
+            worker_python.chmod(0o755)
+            env = os.environ.copy()
+            env.pop("CHECK_MINERU_IN_WORKER_VENV", None)
+
+            completed = subprocess.run(
+                [sys.executable, str(copied_script), "--json", "--skip-api"],
+                env=env,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(b"\xffstdout\n", completed.stdout)
+        self.assertEqual(b"\xfestderr\n", completed.stderr)
+        self.assertEqual(-signal.SIGTERM, completed.returncode)
 
     def test_provider_exception_is_failure_not_traceback_success(self):
         output = io.StringIO()

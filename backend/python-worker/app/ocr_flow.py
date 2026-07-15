@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from importlib import metadata
@@ -208,18 +209,33 @@ class MineruOcrProvider(OcrProvider):
         if openapi_url is None:
             result["apiError"] = "MINERU_API_URL is not configured."
             return result
+        parsed_url = urllib.parse.urlparse(openapi_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            result["apiError"] = "MINERU_API_URL must use http or https."
+            return result
 
         try:
             with urllib.request.urlopen(openapi_url, timeout=3.0) as response:
                 status = response.status
+                response_url = response.geturl()
+                if not isinstance(status, int):
+                    raise TypeError("MinerU OpenAPI response status must be an integer.")
+                if not isinstance(response_url, str):
+                    raise TypeError("MinerU OpenAPI response URL must be a string.")
+                if response_url != openapi_url:
+                    result["apiError"] = (
+                        f"MinerU OpenAPI redirect is not allowed: requested {openapi_url}, received {response_url}."
+                    )
+                    return result
+                if status != 200:
+                    result["apiError"] = f"MinerU OpenAPI returned HTTP {status}."
+                    return result
                 payload = json.load(response)
-            if status != 200:
-                result["apiError"] = f"MinerU OpenAPI returned HTTP {status}."
-            elif not isinstance(payload, dict) or not isinstance(payload.get("paths"), dict):
+            if not isinstance(payload, dict) or not isinstance(payload.get("paths"), dict):
                 result["apiError"] = "Invalid MinerU OpenAPI document: expected an object with dict paths."
             else:
                 result["apiReady"] = True
-        except (OSError, ValueError, urllib.error.URLError) as exc:
+        except (AttributeError, OSError, TypeError, ValueError, urllib.error.URLError) as exc:
             result["apiError"] = str(exc)
         return result
 
@@ -600,7 +616,7 @@ class MineruOcrProvider(OcrProvider):
         """执行 status 逻辑。"""
         command, resolution = self.resolve_command()
         api_enabled = self._api_enabled()
-        api_required = api_enabled if check_api is None else check_api
+        api_required = api_enabled and check_api is not False
         if api_required:
             api_status = self._probe_api()
         else:
@@ -645,8 +661,9 @@ class MineruOcrProvider(OcrProvider):
                 error=resolution.get("error") or "MinerU CLI is not installed or not available.",
             )
 
-        api_url = self._api_url()
-        if self._api_enabled() or api_url is not None:
+        api_enabled = self._api_enabled()
+        api_url = self._api_url() if api_enabled else None
+        if api_enabled:
             api_status = self._probe_api()
             if not api_status["apiReady"]:
                 return OcrProviderResult(
@@ -672,7 +689,7 @@ class MineruOcrProvider(OcrProvider):
         }
 
         cmd = [*command.args, "-p", request.input_path, "-o", str(request.output_dir), "-b", "pipeline"]
-        if api_url:
+        if api_enabled and api_url:
             cmd.extend(["--api-url", api_url])
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=request.timeout_seconds)

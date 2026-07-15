@@ -2,101 +2,220 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+COMPOSE_FILE="docker-compose.server.yml"
 
-if [[ -f .env ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
-
-HTTP_PORT="${APP_HTTP_PORT:-80}"
-PUBLIC_HOST="${APP_PUBLIC_HOST:-${SERVER_PUBLIC_HOST:-}}"
-
-if [[ -z "$PUBLIC_HOST" ]]; then
-  PUBLIC_HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-fi
-if [[ -z "$PUBLIC_HOST" ]]; then
-  PUBLIC_HOST="服务器IP"
-fi
+load_environment() {
+  if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+  fi
+}
 
 need_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "缺少命令：$1" >&2
-    exit 1
+    return 1
   fi
 }
 
-need_command docker
-need_command curl
-need_command npm
+absolute_from_root() {
+  local value="$1"
+  if [[ "${value}" != /* ]]; then
+    value="${ROOT_DIR}/${value}"
+  fi
+  python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "${value}"
+}
 
-if ! docker compose version >/dev/null 2>&1; then
-  echo "当前 Docker 不支持 'docker compose'。请安装 Docker Compose v2。" >&2
-  exit 1
-fi
+configure_mineru_environment() {
+  local configured_venv="${HOST_MINERU_VENV:-${ROOT_DIR}/vendor/mineru-venv}"
+  local expected_command
+  local configured_command
 
-if [[ "${MINERU_API_ENABLED:-false}" == "true" ]]; then
+  HOST_MINERU_VENV="$(absolute_from_root "${configured_venv}")"
+  expected_command="${HOST_MINERU_VENV}/bin/mineru"
+  configured_command="${MINERU_HOST_COMMAND:-${expected_command}}"
+  configured_command="$(absolute_from_root "${configured_command}")"
+  if [[ "${configured_command}" != "${expected_command}" ]]; then
+    echo "MINERU_HOST_COMMAND must equal HOST_MINERU_VENV/bin/mineru: ${expected_command}" >&2
+    return 1
+  fi
+
+  export HOST_MINERU_VENV
+  export MINERU_HOST_COMMAND="${expected_command}"
+  export MINERU_COMMAND="${expected_command}"
+  export MINERU_API_COMMAND="${HOST_MINERU_VENV}/bin/mineru-api"
+}
+
+host_mineru_preflight() {
+  if [[ "${MINERU_API_ENABLED}" != "true" ]]; then
+    return 0
+  fi
   echo "==> 检查宿主机 MinerU runtime"
-  MINERU_COMMAND="${MINERU_HOST_COMMAND:-$ROOT_DIR/vendor/mineru-venv/bin/mineru}" \
-    python3 scripts/check_mineru.py --json --skip-api
-fi
+  python3 scripts/check_mineru.py --json --skip-api
+}
 
-echo "==> 构建 Java backend jar"
-if command -v mvn >/dev/null 2>&1; then
-  (cd backend && mvn -DskipTests package)
-else
-  echo "未找到 mvn，跳过 Java 构建；将使用 backend/target 下已有 jar。"
-fi
+ocr_runtime_payload_is_ready() {
+  python3 -c '
+import json
+import sys
 
-if ! ls backend/target/ai-question-bank-*.jar >/dev/null 2>&1; then
-  echo "缺少 backend/target/ai-question-bank-*.jar，Docker 镜像无法构建。" >&2
-  echo "请先安装 Maven 并执行：(cd backend && mvn -DskipTests package)" >&2
-  exit 1
-fi
+try:
+    status = json.load(sys.stdin)["providerStatus"]
+    ready = (
+        status.get("installed") is True
+        and status.get("runtimeProbeOk") is True
+        and (status.get("apiEnabled") is not True or status.get("apiReady") is True)
+    )
+except (KeyError, TypeError, ValueError):
+    ready = False
+raise SystemExit(0 if ready else 1)
+'
+}
 
-echo "==> 构建 local-platform 静态资源"
-if [[ ! -d local-platform/node_modules ]]; then
-  (cd local-platform && npm install)
-fi
-(cd local-platform && npm run build)
+java_health_ready() {
+  curl -fsS "${health_url}" >/dev/null 2>&1
+}
 
-echo "==> 启动 question-engine Docker 服务"
-docker compose -f docker-compose.server.yml up -d --build question-engine
+ocr_runtime_ready() {
+  curl -fsS "${ocr_runtime_url}" 2>/dev/null | ocr_runtime_payload_is_ready
+}
 
-echo "==> 等待健康检查"
-health_url="http://127.0.0.1:${HTTP_PORT}/api/java/health"
-for i in $(seq 1 60); do
-  if curl -fsS "$health_url" >/dev/null 2>&1; then
-    break
+server_readiness_probe() {
+  local java_status=0
+  local ocr_status=0
+  java_health_ready || java_status=$?
+  ocr_runtime_ready || ocr_status=$?
+  [[ "${java_status}" -eq 0 && "${ocr_status}" -eq 0 ]]
+}
+
+startup_timeout_seconds() {
+  printf '%s\n' "${QUESTION_ENGINE_STARTUP_TIMEOUT_SECONDS:-600}"
+}
+
+wait_for_server_readiness() {
+  local timeout_seconds
+  local poll_seconds="${QUESTION_ENGINE_STARTUP_POLL_SECONDS:-2}"
+  local deadline
+
+  timeout_seconds="$(startup_timeout_seconds)"
+  if [[ ! "${timeout_seconds}" =~ ^[0-9]+$ ]]; then
+    echo "QUESTION_ENGINE_STARTUP_TIMEOUT_SECONDS must be a non-negative integer" >&2
+    return 2
   fi
-  if [[ "$i" -eq 60 ]]; then
-    echo "健康检查失败：$health_url" >&2
-    docker compose -f docker-compose.server.yml ps >&2 || true
-    docker compose -f docker-compose.server.yml logs --tail=120 question-engine >&2 || true
-    exit 1
+  deadline=$(( $(date +%s) + timeout_seconds ))
+  while true; do
+    if server_readiness_probe; then
+      return 0
+    fi
+    if [[ "$(date +%s)" -ge "${deadline}" ]]; then
+      return 1
+    fi
+    sleep "${poll_seconds}"
+  done
+}
+
+show_startup_diagnostics() {
+  echo "Java health response:" >&2
+  curl -sS "${health_url}" >&2 || true
+  echo >&2
+  echo "OCR runtime response:" >&2
+  curl -sS "${ocr_runtime_url}" >&2 || true
+  echo >&2
+  docker compose -f "${COMPOSE_FILE}" ps >&2 || true
+  docker compose -f "${COMPOSE_FILE}" logs --tail=120 question-engine >&2 || true
+}
+
+cleanup_failed_service() {
+  docker compose -f "${COMPOSE_FILE}" stop question-engine >/dev/null 2>&1 || true
+  docker compose -f "${COMPOSE_FILE}" rm -f question-engine >/dev/null 2>&1 || true
+}
+
+require_server_readiness() {
+  local status=0
+  wait_for_server_readiness || status=$?
+  if [[ "${status}" -eq 0 ]]; then
+    return 0
   fi
-  sleep 2
-done
+  echo "服务未在统一启动期限内就绪（Java + OCR runtime）" >&2
+  show_startup_diagnostics
+  cleanup_failed_service
+  return "${status}"
+}
 
-ocr_runtime_url="http://127.0.0.1:${HTTP_PORT}/api/capabilities/ocr-flow/runtime"
-if ! curl -fsS "$ocr_runtime_url" \
-  | python3 -c 'import json,sys; s=json.load(sys.stdin)["providerStatus"]; assert s["installed"] and s["runtimeProbeOk"] and s["apiReady"]'; then
-  echo "OCR runtime 检查失败：$ocr_runtime_url" >&2
-  docker compose -f docker-compose.server.yml ps >&2 || true
-  docker compose -f docker-compose.server.yml logs --tail=120 question-engine >&2 || true
-  exit 1
+configure_public_urls() {
+  HTTP_PORT="${APP_HTTP_PORT:-80}"
+  PUBLIC_HOST="${APP_PUBLIC_HOST:-${SERVER_PUBLIC_HOST:-}}"
+  if [[ -z "${PUBLIC_HOST}" ]]; then
+    PUBLIC_HOST="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  if [[ -z "${PUBLIC_HOST}" ]]; then
+    PUBLIC_HOST="服务器IP"
+  fi
+  health_url="http://127.0.0.1:${HTTP_PORT}/api/java/health"
+  ocr_runtime_url="http://127.0.0.1:${HTTP_PORT}/api/capabilities/ocr-flow/runtime"
+}
+
+build_server_artifacts() {
+  echo "==> 构建 Java backend jar"
+  if command -v mvn >/dev/null 2>&1; then
+    (cd backend && mvn -DskipTests package)
+  else
+    echo "未找到 mvn，跳过 Java 构建；将使用 backend/target 下已有 jar。"
+  fi
+
+  if ! ls backend/target/ai-question-bank-*.jar >/dev/null 2>&1; then
+    echo "缺少 backend/target/ai-question-bank-*.jar，Docker 镜像无法构建。" >&2
+    echo "请先安装 Maven 并执行：(cd backend && mvn -DskipTests package)" >&2
+    return 1
+  fi
+
+  echo "==> 构建 local-platform 静态资源"
+  if [[ ! -d local-platform/node_modules ]]; then
+    (cd local-platform && npm install)
+  fi
+  (cd local-platform && npm run build)
+}
+
+main() {
+  cd "${ROOT_DIR}"
+  load_environment
+  export MINERU_API_ENABLED="${MINERU_API_ENABLED:-true}"
+
+  need_command docker
+  need_command curl
+  need_command npm
+  need_command python3
+  if ! docker compose version >/dev/null 2>&1; then
+    echo "当前 Docker 不支持 'docker compose'。请安装 Docker Compose v2。" >&2
+    return 1
+  fi
+
+  configure_mineru_environment
+  configure_public_urls
+  host_mineru_preflight
+  build_server_artifacts
+
+  echo "==> 启动 question-engine Docker 服务"
+  docker compose -f "${COMPOSE_FILE}" up -d --build question-engine
+
+  echo "==> 等待 Java + OCR runtime 健康检查"
+  require_server_readiness
+
+  echo
+  echo "启动完成。"
+  echo "前端页面： http://${PUBLIC_HOST}:${HTTP_PORT}/"
+  echo "健康检查： http://${PUBLIC_HOST}:${HTTP_PORT}/api/java/health"
+  echo "OCR-Flow： http://${PUBLIC_HOST}:${HTTP_PORT}/api/capabilities/ocr-flow/runtime"
+  echo
+  echo "如果 HTTP_PORT=80，浏览器可省略端口："
+  echo "http://${PUBLIC_HOST}/"
+  echo
+  echo "查看日志："
+  echo "docker compose -f ${COMPOSE_FILE} logs -f question-engine"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-echo
-echo "启动完成。"
-echo "前端页面： http://${PUBLIC_HOST}:${HTTP_PORT}/"
-echo "健康检查： http://${PUBLIC_HOST}:${HTTP_PORT}/api/java/health"
-echo "OCR-Flow： http://${PUBLIC_HOST}:${HTTP_PORT}/api/capabilities/ocr-flow/runtime"
-echo
-echo "如果 HTTP_PORT=80，浏览器可省略端口："
-echo "http://${PUBLIC_HOST}/"
-echo
-echo "查看日志："
-echo "docker compose -f docker-compose.server.yml logs -f question-engine"

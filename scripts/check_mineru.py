@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 from typing import Sequence
 
@@ -52,7 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
 
     ready = payload.get("installed") is True and payload.get("runtimeProbeOk") is True
-    if args.check_api or (not args.skip_api and payload.get("apiEnabled") is True):
+    if not args.skip_api and payload.get("apiEnabled") is True:
         ready = ready and payload.get("apiReady") is True
     return 0 if ready else 1
 
@@ -63,21 +62,14 @@ def entrypoint(argv: Sequence[str] | None = None) -> int:
         env = os.environ.copy()
         env["CHECK_MINERU_IN_WORKER_VENV"] = "1"
         try:
-            result = subprocess.run(
+            os.execve(
+                str(WORKER_PYTHON),
                 [str(WORKER_PYTHON), str(Path(__file__).resolve()), *cli_args],
-                cwd=str(ROOT),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
+                env,
             )
-        except Exception as exc:
-            print(f"MinerU readiness re-exec failed: {exc}", file=sys.stderr)
+        except OSError as exc:
+            print(f"MinerU readiness exec failed: {exc}", file=sys.stderr)
             return 1
-        sys.stdout.write(result.stdout or "")
-        sys.stderr.write(result.stderr or "")
-        return result.returncode
     return main(cli_args)
 
 
