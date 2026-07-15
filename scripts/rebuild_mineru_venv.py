@@ -17,10 +17,21 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 from typing import Callable
 
 
 GIB = 1024**3
+DEFAULT_INSTALL_TIMEOUT = 3600
+DEFAULT_CHECK_TIMEOUT = 300
+PYTHON_ENV_KEYS = {
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONINSPECT",
+    "VIRTUAL_ENV",
+    "__PYVENV_LAUNCHER__",
+}
 RUNTIME_IMPORT_PROBE = "\n".join(
     (
         "from markupsafe import Markup",
@@ -338,6 +349,7 @@ def build_install_commands(source_python: Path, staging: Path, mineru_version: s
             str(staging_python),
             "-m",
             "pip",
+            "--isolated",
             "install",
             "--upgrade",
             "pip",
@@ -348,6 +360,7 @@ def build_install_commands(source_python: Path, staging: Path, mineru_version: s
             str(staging_python),
             "-m",
             "pip",
+            "--isolated",
             "install",
             f"mineru[all]=={mineru_version}",
             "MarkupSafe==3.0.3",
@@ -451,7 +464,7 @@ def assert_relocated(staging: Path, active: Path) -> None:
 
 
 def _validation_env(base_env: dict[str, str], venv: Path) -> dict[str, str]:
-    env = dict(base_env)
+    env = sanitized_environment(base_env)
     env.update(
         {
             "MINERU_COMMAND": str(venv / "bin" / "mineru"),
@@ -462,9 +475,32 @@ def _validation_env(base_env: dict[str, str], venv: Path) -> dict[str, str]:
     return env
 
 
-def _run_checked(
+def sanitized_environment(base_env: dict[str, str]) -> dict[str, str]:
+    return {
+        key: value
+        for key, value in base_env.items()
+        if key not in PYTHON_ENV_KEYS and not key.startswith("PIP_")
+    }
+
+
+def _run_install(
     command: list[str],
     env: dict[str, str],
+    timeout: int,
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+) -> subprocess.CompletedProcess[str]:
+    return runner(
+        command,
+        check=True,
+        env=env,
+        timeout=timeout,
+    )
+
+
+def _run_validation(
+    command: list[str],
+    env: dict[str, str],
+    timeout: int,
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
     return runner(
@@ -473,6 +509,54 @@ def _run_checked(
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def build_runtime_import_probe(venv: Path, expected_version: str) -> str:
+    expected_prefix = str(venv)
+    return "\n".join(
+        (
+            "import importlib.metadata as metadata",
+            "import json",
+            "from pathlib import Path",
+            "import platform",
+            "import sys",
+            "import markupsafe",
+            "from markupsafe import Markup",
+            "import jinja2",
+            "from jinja2 import Environment",
+            "import transformers",
+            "import mineru",
+            "import mineru.cli.common as mineru_common",
+            "from mineru.cli.common import read_fn",
+            f"expected_prefix = Path({expected_prefix!r}).resolve()",
+            "actual_prefix = Path(sys.prefix).resolve()",
+            "if actual_prefix != expected_prefix:",
+            "    raise RuntimeError(f'Python prefix outside target venv: {actual_prefix}')",
+            "modules = {'markupsafe': markupsafe, 'jinja2': jinja2, 'transformers': transformers, "
+            "'mineru': mineru, 'mineru.cli.common': mineru_common}",
+            "module_paths = {}",
+            "for name, module in modules.items():",
+            "    source = Path(module.__file__).resolve()",
+            "    try:",
+            "        source.relative_to(expected_prefix)",
+            "    except ValueError as exc:",
+            "        raise RuntimeError(f'{name} imported outside target venv: {source}') from exc",
+            "    module_paths[name] = str(source)",
+            "mineru_version = metadata.version('mineru')",
+            "markupsafe_version = metadata.version('MarkupSafe')",
+            f"if mineru_version != {expected_version!r}:",
+            f"    raise RuntimeError(f'MinerU metadata expected {expected_version}, got {{mineru_version}}')",
+            "if markupsafe_version != '3.0.3':",
+            "    raise RuntimeError(f'MarkupSafe metadata expected 3.0.3, got {markupsafe_version}')",
+            "assert Markup and Environment and transformers and read_fn",
+            "print(json.dumps({'mineruVersion': mineru_version, 'markupSafeVersion': markupsafe_version, "
+            "'pythonVersion': platform.python_version(), 'pythonExecutable': sys.executable, "
+            "'pythonPrefix': str(actual_prefix), 'modulePaths': module_paths}, sort_keys=True))",
+        )
     )
 
 
@@ -510,16 +594,22 @@ def validate_staging(
     expected_version: str,
     *,
     base_env: dict[str, str],
+    check_timeout: int = DEFAULT_CHECK_TIMEOUT,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> Path:
     python = str(venv / "bin" / "python")
     mineru = str(venv / "bin" / "mineru")
     env = _validation_env(base_env, venv)
-    _run_checked([python, str(check_script), "--json", "--skip-api"], env, runner)
-    _run_checked([python, "-c", RUNTIME_IMPORT_PROBE], env, runner)
-    version = _run_checked([mineru, "--version"], env, runner)
+    _run_validation([python, "-I", str(check_script), "--json", "--skip-api"], env, check_timeout, runner)
+    _run_validation(
+        [python, "-I", "-c", build_runtime_import_probe(venv, expected_version)],
+        env,
+        check_timeout,
+        runner,
+    )
+    version = _run_validation([mineru, "--version"], env, check_timeout, runner)
     _require_version(version, expected_version)
-    packages = _run_checked([python, "-m", "pip", "freeze", "--all"], env, runner)
+    packages = _run_validation([python, "-I", "-m", "pip", "freeze", "--all"], env, check_timeout, runner)
     return write_manifest(venv, expected_version, packages.stdout or "")
 
 
@@ -529,16 +619,53 @@ def validate_active(
     expected_version: str,
     *,
     base_env: dict[str, str],
+    check_timeout: int = DEFAULT_CHECK_TIMEOUT,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> None:
     env = _validation_env(base_env, venv)
-    _run_checked(
-        [str(venv / "bin" / "python"), str(check_script), "--json", "--skip-api"],
+    python = str(venv / "bin" / "python")
+    _run_validation(
+        [python, "-I", str(check_script), "--json", "--skip-api"],
         env,
+        check_timeout,
         runner,
     )
-    version = _run_checked([str(venv / "bin" / "mineru"), "--version"], env, runner)
+    _run_validation(
+        [python, "-I", "-c", build_runtime_import_probe(venv, expected_version)],
+        env,
+        check_timeout,
+        runner,
+    )
+    version = _run_validation(
+        [str(venv / "bin" / "mineru"), "--version"],
+        env,
+        check_timeout,
+        runner,
+    )
     _require_version(version, expected_version)
+
+
+def verify_active_venv(
+    target: Path,
+    check_script: Path,
+    expected_version: str,
+    *,
+    base_env: dict[str, str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    check_timeout: int = DEFAULT_CHECK_TIMEOUT,
+) -> None:
+    paths = build_paths(target, "verify-only")
+    _validate_static_request(paths, check_script, keep_backups=0)
+    if not target.is_dir():
+        raise ValueError(f"target must be an existing active venv: {target}")
+    validate_active(
+        target,
+        check_script,
+        expected_version,
+        base_env=dict(os.environ if base_env is None else base_env),
+        check_timeout=check_timeout,
+        runner=runner,
+    )
 
 
 def activate(paths: BuildPaths, rename: Rename = _rename) -> None:
@@ -583,21 +710,24 @@ def rebuild_venv(
     directory_size: Callable[[Path], int] = directory_size_bytes,
     rename: Rename = _rename,
     prune: Callable[[Path, int], list[Path]] = prune_backups,
+    install_timeout: int = DEFAULT_INSTALL_TIMEOUT,
+    check_timeout: int = DEFAULT_CHECK_TIMEOUT,
 ) -> BuildPaths:
     paths = build_paths(target, timestamp or utc_timestamp())
     _validate_static_request(paths, check_script, keep_backups)
-    env = dict(os.environ if base_env is None else base_env)
+    env = sanitized_environment(dict(os.environ if base_env is None else base_env))
     with rebuild_lock(target):
         recover_transaction(target, rename=rename)
         validate_request(paths, check_script, keep_backups)
         ensure_disk_space(paths, directory_size=directory_size, disk_usage=disk_usage)
         for command in build_install_commands(source_python, paths.staging, mineru_version):
-            _run_checked(command, env, runner)
+            _run_install(command, env, install_timeout, runner)
         validate_staging(
             paths.staging,
             check_script,
             mineru_version,
             base_env=env,
+            check_timeout=check_timeout,
             runner=runner,
         )
         relocate_venv(paths.staging, paths.active)
@@ -609,6 +739,7 @@ def rebuild_venv(
                 check_script,
                 mineru_version,
                 base_env=env,
+                check_timeout=check_timeout,
                 runner=runner,
             )
         except BaseException:
@@ -619,29 +750,63 @@ def rebuild_venv(
             raise RuntimeError("activation transaction journal disappeared before commit")
         write_transaction_journal(paths, "active_verified", had_active=loaded[2])
         _clear_transaction_journal(paths.active)
-        prune(paths.active, keep_backups)
+        try:
+            prune(paths.active, keep_backups)
+        except Exception as exc:
+            print(f"WARNING: MinerU backup pruning failed after healthy activation: {exc}", file=sys.stderr)
     return paths
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a positive integer")
+    return parsed
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path, required=True)
-    parser.add_argument("--python", type=Path, required=True)
+    parser.add_argument("--python", type=Path)
+    parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--mineru-version", default="3.4.2")
     parser.add_argument("--check-script", type=Path, required=True)
     parser.add_argument("--keep-backups", type=int, default=2)
-    return parser.parse_args(argv)
+    parser.add_argument("--install-timeout", type=_positive_int, default=DEFAULT_INSTALL_TIMEOUT)
+    parser.add_argument("--check-timeout", type=_positive_int, default=DEFAULT_CHECK_TIMEOUT)
+    args = parser.parse_args(argv)
+    if not args.verify_only and args.python is None:
+        parser.error("--python is required unless --verify-only is used")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    paths = rebuild_venv(
-        args.target,
-        args.python,
-        args.mineru_version,
-        args.check_script,
-        args.keep_backups,
-    )
+    try:
+        if args.verify_only:
+            verify_active_venv(
+                args.target,
+                args.check_script,
+                args.mineru_version,
+                check_timeout=args.check_timeout,
+            )
+            print(f"Verified MinerU venv: {args.target}")
+            return 0
+        paths = rebuild_venv(
+            args.target,
+            args.python,
+            args.mineru_version,
+            args.check_script,
+            args.keep_backups,
+            install_timeout=args.install_timeout,
+            check_timeout=args.check_timeout,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+        print(f"MinerU venv operation failed: {exc}", file=sys.stderr)
+        for detail in (getattr(exc, "stdout", None), getattr(exc, "stderr", None), getattr(exc, "output", None)):
+            if detail:
+                print(detail, file=sys.stderr)
+        return 1
     print(f"Activated MinerU venv: {paths.active}")
     if paths.backup.exists():
         print(f"Previous MinerU venv backup: {paths.backup}")

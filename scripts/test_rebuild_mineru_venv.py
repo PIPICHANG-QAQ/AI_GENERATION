@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -44,6 +45,7 @@ class AtomicMineruVenvTest(unittest.TestCase):
                     "/srv/vendor/mineru-venv.new-1/bin/python",
                     "-m",
                     "pip",
+                    "--isolated",
                     "install",
                     "--upgrade",
                     "pip",
@@ -54,6 +56,7 @@ class AtomicMineruVenvTest(unittest.TestCase):
                     "/srv/vendor/mineru-venv.new-1/bin/python",
                     "-m",
                     "pip",
+                    "--isolated",
                     "install",
                     "mineru[all]==3.4.2",
                     "MarkupSafe==3.0.3",
@@ -667,6 +670,132 @@ class VenvValidationTest(unittest.TestCase):
             stdout = ""
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
+    def test_install_and_validation_runners_have_distinct_bounded_io_contracts(self) -> None:
+        install_runner = mock.Mock(return_value=subprocess.CompletedProcess(["pip"], 0))
+        validation_runner = mock.Mock(
+            return_value=subprocess.CompletedProcess(["check"], 0, stdout="ok", stderr="")
+        )
+        env = {"PATH": "/test/bin"}
+
+        rebuild_mineru_venv._run_install(["python", "-m", "venv", "/tmp/staging"], env, 3600, install_runner)
+        rebuild_mineru_venv._run_validation(["python", "-I", "check.py"], env, 300, validation_runner)
+
+        install_runner.assert_called_once_with(
+            ["python", "-m", "venv", "/tmp/staging"],
+            check=True,
+            env=env,
+            timeout=3600,
+        )
+        validation_runner.assert_called_once_with(
+            ["python", "-I", "check.py"],
+            check=True,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+        )
+
+    def test_environment_sanitization_removes_pip_and_python_injection(self) -> None:
+        polluted = {
+            "PATH": "/test/bin",
+            "UNRELATED": "kept",
+            "PIP_NO_INDEX": "1",
+            "PIP_FIND_LINKS": "/mac-wheelhouse",
+            "PIP_CONFIG_FILE": "/tmp/offline-pip.conf",
+            "PIP_INDEX_URL": "file:///private/index",
+            "PYTHONPATH": "/tmp/fake-modules",
+            "PYTHONHOME": "/tmp/fake-home",
+            "VIRTUAL_ENV": "/tmp/wrong-venv",
+            "__PYVENV_LAUNCHER__": "/tmp/wrong-python",
+        }
+
+        clean = rebuild_mineru_venv.sanitized_environment(polluted)
+
+        self.assertEqual("/test/bin", clean["PATH"])
+        self.assertEqual("kept", clean["UNRELATED"])
+        for key in polluted.keys() - {"PATH", "UNRELATED"}:
+            self.assertNotIn(key, clean)
+
+    def test_real_probe_requires_modules_from_target_venv_and_exact_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = Path(tmp) / "venv"
+            subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True, env=os.environ.copy())
+            python = venv / "bin" / "python"
+            purelib = Path(
+                subprocess.run(
+                    [str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env=os.environ.copy(),
+                ).stdout.strip()
+            )
+            (purelib / "markupsafe.py").write_text("class Markup: pass\n", encoding="utf-8")
+            (purelib / "jinja2.py").write_text("class Environment: pass\n", encoding="utf-8")
+            (purelib / "transformers.py").write_text("VALUE = True\n", encoding="utf-8")
+            common = purelib / "mineru" / "cli" / "common.py"
+            common.parent.mkdir(parents=True)
+            (purelib / "mineru" / "__init__.py").write_text("", encoding="utf-8")
+            (purelib / "mineru" / "cli" / "__init__.py").write_text("", encoding="utf-8")
+            common.write_text("def read_fn(): pass\n", encoding="utf-8")
+            for distribution, version in (("mineru", "3.4.2"), ("MarkupSafe", "3.0.3")):
+                metadata = purelib / f"{distribution}-{version}.dist-info" / "METADATA"
+                metadata.parent.mkdir()
+                metadata.write_text(
+                    f"Metadata-Version: 2.1\nName: {distribution}\nVersion: {version}\n",
+                    encoding="utf-8",
+                )
+
+            completed = subprocess.run(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    rebuild_mineru_venv.build_runtime_import_probe(venv, "3.4.2"),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=os.environ.copy(),
+            )
+            payload = json.loads(completed.stdout)
+
+            self.assertEqual("3.4.2", payload["mineruVersion"])
+            self.assertEqual("3.0.3", payload["markupSafeVersion"])
+            for module_path in payload["modulePaths"].values():
+                Path(module_path).resolve().relative_to(venv.resolve())
+
+    def test_external_pythonpath_fake_modules_cannot_satisfy_staging_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            venv = root / "venv"
+            subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True, env=os.environ.copy())
+            fake = root / "fake"
+            fake.mkdir()
+            (fake / "markupsafe.py").write_text("class Markup: pass\n", encoding="utf-8")
+            (fake / "jinja2.py").write_text("class Environment: pass\n", encoding="utf-8")
+            (fake / "transformers.py").write_text("VALUE = True\n", encoding="utf-8")
+            common = fake / "mineru" / "cli" / "common.py"
+            common.parent.mkdir(parents=True)
+            (fake / "mineru" / "__init__.py").write_text("", encoding="utf-8")
+            (fake / "mineru" / "cli" / "__init__.py").write_text("", encoding="utf-8")
+            common.write_text("def read_fn(): pass\n", encoding="utf-8")
+            check_script = root / "check.py"
+            check_script.write_text("print('{}')\n", encoding="utf-8")
+
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                rebuild_mineru_venv.validate_staging(
+                    venv,
+                    check_script,
+                    "3.4.2",
+                    base_env={"PATH": os.environ["PATH"], "PYTHONPATH": str(fake)},
+                    runner=subprocess.run,
+                )
+
+            self.assertEqual([str(venv / "bin" / "python"), "-I", "-c"], raised.exception.cmd[:3])
+
     def test_runtime_import_probe_is_exact(self) -> None:
         self.assertEqual(
             "\n".join(
@@ -743,10 +872,10 @@ class VenvValidationTest(unittest.TestCase):
             mineru = str(venv / "bin" / "mineru")
             self.assertEqual(
                 [
-                    [python, str(check_script), "--json", "--skip-api"],
-                    [python, "-c", rebuild_mineru_venv.RUNTIME_IMPORT_PROBE],
+                    [python, "-I", str(check_script), "--json", "--skip-api"],
+                    [python, "-I", "-c", rebuild_mineru_venv.build_runtime_import_probe(venv, "3.4.2")],
                     [mineru, "--version"],
-                    [python, "-m", "pip", "freeze", "--all"],
+                    [python, "-I", "-m", "pip", "freeze", "--all"],
                 ],
                 [command for command, _kwargs in self.calls],
             )
@@ -818,7 +947,13 @@ class VenvValidationTest(unittest.TestCase):
 
             self.assertEqual(
                 [
-                    [str(active / "bin" / "python"), str(check_script), "--json", "--skip-api"],
+                    [str(active / "bin" / "python"), "-I", str(check_script), "--json", "--skip-api"],
+                    [
+                        str(active / "bin" / "python"),
+                        "-I",
+                        "-c",
+                        rebuild_mineru_venv.build_runtime_import_probe(active, "3.4.2"),
+                    ],
                     [str(active / "bin" / "mineru"), "--version"],
                 ],
                 [command for command, _kwargs in self.calls],
@@ -867,10 +1002,11 @@ class RebuildOrchestrationTest(unittest.TestCase):
                     f"command = python -m venv {paths.staging}\n",
                     encoding="utf-8",
                 )
-            elif fail_install and command[1:6] == ["-m", "pip", "install", "--upgrade", "pip"]:
+            elif fail_install and command[1:7] == ["-m", "pip", "--isolated", "install", "--upgrade", "pip"]:
                 raise subprocess.CalledProcessError(1, command)
             if fail_active_readiness and command == [
                 str(paths.active / "bin" / "python"),
+                "-I",
                 str(paths.active.parent.parent / "scripts" / "check_mineru.py"),
                 "--json",
                 "--skip-api",
@@ -956,6 +1092,42 @@ class RebuildOrchestrationTest(unittest.TestCase):
             with rebuild_mineru_venv.rebuild_lock(paths.active):
                 pass
 
+    def test_install_or_validation_timeout_preserves_staging_and_old_active(self) -> None:
+        for timeout_stage in ("install", "validation"):
+            with self.subTest(timeout_stage=timeout_stage), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths, check_script = self._setup(root)
+                calls: list[tuple[list[str], dict[str, object]]] = []
+                normal_runner = self._runner(paths, calls)
+
+                def timing_out(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                    if timeout_stage == "install" and command[1:4] == ["-m", "pip", "--isolated"]:
+                        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                    if timeout_stage == "validation" and command[-2:] == ["--json", "--skip-api"]:
+                        raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="partial")
+                    return normal_runner(command, **kwargs)
+
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    rebuild_mineru_venv.rebuild_venv(
+                        paths.active,
+                        Path("/usr/bin/python3"),
+                        "3.4.2",
+                        check_script,
+                        2,
+                        timestamp="20260715T120000.000000Z-fixed",
+                        base_env={"PATH": "/test/bin"},
+                        runner=timing_out,
+                        disk_usage=lambda _path: SimpleNamespace(free=100 * 1024**3),
+                        install_timeout=11,
+                        check_timeout=7,
+                    )
+
+                self.assertEqual("old", (paths.active / "old-marker").read_text(encoding="utf-8"))
+                self.assertEqual("new", (paths.staging / "new-marker").read_text(encoding="utf-8"))
+                self.assertFalse(paths.backup.exists())
+                timeout_calls = [kwargs["timeout"] for _command, kwargs in calls if "timeout" in kwargs]
+                self.assertTrue(timeout_calls)
+
     def test_post_activation_failure_preserves_failed_new_and_restores_backup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1009,6 +1181,57 @@ class RebuildOrchestrationTest(unittest.TestCase):
             self.assertEqual("new", (paths.staging / "new-marker").read_text(encoding="utf-8"))
             self.assertFalse(paths.backup.exists())
 
+    def test_prune_exception_warns_after_healthy_activation_without_failing_rebuild(self) -> None:
+        for failure in (PermissionError("permission denied"), RuntimeError("cleanup failed")):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths, check_script = self._setup(root)
+                calls: list[tuple[list[str], dict[str, object]]] = []
+                stderr = io.StringIO()
+
+                with mock.patch("sys.stderr", stderr):
+                    result = rebuild_mineru_venv.rebuild_venv(
+                        paths.active,
+                        Path("/usr/bin/python3"),
+                        "3.4.2",
+                        check_script,
+                        2,
+                        timestamp="20260715T120000.000000Z-fixed",
+                        base_env={"PATH": "/test/bin"},
+                        runner=self._runner(paths, calls),
+                        disk_usage=lambda _path: SimpleNamespace(free=100 * 1024**3),
+                        prune=mock.Mock(side_effect=failure),
+                    )
+
+                self.assertEqual(paths, result)
+                self.assertEqual("new", (paths.active / "new-marker").read_text(encoding="utf-8"))
+                self.assertEqual("old", (paths.backup / "old-marker").read_text(encoding="utf-8"))
+                self.assertIn("warning", stderr.getvalue().lower())
+                self.assertIn(str(failure), stderr.getvalue())
+
+    def test_prune_baseexception_is_not_swallowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, check_script = self._setup(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            with self.assertRaises(KeyboardInterrupt):
+                rebuild_mineru_venv.rebuild_venv(
+                    paths.active,
+                    Path("/usr/bin/python3"),
+                    "3.4.2",
+                    check_script,
+                    2,
+                    timestamp="20260715T120000.000000Z-fixed",
+                    base_env={"PATH": "/test/bin"},
+                    runner=self._runner(paths, calls),
+                    disk_usage=lambda _path: SimpleNamespace(free=100 * 1024**3),
+                    prune=mock.Mock(side_effect=KeyboardInterrupt()),
+                )
+
+            self.assertEqual("new", (paths.active / "new-marker").read_text(encoding="utf-8"))
+            self.assertEqual("old", (paths.backup / "old-marker").read_text(encoding="utf-8"))
+
     def test_cli_defaults_match_server_contract(self) -> None:
         args = rebuild_mineru_venv.parse_args(
             [
@@ -1026,6 +1249,124 @@ class RebuildOrchestrationTest(unittest.TestCase):
         self.assertEqual("3.4.2", args.mineru_version)
         self.assertEqual(Path("/srv/scripts/check_mineru.py"), args.check_script)
         self.assertEqual(2, args.keep_backups)
+        self.assertEqual(3600, args.install_timeout)
+        self.assertEqual(300, args.check_timeout)
+
+    def test_cli_rejects_nonpositive_timeouts(self) -> None:
+        base = [
+            "--target",
+            "/srv/vendor/mineru-venv",
+            "--python",
+            "/usr/bin/python3",
+            "--check-script",
+            "/srv/scripts/check_mineru.py",
+        ]
+        for option in ("--install-timeout", "--check-timeout"):
+            for value in ("0", "-1"):
+                with self.subTest(option=option, value=value), self.assertRaises(SystemExit):
+                    rebuild_mineru_venv.parse_args([*base, option, value])
+
+    def test_main_returns_nonzero_and_reports_timeout(self) -> None:
+        timeout = subprocess.TimeoutExpired(["pip", "install"], 10, output="partial install")
+        argv = [
+            "--target",
+            "/srv/vendor/mineru-venv",
+            "--python",
+            "/usr/bin/python3",
+            "--check-script",
+            "/srv/scripts/check_mineru.py",
+        ]
+
+        with mock.patch.object(rebuild_mineru_venv, "rebuild_venv", side_effect=timeout), mock.patch(
+            "sys.stderr"
+        ) as stderr:
+            result = rebuild_mineru_venv.main(argv)
+
+        self.assertEqual(1, result)
+        self.assertIn("timed out", "".join(call.args[0] for call in stderr.write.call_args_list).lower())
+
+
+class VerifyOnlyTest(unittest.TestCase):
+    @staticmethod
+    def _runner(version_output: str, calls: list[list[str]]):
+        def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            stdout = version_output if command[-1:] == ["--version"] else "{}\n"
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        return run
+
+    def test_verify_only_cli_does_not_require_python_or_run_rebuild(self) -> None:
+        argv = [
+            "--verify-only",
+            "--target",
+            "/srv/vendor/mineru-venv",
+            "--mineru-version",
+            "3.4.2",
+            "--check-script",
+            "/srv/scripts/check_mineru.py",
+        ]
+        args = rebuild_mineru_venv.parse_args(argv)
+        self.assertTrue(args.verify_only)
+        self.assertIsNone(args.python)
+
+        with mock.patch.object(rebuild_mineru_venv, "verify_active_venv") as verify, mock.patch.object(
+            rebuild_mineru_venv, "rebuild_venv"
+        ) as rebuild:
+            result = rebuild_mineru_venv.main(argv)
+
+        self.assertEqual(0, result)
+        verify.assert_called_once()
+        rebuild.assert_not_called()
+
+    def test_normal_rebuild_still_requires_python(self) -> None:
+        with self.assertRaises(SystemExit):
+            rebuild_mineru_venv.parse_args(
+                [
+                    "--target",
+                    "/srv/vendor/mineru-venv",
+                    "--check-script",
+                    "/srv/scripts/check_mineru.py",
+                ]
+            )
+
+    def test_verify_only_accepts_exact_version_and_rejects_adversarial_outputs(self) -> None:
+        invalid_outputs = (
+            "mineru, version 3.4.1\n",
+            "mineru, version 3.4.2rc1\n",
+            "mineru, version 3.4.2.post1\n",
+            "mineru, version 3.4.2\nmineru, version 3.4.2\n",
+            "mineru, version 3.4.2\nmineru, version 3.4.1\n",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active = root / "vendor" / "mineru-venv"
+            active.mkdir(parents=True)
+            check_script = root / "scripts" / "check_mineru.py"
+            check_script.parent.mkdir()
+            check_script.write_text("# check\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            rebuild_mineru_venv.verify_active_venv(
+                active,
+                check_script,
+                "3.4.2",
+                base_env={"PATH": "/test/bin"},
+                runner=self._runner("warning\nmineru, version 3.4.2\n", calls),
+                check_timeout=9,
+            )
+            self.assertFalse(any("install" in command for command in calls))
+
+            for output in invalid_outputs:
+                with self.subTest(output=output), self.assertRaises(RuntimeError):
+                    rebuild_mineru_venv.verify_active_venv(
+                        active,
+                        check_script,
+                        "3.4.2",
+                        base_env={"PATH": "/test/bin"},
+                        runner=self._runner(output, []),
+                        check_timeout=9,
+                    )
 
 
 class InstallMineruShellTest(unittest.TestCase):
