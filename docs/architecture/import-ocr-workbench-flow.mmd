@@ -65,7 +65,7 @@ flowchart TD
   RescanConfirm["重新 OCR 扫描确认<br/>只扫描原始试卷/答案文件<br/>不覆盖已提取和已编辑题目"]:::local
   RescanApi["POST /api/import-tasks/{taskId}/rescan<br/>Java 判断处理中状态；重复触发返回 409"]:::mixed
   BatchStdConfirm["全局标准化确认<br/>处理题干、答案、解析和小问字段<br/>状态不自动改变"]:::local
-  BatchStdLoop["批量标准化编排<br/>复用现有 AI 标准化 + 保存接口<br/>进度 n/m，失败不中断"]:::mixed
+  BatchStdLoop["Java durable batch 编排<br/>规则优先、OCR/cache 兜底、必要时 LLM<br/>自适应并发；可取消/恢复/重试失败项"]:::mixed
   BatchAiConfirm["AI 解析全部确认<br/>默认只补缺失解析；可勾选覆盖已有解析"]:::local
   BatchAiLoop["批量 AI 解析编排<br/>普通题整题，小问逐个；进度 n/m<br/>失败不中断，结束汇总"]:::external
   FigureRefs["题图引用与题图库<br/>images 保存元数据；题干 Markdown 引用决定预览位置"]:::local

@@ -101,6 +101,19 @@ def main() -> None:
     question = questions[0]
     question_id = str(question.get("id") or "")
     markdown = str(question.get("manualMarkdown") or question.get("stemMarkdown") or "")
+
+    # The workbench always previews canonical structure before it starts the
+    # durable global standardization batch.  Keep this route in the AI smoke
+    # because it must be handled by Java rather than the legacy Python API
+    # proxy.
+    canonical_preview = request(
+        "POST",
+        f"/api/import-tasks/{task_id}/canonicalization/preview",
+        timeout=60,
+    )
+    ok("canonicalization preview", bool(canonical_preview.get("applyToken")), canonical_preview)
+    ok("canonicalization has no blockers", not canonical_preview.get("blockingIssues"), canonical_preview)
+
     standardized = request(
         "POST",
         f"/api/import-tasks/{task_id}/questions/{question_id}/standardize/ai",
@@ -116,6 +129,15 @@ def main() -> None:
         timeout=90,
     )
     ok("ai analysis", "analysis" in analysis, analysis)
+
+    global_job = request(
+        "POST",
+        f"/api/import-tasks/{task_id}/standardization-jobs",
+        timeout=60,
+    )
+    global_job_id = str(global_job.get("id") or "")
+    ok("global standardization starts", bool(global_job_id), global_job)
+    ok("global standardization item count", int(global_job.get("totalItems") or 0) >= 1, global_job)
     print("ai smoke passed")
 
 

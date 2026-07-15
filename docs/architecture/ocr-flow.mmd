@@ -95,8 +95,8 @@ flowchart TD
   RescanReject["拒绝重复触发<br/>返回 409，前端继续轮询"]:::local
   RescanRetry["重新投递已有试卷/答案 OCR job<br/>状态切为处理中；已有 questions 不覆盖"]:::mixed
   ManualEdit["复合编辑器<br/>大题题干 + 小问题干/答案/解析/分值/知识点"]:::local
-  BatchStdAll["全局标准化<br/>前端批处理全部题干/答案/解析<br/>已入库卡片需重新入库才覆盖题库"]:::mixed
-  BatchStdUnits["批量标准化单元<br/>父题和小问逐字段处理<br/>进度 标准化中 n/m，失败不中断"]:::mixed
+  BatchStdAll["全局标准化<br/>Java durable batch job<br/>规则 / OCR fallback / cache / LLM 自适应并发"]:::mixed
+  BatchStdUnits["批量标准化单元<br/>父题和小问逐字段处理<br/>可取消/恢复/重试失败项，风险题转人工复核"]:::mixed
   BatchAiAll["AI 解析全部<br/>前端批处理：默认补缺失解析，可选择覆盖"]:::local
   BatchAiUnits["批量解析单元<br/>普通题整题；复合大题按小问<br/>进度 AI 解析中 n/m，失败不中断"]:::external
   AddImages["题图维护<br/>从本卷题图库导入或本地多图上传"]:::local

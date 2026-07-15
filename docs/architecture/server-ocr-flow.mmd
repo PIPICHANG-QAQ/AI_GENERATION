@@ -57,7 +57,7 @@ flowchart TD
   LayoutFallback["layout fallback/warnings<br/>只命中小标签、极小框或缺题图时降级<br/>不影响题目识别稳定性"]:::hybrid
   Workbench["OCR 工作台<br/>轮询任务、人工校验、题图维护、入库"]:::local
   Rescan["重新 OCR 扫描<br/>Java /rescan 重投原始 OCR job<br/>已有题目和编辑内容不覆盖"]:::hybrid
-  BatchStandardize["全局标准化<br/>前端批处理题干/答案/解析<br/>复用现有标准化和保存接口，进度 n/m"]:::hybrid
+  BatchStandardize["全局标准化<br/>Java durable batch job + 自适应并发<br/>规则/OCR/cache 优先，必要时 LLM"]:::hybrid
   BatchAnalysis["AI 解析全部<br/>前端批处理单题/小问解析<br/>默认补缺失，进度 n/m"]:::external
 
   Client --> ServerCompose --> Java
