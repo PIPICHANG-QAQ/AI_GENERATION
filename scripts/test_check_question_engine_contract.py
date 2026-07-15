@@ -62,6 +62,22 @@ class MermaidStructureCheckTest(unittest.TestCase):
 
         self.assertEqual(["flow.svg: missing rendered directed edge A -> B"], failures)
 
+    def test_reports_extra_reverse_rendered_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n  A["A"]\n  B["B"]\n  A --> B\n',
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<path data-id="L_A_B_0"/><path data-id="L_B_A_0"/>'
+                '<g id="flowchart-A-0"><text>A</text></g>'
+                '<g id="flowchart-B-1"><text>B</text></g>'
+                '</svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual(["flow.svg: unexpected rendered directed edge B -> A"], failures)
+
     def test_reports_missing_rendered_class_assignment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             mmd, svg = self.write_pair(
@@ -73,6 +89,41 @@ class MermaidStructureCheckTest(unittest.TestCase):
             failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
 
         self.assertEqual(["flow.svg: missing rendered class important for A"], failures)
+
+    def test_reports_obsolete_source_defined_custom_class_but_ignores_renderer_utility_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n  A["A"]\n  class A current;\n  classDef current fill:#fff;\n  classDef obsolete fill:#000;\n',
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<g id="flowchart-A-0" class="node default current obsolete renderer-utility"><text>A</text></g>'
+                '</svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual(["flow.svg: unexpected rendered class obsolete for A"], failures)
+
+    def test_reports_source_defined_custom_class_assigned_to_wrong_node(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n  A["A"]\n  B["B"]\n  class A important;\n  classDef important fill:#fff;\n',
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<g id="flowchart-A-0" class="node default"><text>A</text></g>'
+                '<g id="flowchart-B-1" class="node default important"><text>B</text></g>'
+                '</svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual(
+            [
+                "flow.svg: missing rendered class important for A",
+                "flow.svg: unexpected rendered class important for B",
+            ],
+            failures,
+        )
 
     def test_worker_bundle_schema_requires_compatibility_artifact_root(self) -> None:
         worker_contract = (

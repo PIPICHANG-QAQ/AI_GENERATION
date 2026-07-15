@@ -26,6 +26,7 @@ MERMAID_NODE_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*(?:\[|\(|\{)")
 MERMAID_CLASS_STATEMENT = re.compile(
     r"^\s*class\s+([A-Za-z_][A-Za-z0-9_,-]*)\s+([A-Za-z_][A-Za-z0-9_-]*)\s*;?\s*$"
 )
+MERMAID_CLASS_DEFINITION = re.compile(r"^\s*classDef\s+([A-Za-z_][A-Za-z0-9_-]*)\b", re.MULTILINE)
 
 
 def normalize_mermaid_label(value: str) -> str:
@@ -68,6 +69,27 @@ def declared_mermaid_semantics(mmd: str) -> tuple[dict[str, str], set[tuple[str,
     return labels, edges, classes
 
 
+def rendered_mermaid_edges(rendered_ids: set[str], declared_nodes: set[str]) -> set[tuple[str, str]]:
+    """Map Mermaid edge ids to declared endpoint pairs; duplicate SVG instances collapse into one edge."""
+    prefixes = sorted(
+        (
+            (f"L_{source}_{target}_", (source, target))
+            for source in declared_nodes
+            for target in declared_nodes
+        ),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+    edges: set[tuple[str, str]] = set()
+    for rendered_id in rendered_ids:
+        for prefix, edge in prefixes:
+            suffix = rendered_id.removeprefix(prefix)
+            if suffix != rendered_id and suffix.isdigit():
+                edges.add(edge)
+                break
+    return edges
+
+
 def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
     """Check XML plus rendered flowchart nodes, labels, edges, and classes."""
     mmd = mmd_path.read_text(encoding="utf-8")
@@ -80,7 +102,14 @@ def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
     except ElementTree.ParseError as exc:
         return [f"{svg_path.name}: invalid XML: {exc}"]
     rendered_ids = {element.get("id", "") for element in svg_root.iter() if element.get("id")}
-    rendered_edges = {element.get("data-id", "") for element in svg_root.iter() if element.get("data-id")}
+    rendered_edge_ids = {element.get("data-id", "") for element in svg_root.iter() if element.get("data-id")}
+    rendered_edges = rendered_mermaid_edges(rendered_edge_ids, set(declared_nodes))
+    source_custom_classes = set(MERMAID_CLASS_DEFINITION.findall(mmd))
+    source_custom_classes.update(
+        class_name
+        for assigned_classes in declared_classes.values()
+        for class_name in assigned_classes
+    )
     failures: list[str] = []
     missing_nodes: set[str] = set()
     for node_id in declared_nodes:
@@ -99,16 +128,18 @@ def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
             rendered_label = normalize_mermaid_label(" ".join(node_elements[0].itertext()))
             if rendered_label != expected_label:
                 failures.append(f"{svg_path.name}: stale rendered label for {node_id}: expected '{expected_label}'")
-        rendered_classes = set((node_elements[0].get("class") or "").split())
-        for class_name in sorted(declared_classes.get(node_id) or set()):
-            if class_name not in rendered_classes:
-                failures.append(f"{svg_path.name}: missing rendered class {class_name} for {node_id}")
-    for source, target in sorted(declared_edges):
+        expected_classes = declared_classes.get(node_id) or set()
+        rendered_classes = set((node_elements[0].get("class") or "").split()) & source_custom_classes
+        for class_name in sorted(expected_classes - rendered_classes):
+            failures.append(f"{svg_path.name}: missing rendered class {class_name} for {node_id}")
+        for class_name in sorted(rendered_classes - expected_classes):
+            failures.append(f"{svg_path.name}: unexpected rendered class {class_name} for {node_id}")
+    for source, target in sorted(declared_edges - rendered_edges):
         if source in missing_nodes or target in missing_nodes:
             continue
-        edge_id = re.compile(rf"^L_{re.escape(source)}_{re.escape(target)}_[0-9]+$")
-        if not any(edge_id.match(rendered_edge) for rendered_edge in rendered_edges):
-            failures.append(f"{svg_path.name}: missing rendered directed edge {source} -> {target}")
+        failures.append(f"{svg_path.name}: missing rendered directed edge {source} -> {target}")
+    for source, target in sorted(rendered_edges - declared_edges):
+        failures.append(f"{svg_path.name}: unexpected rendered directed edge {source} -> {target}")
     return failures
 
 
