@@ -76,6 +76,8 @@ from app.ocr import (
 | `capabilities[]` | provider 实际提供的证据能力 |
 | `json` | 归一化或原生 JSON 证据；不得替代稳定字段 |
 
+显式 `run_bundle()` 不会发现或读取未在上述稳定字段中声明的 provider-native 文件。`nativeArtifacts[]` 只参与路径校验和诊断，不会触发按 MinerU 文件名解析。
+
 ### 4.3 能力等级
 
 | 等级 | 最低证据 | 预期效果 |
@@ -146,6 +148,7 @@ app/ocr/
 - bbox 为 `[x0, y0, x1, y1]` 且坐标有序；
 - 非空 `markdownArtifactPath`、`jsonArtifactPath`、`assets[].path` 和 `nativeArtifacts[].path` 必须是 `artifactRoot` 内真实存在的相对文件；绝对路径和包含 `..` 的路径一律拒绝；
 - `sourceDocumentRef.path` 是原文件引用，不受 artifactRoot 包含性约束。
+- 显式 bundle 的视觉上下文只允许来自 `layoutBlocks[]`、`pages[]` 和 `sourceDocumentRef`；空 layout 是显式空上下文，不得回退扫描 `*_content_list.json`、`*_middle.json` 或其它 provider 私有文件。
 
 契约错误应直接失败并记录明确原因，不允许静默降级成错误题目结构。
 
@@ -157,6 +160,8 @@ app/ocr/
 - `assets`、题图库、`imagePlacements` 和布局信息；
 - `mathValidation`、边界置信度和人工复核原因；
 - 现有标准化、AI 补全及指标元数据。
+
+视觉修复产生的 crop 属于 worker 派生 scratch，写入 `PYTHON_WORKER_STORAGE_ROOT/postprocess/<jobId>/visual_repair`，不会写入只读 `artifactRoot`，也不会进入 provider 证据契约。
 
 provider 替换不得要求 Java API、前端工作台或题库模型理解 provider 私有结构。
 

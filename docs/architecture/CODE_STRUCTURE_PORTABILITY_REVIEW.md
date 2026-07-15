@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 可迁移性 | 基本达标 | 有 TOGO/交付脚本、OpenAPI/SDK、portability check、Docker server compose；真实密钥和运行数据未纳入交付包 |
 | 模块化 | 基本达标 | Java capability / engine / domain 分层清晰；Python worker 能力模块已拆分，但部分模块仍偏大 |
-| OCR provider 可替换性 | 基本达标（兼容期） | Provider 成功后返回 `CanonicalOcrBundle v1`；MinerU 的现有工件由 `MineruOcrBundleAdapter` 归一，统一后处理才开始执行。视觉修复仍通过只读 `artifactRoot` 兼容当前本地文件 I/O。 |
+| OCR provider 可替换性 | 基本达标（兼容期） | Provider 成功后返回 `CanonicalOcrBundle v1`；MinerU 的现有工件由 `MineruOcrBundleAdapter` 归一，统一后处理才开始执行。显式 bundle 的视觉上下文只消费 canonical layout/pages/source，派生 crop 写入独立 worker scratch。 |
 | SDK 边界 | 基本达标 | OpenAPI `1.2.0` 和 Java/TypeScript SDK 提供远程能力调用；`app.ocr` 提供 Python worker 内嵌 Post Process 入口，未重复发布算法 SDK。 |
 | 前端可替换性 | 中等 | `local-platform` 是演示壳，API adapter 相对集中；但工作台组件仍较大，后续嵌入正式平台时建议拆出 layout overlay / question editor 子组件包 |
 | 服务器可复现性 | 基本达标 | `docker-compose.server.yml`、`docs/server`、GPU 分配和 MinerU 缓存策略已文档化；公网 80 入站仍受上游网络限制 |
@@ -79,7 +79,7 @@
 
 3. OCR provider 替换仍处于兼容期。
    - 已完成：`middle/content_list` 优先级、bbox、页码、阅读顺序和 Markdown offset 已由 `MineruOcrBundleAdapter` 转为 provider-neutral `layoutBlocks[]`；后处理入口和 outputs 刷新均优先使用已持久化的 bundle。
-   - 剩余风险：视觉 crop、页图和旧题图路径仍需要本地可读的 `artifactRoot`，因此外部 Provider 初期必须将图片/页图物化到受控工件目录。
+   - 剩余风险：已声明题图工件仍需要本地可读的 `artifactRoot`，sourceDocumentRef 仍需同机可读，因此外部 Provider 初期必须将这些证据物化到受控目录；派生视觉 crop 已不再写回该目录。
    - 建议：在黄金样本零差异验证后引入 `ArtifactResolver`，再移除后处理对本地目录的兼容依赖。
 
 4. Java/Python 状态双写仍存在兼容负担。

@@ -268,6 +268,8 @@ JAVA_STORAGE_LOCAL_ROOT=/data/java_files
 JAVA_DOMAIN_LIBRARY_STORE_PATH=/data/library_store.json
 ```
 
+Python worker 会在该根目录下创建 `postprocess/<jobId>/visual_repair` 作为派生 crop 的可写 scratch。OCR provider 的 `artifactRoot` 可保持只读；不要把 `postprocess` scratch 注册为 provider 证据或长期工件归档。
+
 端口可通过 `.env` 调整：
 
 ```text

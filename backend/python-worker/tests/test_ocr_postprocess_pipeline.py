@@ -5,11 +5,64 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from PIL import Image, ImageDraw
 
 from app import ocr_processing, question_markdown
-from app.ocr.contracts import CanonicalOcrBundle, CanonicalOcrBundleError, OcrAsset, SourceDocumentRef
+from app.ocr.contracts import (
+    CanonicalOcrBundle,
+    CanonicalOcrBundleError,
+    OcrAsset,
+    OcrLayoutBlock,
+    OcrPage,
+    SourceDocumentRef,
+)
 from app.ocr.mineru_adapter import MineruOcrBundleAdapter
 from app.ocr.postprocess_pipeline import OcrPostProcessingPipeline
+
+
+def _write_fill_blank_source(path: Path) -> None:
+    image = Image.new("RGB", (320, 180), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((20, 20), "1. complete ____", fill="black")
+    draw.line((80, 80, 250, 80), fill="black", width=2)
+    image.save(path)
+
+
+def _run_bundle_deterministically(
+    bundle: CanonicalOcrBundle,
+    output_root: Path,
+    postprocess_root: Path,
+    *,
+    visual_enabled: bool = True,
+) -> dict:
+    job = {"id": bundle.document_id, "jobId": bundle.document_id, "status": "running", "uploadPath": ""}
+
+    def read_job(_job_id: str) -> dict:
+        return copy.deepcopy(job)
+
+    with patch.dict(
+        os.environ,
+        {
+            "ENABLE_LLM_SPLIT": "false",
+            "OCR_AUTO_SEMANTIC_REPAIR_MODE": "skip",
+            "OCR_VISUAL_REPAIR_ENABLED": "true" if visual_enabled else "false",
+        },
+    ), patch.object(ocr_processing, "OUTPUT_ROOT", output_root), patch.object(
+        ocr_processing, "POSTPROCESS_ROOT", postprocess_root, create=True
+    ), patch.object(
+        question_markdown, "OUTPUT_ROOT", output_root
+    ), patch.object(
+        ocr_processing, "read_job", side_effect=read_job
+    ), patch.object(
+        ocr_processing, "write_job"
+    ), patch.object(
+        ocr_processing,
+        "refine_question_boundaries_in_chunks",
+        return_value=(None, {"source": "test", "llmCalls": []}),
+    ), patch(
+        "app.visual_repair.run_secondary_ocr", return_value=(None, None)
+    ):
+        return OcrPostProcessingPipeline().run_bundle(bundle)
 
 
 def test_collect_outputs_facade_delegates_to_single_pipeline_instance() -> None:
@@ -224,47 +277,193 @@ def test_run_bundle_accepts_contained_files_and_exempts_source_document_path(tmp
     implementation.assert_called_once_with("contained-files", bundle=bundle)
 
 
-def test_legacy_run_and_explicit_bundle_have_real_artifact_level_parity(tmp_path: Path) -> None:
+@pytest.mark.parametrize("undeclared_kind", ["regular", "symlink"])
+def test_explicit_bundle_ignores_undeclared_content_v2_artifact(
+    tmp_path: Path,
+    undeclared_kind: str,
+) -> None:
+    job_id = f"side-channel-{undeclared_kind}"
+    output_root = tmp_path / "outputs"
+    artifact_root = output_root / job_id
+    artifact_root.mkdir(parents=True)
+    (artifact_root / "figure.png").write_bytes(b"png")
+    bundle = CanonicalOcrBundle(
+        document_id=job_id,
+        input_sha256="sha",
+        canonical_markdown="# 选择题\n\n1. 计算 $1+1$。\n\nA. 1\nB. 2",
+        artifact_root=str(artifact_root),
+        assets=(OcrAsset("asset-1", "figure.png", "figure.png", "", 3, "image/png"),),
+    )
+    baseline = _run_bundle_deterministically(bundle, output_root, tmp_path / "postprocess", visual_enabled=False)
+    provider_native = json.dumps(
+        [[
+            {"type": "title", "content": {"title_content": [{"type": "text", "content": "选择题"}]}},
+            {"type": "title", "content": {"title_content": [{"type": "text", "content": "1. 如图计算 $1+1$。"}]}},
+            {"type": "image", "content": {"image_source": {"path": "figure.png"}}},
+        ]],
+        ensure_ascii=False,
+    )
+    undeclared = artifact_root / "hostile_content_list_v2.json"
+    if undeclared_kind == "regular":
+        undeclared.write_text(provider_native, encoding="utf-8")
+    else:
+        outside = tmp_path / "outside_content_list_v2.json"
+        outside.write_text(provider_native, encoding="utf-8")
+        undeclared.symlink_to(outside)
+
+    with_undeclared = _run_bundle_deterministically(bundle, output_root, tmp_path / "postprocess", visual_enabled=False)
+
+    assert json.loads(json.dumps(with_undeclared, ensure_ascii=False, sort_keys=True)) == json.loads(
+        json.dumps(baseline, ensure_ascii=False, sort_keys=True)
+    )
+
+
+def test_explicit_bundle_visual_context_ignores_undeclared_provider_layout_files(tmp_path: Path) -> None:
+    job_id = "visual-side-channel"
+    output_root = tmp_path / "outputs"
+    artifact_root = output_root / job_id
+    artifact_root.mkdir(parents=True)
+    source = tmp_path / "paper.png"
+    _write_fill_blank_source(source)
+    (artifact_root / "hostile_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "1. complete ____", "bbox": [0, 0, 300, 150], "page_idx": 0}]),
+        encoding="utf-8",
+    )
+    (artifact_root / "hostile_middle.json").write_text(
+        json.dumps({"pdf_info": [{"page_idx": 0, "page_size": [320, 180]}]}),
+        encoding="utf-8",
+    )
+    bundle = CanonicalOcrBundle(
+        document_id=job_id,
+        input_sha256="sha",
+        canonical_markdown="# 填空题\n\n1. complete ____",
+        source_document_ref=SourceDocumentRef(path=str(source)),
+        artifact_root=str(artifact_root),
+    )
+
+    outputs = _run_bundle_deterministically(bundle, output_root, tmp_path / "postprocess")
+
+    assert outputs["visualRepair"]["cropCount"] == 0
+    assert outputs["visualRepair"]["preprocessed"]["visualItemCount"] == 0
+    assert outputs["visualRepair"]["preprocessed"]["preloadedPageCount"] == 0
+    assert not (artifact_root / "visual_repair").exists()
+
+
+def test_run_bundle_uses_canonical_visual_context_without_provider_scans(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    bundle = CanonicalOcrBundle(
+        document_id="no-provider-scan",
+        input_sha256="sha",
+        canonical_markdown="1. canonical question",
+        artifact_root=str(artifact_root),
+    )
+
+    with patch.object(Path, "rglob", side_effect=AssertionError("explicit bundle must not rglob artifactRoot")), patch(
+        "app.visual_repair.load_visual_items", side_effect=AssertionError("provider visual items must not load")
+    ), patch(
+        "app.visual_repair.load_page_sizes", side_effect=AssertionError("provider page sizes must not load")
+    ):
+        outputs = _run_bundle_deterministically(
+            bundle,
+            tmp_path / "outputs",
+            tmp_path / "postprocess",
+            visual_enabled=False,
+        )
+
+    assert outputs["markdown"] == "1. canonical question"
+
+
+def test_run_bundle_writes_derived_crop_only_to_worker_scratch_with_read_only_artifacts(tmp_path: Path) -> None:
+    job_id = "read-only-artifacts"
+    output_root = tmp_path / "outputs"
+    artifact_root = output_root / job_id
+    artifact_root.mkdir(parents=True)
+    source = tmp_path / "paper.png"
+    _write_fill_blank_source(source)
+    bundle = CanonicalOcrBundle(
+        document_id=job_id,
+        input_sha256="sha",
+        canonical_markdown="# 填空题\n\n1. complete ____",
+        pages=(OcrPage(0, 320, 180),),
+        layout_blocks=(
+            OcrLayoutBlock("question-1", "text", 0, (0, 0, 300, 150), 320, 180, 0, text="1. complete ____"),
+        ),
+        source_document_ref=SourceDocumentRef(path=str(source)),
+        artifact_root=str(artifact_root),
+    )
+    postprocess_root = tmp_path / "postprocess"
+    artifact_root.chmod(0o555)
+    try:
+        outputs = _run_bundle_deterministically(bundle, output_root, postprocess_root)
+    finally:
+        artifact_root.chmod(0o755)
+
+    assert outputs["visualRepair"]["cropCount"] == 1
+    crops = list((postprocess_root / job_id).rglob("*.png"))
+    assert len(crops) == 1
+    assert not (artifact_root / "visual_repair").exists()
+
+
+def test_legacy_collect_and_adapter_bundle_have_real_artifact_level_parity(tmp_path: Path) -> None:
     job_id = "parity-job"
     output_root = tmp_path / "outputs"
     artifact_root = output_root / job_id
     artifact_root.mkdir(parents=True)
-    markdown = "# 选择题\n\n1. 已知 $x+1=2$，求 $x$。\n\nA. 0\nB. 1\nC. 2\nD. 3\n"
+    markdown = "# 填空题\n\n1. 已知 $x+1=2$，则 $x=____$。\n"
     (artifact_root / "paper.md").write_text(markdown, encoding="utf-8")
-    (artifact_root / "paper.json").write_text(json.dumps({"pages": []}), encoding="utf-8")
-    job = {"id": job_id, "jobId": job_id, "status": "running", "uploadPath": ""}
+    (artifact_root / "paper_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "1. 已知 x+1=2，则 x=____。", "bbox": [0, 0, 300, 150], "page_idx": 0}]),
+        encoding="utf-8",
+    )
+    (artifact_root / "paper_middle.json").write_text(
+        json.dumps(
+            {
+                "pdf_info": [
+                    {
+                        "page_idx": 0,
+                        "page_size": [320, 180],
+                        "para_blocks": [
+                            {
+                                "type": "text",
+                                "bbox": [0, 0, 300, 150],
+                                "lines": [{"spans": [{"type": "text", "content": "1. 已知 x+1=2，则 x=____。"}]}],
+                            }
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    source = tmp_path / "paper.png"
+    _write_fill_blank_source(source)
+    job = {"id": job_id, "jobId": job_id, "status": "running", "uploadPath": str(source)}
 
     def read_job(_job_id: str) -> dict:
         return copy.deepcopy(job)
 
-    visual_repair = {
-        "enabled": False,
-        "skippedReason": "deterministic parity fixture",
-        "cropCount": 0,
-        "underlineCount": 0,
-        "maxConcurrency": 1,
-        "preprocessed": {"preloadedPageCount": 0},
-    }
     pipeline = OcrPostProcessingPipeline()
     with patch.dict(
         os.environ,
         {"ENABLE_LLM_SPLIT": "false", "OCR_AUTO_SEMANTIC_REPAIR_MODE": "skip"},
     ), patch.object(ocr_processing, "OUTPUT_ROOT", output_root), patch.object(
+        ocr_processing, "POSTPROCESS_ROOT", tmp_path / "postprocess", create=True
+    ), patch.object(
         question_markdown, "OUTPUT_ROOT", output_root
     ), patch(
         "app.worker_base.OUTPUT_ROOT", output_root
     ), patch.object(ocr_processing, "read_job", side_effect=read_job), patch(
         "app.worker_base.read_job", side_effect=read_job
     ), patch.object(ocr_processing, "write_job"), patch.object(
-        ocr_processing, "prepare_visual_repair_context", return_value={}
-    ), patch.object(
-        ocr_processing, "apply_visual_repairs", return_value=visual_repair
-    ), patch.object(
         ocr_processing, "refine_question_boundaries_in_chunks", return_value=(None, {"source": "test", "llmCalls": []})
+    ), patch(
+        "app.visual_repair.run_secondary_ocr", return_value=(None, None)
     ), patch.object(
         ocr_processing, "collect_outputs_impl", wraps=ocr_processing.collect_outputs_impl
     ) as collect_outputs:
-        legacy_outputs = pipeline.run(job_id)
+        legacy_outputs = ocr_processing.collect_outputs_impl(job_id, bundle=None)
         explicit_bundle = MineruOcrBundleAdapter().from_output(job, artifact_root)
         explicit_outputs = pipeline.run_bundle(explicit_bundle)
 
@@ -272,4 +471,5 @@ def test_legacy_run_and_explicit_bundle_have_real_artifact_level_parity(tmp_path
     normalized_explicit = json.loads(json.dumps(explicit_outputs, ensure_ascii=False, sort_keys=True))
     assert normalized_explicit == normalized_legacy
     assert collect_outputs.call_count == 2
-    assert all(call.kwargs.get("bundle") is not None for call in collect_outputs.call_args_list)
+    assert collect_outputs.call_args_list[0].kwargs.get("bundle") is None
+    assert collect_outputs.call_args_list[1].kwargs.get("bundle") is not None

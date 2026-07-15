@@ -51,7 +51,7 @@ python scripts/check_mineru.py
 OcrProvider -> provider adapter -> CanonicalOcrBundle -> OcrPostProcessingPipeline -> outputs
 ```
 
-新 provider 必须输出 `canonical-ocr-bundle.v1`，并在当前兼容期提供已存在的只读 `artifactRoot`；所有声明的 Markdown、JSON、asset 和 native artifact 路径都必须是 root 内真实存在的相对文件。不得要求后处理识别 provider 私有目录或字段。稳定 Python 导入入口是 `app.ocr`；完整字段、示例、能力等级和测试门禁见 [OCR Post Process 使用说明书](../../docs/delivery/POST_PROCESS_USAGE_GUIDE.md)。
+新 provider 必须输出 `canonical-ocr-bundle.v1`，并在当前兼容期提供已存在的只读 `artifactRoot`；所有声明的 Markdown、JSON、asset 和 native artifact 路径都必须是 root 内真实存在的相对文件。显式 bundle 只消费声明的 Markdown、assets、layoutBlocks、pages 和 sourceDocumentRef，不扫描 root 中的 provider 私有文件名；视觉 crop 写入 `PYTHON_WORKER_STORAGE_ROOT/postprocess/<jobId>`，不写回工件目录。稳定 Python 导入入口是 `app.ocr`；完整字段、示例、能力等级和测试门禁见 [OCR Post Process 使用说明书](../../docs/delivery/POST_PROCESS_USAGE_GUIDE.md)。
 
 当前入口属于同一 worker 进程内的嵌入式能力，不是无状态公网 API。平台远程调用继续使用 Question Engine OpenAPI/SDK。
 

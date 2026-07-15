@@ -34,6 +34,7 @@ def apply_visual_repairs(
     upload_path: str | Path | None,
     job_id: str,
     context: dict[str, Any] | None = None,
+    scratch_dir: Path | None = None,
 ) -> dict[str, Any]:
     """对结构化题目应用题目级视觉修复。"""
     if os.getenv("OCR_VISUAL_REPAIR_ENABLED", "true").lower() == "false":
@@ -80,7 +81,8 @@ def apply_visual_repairs(
         "warnings": list(repair_context.get("warnings") or []),
     }
 
-    crop_dir = output_dir / "visual_repair"
+    crop_root = scratch_dir or output_dir
+    crop_dir = crop_root / "visual_repair"
     if candidates:
         crop_dir.mkdir(parents=True, exist_ok=True)
 
@@ -88,14 +90,14 @@ def apply_visual_repairs(
         results: list[dict[str, Any]] = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
-                executor.submit(repair_visual_question, index, question, repair_context, output_dir, upload_path, crop_dir)
+                executor.submit(repair_visual_question, index, question, repair_context, upload_path, crop_root, crop_dir)
                 for index, question in candidates
             ]
             for future in as_completed(futures):
                 results.append(future.result())
     else:
         results = [
-            repair_visual_question(index, question, repair_context, output_dir, upload_path, crop_dir)
+            repair_visual_question(index, question, repair_context, upload_path, crop_root, crop_dir)
             for index, question in candidates
         ]
 
@@ -129,12 +131,66 @@ def prepare_visual_repair_context(output_dir: Path, upload_path: str | Path | No
     }
 
 
+def prepare_canonical_visual_repair_context(
+    layout_items: list[dict[str, Any]],
+    pages: list[dict[str, Any]],
+    upload_path: str | Path | None,
+) -> dict[str, Any]:
+    """Build visual-repair evidence only from declared canonical layout and pages."""
+    warnings: list[str] = []
+    visual_items: list[dict[str, Any]] = []
+    page_sizes: dict[int, tuple[float, float]] = {}
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_index = parse_int(page.get("pageIndex"), 0)
+        try:
+            width = float(page.get("width") or 0)
+            height = float(page.get("height") or 0)
+        except (TypeError, ValueError):
+            continue
+        if width > 0 and height > 0:
+            page_sizes[page_index] = (width, height)
+
+    for item in layout_items:
+        if not isinstance(item, dict):
+            continue
+        bbox = normalize_bbox(item.get("bbox"))
+        text = str(item.get("text") or "").strip()
+        if bbox and text:
+            visual_items.append(
+                {
+                    "text": text,
+                    "bbox": bbox,
+                    "page_idx": parse_int(item.get("pageIndex"), 0),
+                    "source": "canonical-layout",
+                }
+            )
+        if item.get("pageWidth") is not None and item.get("pageHeight") is not None:
+            try:
+                width = float(item["pageWidth"])
+                height = float(item["pageHeight"])
+            except (TypeError, ValueError):
+                continue
+            if width > 0 and height > 0:
+                page_sizes.setdefault(parse_int(item.get("pageIndex"), 0), (width, height))
+
+    page_images = preload_visual_page_images(upload_path, visual_items, page_sizes, warnings) if visual_items else {}
+    return {
+        "visualItems": visual_items,
+        "pageSizes": page_sizes,
+        "itemNumberIndex": build_visual_item_number_index(visual_items),
+        "pageImages": page_images,
+        "warnings": warnings,
+    }
+
+
 def repair_visual_question(
     index: int,
     question: dict[str, Any],
     repair_context: dict[str, Any],
-    output_dir: Path,
     upload_path: str | Path | None,
+    crop_root: Path,
     crop_dir: Path,
 ) -> dict[str, Any]:
     """计算单题视觉修复结果，不直接写回原题。"""
@@ -171,7 +227,7 @@ def repair_visual_question(
         result["underlineCount"] = len(underlines)
         repair_record: dict[str, Any] = {
             "status": "checked",
-            "cropPath": crop_path.relative_to(output_dir).as_posix(),
+            "cropPath": crop_path.relative_to(crop_root).as_posix(),
             "pageIndex": item.get("page_idx"),
             "bbox": item.get("bbox"),
             "underlineCount": len(underlines),

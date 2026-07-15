@@ -24,7 +24,11 @@ from app.question_boundary import (
 )
 from app.image_placement import reconcile_structure_image_placements
 from app.question_layout import load_image_placement_evidence
-from app.visual_repair import apply_visual_repairs, prepare_visual_repair_context
+from app.visual_repair import (
+    apply_visual_repairs,
+    prepare_canonical_visual_repair_context,
+    prepare_visual_repair_context,
+)
 from app.ocr.contracts import CanonicalOcrBundle, validate_bundle_artifact_paths
 
 
@@ -50,6 +54,7 @@ def build_postprocess_input(bundle: CanonicalOcrBundle) -> dict[str, Any]:
             for asset in bundle.assets
         ],
         "layoutItems": [block.to_dict() for block in bundle.layout_blocks],
+        "pages": [page.to_dict() for page in bundle.pages],
         "uploadPath": bundle.source_document_ref.path if bundle.source_document_ref else "",
     }
 from app.ocr.postprocess_pipeline import OcrPostProcessingPipeline
@@ -217,7 +222,7 @@ def parse_structured_questions_from_v2(content_v2: Any, assets: list[dict[str, A
 
 def parse_structured_questions(markdown: str, output_dir: Path, assets: list[dict[str, Any]]) -> dict[str, Any]:
     """从 OCR Markdown 和资源目录解析结构化题目。"""
-    return parse_structured_questions_legacy(markdown, output_dir, assets)
+    return parse_structured_questions_canonical(markdown, assets)
 
 
 def parse_structured_questions_legacy(markdown: str, output_dir: Path, assets: list[dict[str, Any]]) -> dict[str, Any]:
@@ -229,6 +234,12 @@ def parse_structured_questions_legacy(markdown: str, output_dir: Path, assets: l
             return parse_structured_questions_from_v2(content_v2, assets)
         except json.JSONDecodeError:
             pass
+
+    return parse_structured_questions_canonical(markdown, assets)
+
+
+def parse_structured_questions_canonical(markdown: str, assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the legacy fallback shape from declared canonical Markdown and assets."""
 
     sections: list[dict[str, Any]] = []
     questions: list[dict[str, Any]] = []
@@ -298,6 +309,7 @@ def collect_outputs_impl(job_id: str, bundle: CanonicalOcrBundle | None = None) 
             json_content = explicit_input["jsonContent"]
             assets = explicit_input["assets"]
             placement_layout_items = explicit_input["layoutItems"]
+            canonical_pages = explicit_input["pages"]
             upload_path = explicit_input["uploadPath"]
         else:
             output_dir = OUTPUT_ROOT / job_id
@@ -333,6 +345,7 @@ def collect_outputs_impl(job_id: str, bundle: CanonicalOcrBundle | None = None) 
                 for path in image_files
             ]
             placement_layout_items = None
+            canonical_pages = None
             upload_path = job.get("uploadPath")
 
         job = read_job(job_id)
@@ -341,15 +354,27 @@ def collect_outputs_impl(job_id: str, bundle: CanonicalOcrBundle | None = None) 
         mark_ocr_flow_step(job, current_step, "running", "正在识别题号、小问、选项和题图候选边界")
         write_job(job)
 
-        legacy_structured = parse_structured_questions_legacy(markdown, output_dir, assets)
+        legacy_structured = (
+            parse_structured_questions_canonical(markdown, assets)
+            if bundle is not None
+            else parse_structured_questions_legacy(markdown, output_dir, assets)
+        )
         local_boundaries = detect_local_boundaries(markdown, assets)
         boundary_confidence = evaluate_boundary_confidence(markdown, local_boundaries, assets)
         visual_context_executor = ThreadPoolExecutor(max_workers=1)
-        visual_context_future = visual_context_executor.submit(
-            prepare_visual_repair_context,
-            output_dir,
-            upload_path,
-        )
+        if bundle is not None:
+            visual_context_future = visual_context_executor.submit(
+                prepare_canonical_visual_repair_context,
+                placement_layout_items,
+                canonical_pages,
+                upload_path,
+            )
+        else:
+            visual_context_future = visual_context_executor.submit(
+                prepare_visual_repair_context,
+                output_dir,
+                upload_path,
+            )
         job = read_job(job_id)
         mark_ocr_flow_step(
             job,
@@ -478,13 +503,26 @@ def collect_outputs_impl(job_id: str, bundle: CanonicalOcrBundle | None = None) 
             try:
                 visual_repair_context = visual_context_future.result()
             except Exception as exc:
-                visual_repair_context = {"warnings": [f"视觉修复预处理失败：{exc}"]}
+                visual_repair_context = {
+                    "visualItems": [],
+                    "pageSizes": {},
+                    "itemNumberIndex": {},
+                    "pageImages": {},
+                    "warnings": [f"视觉修复预处理失败：{exc}"],
+                }
             finally:
                 if visual_context_executor is not None:
                     visual_context_executor.shutdown(wait=False)
                     visual_context_executor = None
 
-        visual_repair = apply_visual_repairs(structured, output_dir, upload_path, job_id, visual_repair_context)
+        visual_repair = apply_visual_repairs(
+            structured,
+            output_dir,
+            upload_path,
+            job_id,
+            visual_repair_context,
+            scratch_dir=POSTPROCESS_ROOT / job_id,
+        )
         visual_status = "success" if visual_repair.get("enabled", True) else "skipped"
         preprocessed = visual_repair.get("preprocessed") or {}
         visual_message = (
