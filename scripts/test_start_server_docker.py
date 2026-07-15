@@ -23,6 +23,7 @@ ENV_EXAMPLE_PATH = SCRIPT_PATH.parents[1] / ".env.example"
 README_PATH = SCRIPT_PATH.parents[1] / "README.md"
 OPERATIONS_GUIDE_PATH = SCRIPT_PATH.parents[1] / "docs" / "delivery" / "OPERATIONS_GUIDE.md"
 DELIVERY_PACKAGE_PATH = SCRIPT_PATH.parents[1] / "docs" / "delivery" / "DELIVERY_PACKAGE.md"
+RUNBOOK_PATH = SCRIPT_PATH.parents[1] / "docs" / "server" / "RUNBOOK.md"
 RECOVERY_PLAN_PATH = (
     SCRIPT_PATH.parents[1]
     / "docs"
@@ -165,6 +166,76 @@ class StartServerDockerTest(unittest.TestCase):
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertEqual("clean -DskipTests package", maven_args.read_text(encoding="utf-8").strip())
 
+    def test_server_artifact_build_without_maven_uses_existing_jar(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            npm_args = root / "npm-args"
+            completed = self.run_bash(
+                f"""
+                ROOT_DIR='{root}'
+                mkdir -p "$ROOT_DIR/backend/target" "$ROOT_DIR/local-platform/node_modules"
+                : >"$ROOT_DIR/backend/target/ai-question-bank-existing.jar"
+                cd "$ROOT_DIR"
+                command() {{
+                  if [[ "${{1-}}" == "-v" && "${{2-}}" == "mvn" ]]; then return 1; fi
+                  builtin command "$@"
+                }}
+                npm() {{ printf '%s\n' "$*" >>'{npm_args}'; }}
+                build_server_artifacts
+                """
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual("run build", npm_args.read_text(encoding="utf-8").strip())
+
+    def test_server_artifact_build_without_maven_or_jar_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            status_file = root / "status"
+            npm_args = root / "npm-args"
+            completed = self.run_bash(
+                f"""
+                ROOT_DIR='{root}'
+                mkdir -p "$ROOT_DIR/backend/target" "$ROOT_DIR/local-platform/node_modules"
+                cd "$ROOT_DIR"
+                command() {{
+                  if [[ "${{1-}}" == "-v" && "${{2-}}" == "mvn" ]]; then return 1; fi
+                  builtin command "$@"
+                }}
+                npm() {{ printf '%s\n' "$*" >>'{npm_args}'; }}
+                set +e
+                build_server_artifacts
+                printf '%s\n' "$?" >'{status_file}'
+                """
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertNotEqual("0", status_file.read_text(encoding="utf-8").strip())
+            self.assertFalse(npm_args.exists())
+
+    def test_server_artifact_build_maven_failure_does_not_use_stale_jar(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            status_file = root / "status"
+            npm_args = root / "npm-args"
+            completed = self.run_bash(
+                f"""
+                ROOT_DIR='{root}'
+                mkdir -p "$ROOT_DIR/backend/target" "$ROOT_DIR/local-platform/node_modules"
+                : >"$ROOT_DIR/backend/target/ai-question-bank-stale.jar"
+                cd "$ROOT_DIR"
+                mvn() {{ return 42; }}
+                npm() {{ printf '%s\n' "$*" >>'{npm_args}'; }}
+                set +e
+                build_server_artifacts
+                printf '%s\n' "$?" >'{status_file}'
+                """
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertNotEqual("0", status_file.read_text(encoding="utf-8").strip())
+            self.assertFalse(npm_args.exists())
+
     def test_task8_java_build_cleans_preserved_target_before_packaging(self) -> None:
         plan = RECOVERY_PLAN_PATH.read_text(encoding="utf-8")
         task8 = plan.split("## Task 8", 1)[1].split("## Task 9", 1)[0]
@@ -193,6 +264,34 @@ class StartServerDockerTest(unittest.TestCase):
         for name, section, command in cases:
             with self.subTest(name=name):
                 self.assertIn(command, section)
+
+    def test_task8_rollback_rebuilds_application_artifacts_before_restart(self) -> None:
+        plan = RECOVERY_PLAN_PATH.read_text(encoding="utf-8")
+        rollback = plan.split("### Step 8：失败回滚路径", 1)[1].split("## Task 9", 1)[0]
+        commands = (
+            'rsync -a --delete',
+            'mvn -f backend/pom.xml clean -DskipTests package',
+            'npm --prefix local-platform ci && npm --prefix local-platform run build',
+            'docker compose -f docker-compose.server.yml up -d --build question-engine',
+        )
+        for command in commands:
+            self.assertIn(command, rollback)
+        positions = [rollback.index(command) for command in commands]
+        self.assertEqual(sorted(positions), positions)
+
+    def test_runbook_rebuilds_application_artifacts_before_compose_start(self) -> None:
+        runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
+        rebuild = runbook.split("## 重建并启动服务", 1)[1].split("## 原子重建 MinerU venv", 1)[0]
+        commands = (
+            'mvn -f backend/pom.xml clean -DskipTests package',
+            'npm --prefix local-platform ci && npm --prefix local-platform run build',
+            'docker compose -f docker-compose.server.yml build question-engine',
+            'docker compose -f docker-compose.server.yml up -d --force-recreate question-engine',
+        )
+        for command in commands:
+            self.assertIn(command, rebuild)
+        positions = [rebuild.index(command) for command in commands]
+        self.assertEqual(sorted(positions), positions)
 
     def test_default_host_venv_drives_every_mineru_command(self) -> None:
         completed = self.run_bash(

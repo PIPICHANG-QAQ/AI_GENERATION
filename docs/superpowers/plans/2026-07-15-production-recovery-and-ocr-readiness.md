@@ -921,6 +921,8 @@ cp -a "$backup/.env" .env
 rsync -a --delete \
   --exclude '.env' --exclude 'server-data/' --exclude 'vendor/' \
   "$backup/app/" /home/user/AI_GENERATION_DOCKER/
+JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}" mvn -f backend/pom.xml clean -DskipTests package
+npm --prefix local-platform ci && npm --prefix local-platform run build
 MINERU_COMMAND=/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru \
   python3 scripts/check_mineru.py --json --skip-api
 sudo docker compose -f docker-compose.server.yml up -d --build question-engine

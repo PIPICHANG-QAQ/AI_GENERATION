@@ -218,7 +218,10 @@ configure_public_urls() {
 build_server_artifacts() {
   echo "==> 构建 Java backend jar"
   if command -v mvn >/dev/null 2>&1; then
-    (cd backend && mvn clean -DskipTests package)
+    if ! (cd backend && mvn clean -DskipTests package); then
+      echo "Java backend 构建失败，拒绝使用 backend/target 下的旧 jar。" >&2
+      return 1
+    fi
   else
     echo "未找到 mvn，跳过 Java 构建；将使用 backend/target 下已有 jar。"
   fi
