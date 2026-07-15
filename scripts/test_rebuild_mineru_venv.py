@@ -274,6 +274,7 @@ class CrashRecoveryJournalTest(unittest.TestCase):
 
 class RebuildSafetyTest(unittest.TestCase):
     def _request_paths(self, root: Path) -> tuple[rebuild_mineru_venv.BuildPaths, Path]:
+        root = root.resolve()
         check_script = root / "scripts" / "check_mineru.py"
         check_script.parent.mkdir()
         check_script.write_text("# readiness\n", encoding="utf-8")
@@ -337,6 +338,36 @@ class RebuildSafetyTest(unittest.TestCase):
             paths.active.symlink_to(real_venv, target_is_directory=True)
 
             with self.assertRaisesRegex(ValueError, "symlink"):
+                rebuild_mineru_venv.validate_request(paths, check_script, 2)
+
+    def test_request_rejects_any_target_parent_symlink_component(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            real = root / "real"
+            (real / "vendor").mkdir(parents=True)
+            linked = root / "linked"
+            linked.symlink_to(real, target_is_directory=True)
+            check_script = root / "scripts" / "check_mineru.py"
+            check_script.parent.mkdir()
+            check_script.write_text("# check\n", encoding="utf-8")
+            paths = rebuild_mineru_venv.build_paths(linked / "vendor" / "mineru-venv", "fixed")
+
+            with self.assertRaisesRegex(ValueError, "parent.*symlink"):
+                rebuild_mineru_venv.validate_request(paths, check_script, 2)
+
+    def test_request_accepts_normal_absolute_parent_chain_and_rejects_symlink_check_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            paths, check_script = self._request_paths(root)
+            paths.active.parent.mkdir()
+
+            rebuild_mineru_venv.validate_request(paths, check_script, 2)
+
+            real_check = root / "scripts" / "real_check.py"
+            real_check.write_text("# real\n", encoding="utf-8")
+            check_script.unlink()
+            check_script.symlink_to(real_check)
+            with self.assertRaisesRegex(ValueError, "check-script.*symlink"):
                 rebuild_mineru_venv.validate_request(paths, check_script, 2)
 
     def test_request_rejects_staging_and_backup_collisions(self) -> None:
@@ -418,6 +449,62 @@ class RebuildSafetyTest(unittest.TestCase):
             self.assertTrue(target.is_dir())
             self.assertTrue(staging.is_dir())
             self.assertTrue(symlink_backup.is_symlink())
+
+    def test_prune_failed_staging_is_bounded_and_never_touches_unrelated_or_symlink_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp).resolve() / "vendor" / "mineru-venv"
+            target.parent.mkdir()
+            target.mkdir()
+            failures = [
+                target.with_name(f"{target.name}.new-2026071{day}T120000.000000Z-{token}")
+                for day, token in ((3, "aaaaaaaa"), (4, "bbbbbbbb"), (5, "cccccccc"))
+            ]
+            for failure in failures:
+                failure.mkdir()
+            for failure, modified in zip(failures, (300, 100, 200), strict=True):
+                os.utime(failure, ns=(modified, modified))
+            unrelated_new = target.with_name(f"{target.name}.new-manual-do-not-delete")
+            unrelated_new.mkdir()
+            matching_file = target.with_name(f"{target.name}.new-20260711T120000.000000Z-ffffffff")
+            matching_file.write_text("not a directory", encoding="utf-8")
+            backup = target.with_name(f"{target.name}.bak-20260715T120000.000000Z-dddddddd")
+            backup.mkdir()
+            journal = rebuild_mineru_venv.transaction_journal_path(target)
+            journal.write_text("{}", encoding="utf-8")
+            symlink_failure = target.with_name(f"{target.name}.new-20260712T120000.000000Z-eeeeeeee")
+            symlink_failure.symlink_to(target, target_is_directory=True)
+
+            removed = rebuild_mineru_venv.prune_failed_staging(target, keep_failed_staging=2)
+
+            self.assertEqual([failures[1]], removed)
+            self.assertTrue(failures[0].is_dir())
+            self.assertFalse(failures[1].exists())
+            self.assertTrue(failures[2].is_dir())
+            self.assertTrue(unrelated_new.is_dir())
+            self.assertTrue(matching_file.is_file())
+            self.assertTrue(backup.is_dir())
+            self.assertTrue(journal.is_file())
+            self.assertTrue(symlink_failure.is_symlink())
+            self.assertTrue(target.is_dir())
+
+    def test_prune_failed_staging_zero_removes_all_matching_old_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp).resolve() / "vendor" / "mineru-venv"
+            target.parent.mkdir()
+            failures = [
+                target.with_name(f"{target.name}.new-2026071{day}T120000.000000Z-{token}")
+                for day, token in ((3, "aaaaaaaa"), (4, "bbbbbbbb"))
+            ]
+            for failure in failures:
+                failure.mkdir()
+
+            removed = rebuild_mineru_venv.prune_failed_staging(target, keep_failed_staging=0)
+
+            self.assertEqual(failures, removed)
+            self.assertTrue(all(not failure.exists() for failure in failures))
+
+            with self.assertRaisesRegex(ValueError, "keep-failed-staging"):
+                rebuild_mineru_venv.prune_failed_staging(target, keep_failed_staging=-1)
 
 
 class VenvRelocationTest(unittest.TestCase):
@@ -662,6 +749,28 @@ class VenvValidationTest(unittest.TestCase):
         self.calls.append((command, kwargs))
         if command[-2:] == ["--json", "--skip-api"]:
             stdout = '{"installed":true,"runtimeProbeOk":true}\n'
+        elif command[1:3] == ["-I", "-c"]:
+            venv = Path(command[0]).parent.parent
+            stdout = json.dumps(
+                {
+                    "mineruVersion": "3.4.2",
+                    "markupSafeVersion": "3.0.3",
+                    "pythonVersion": "3.12.0",
+                    "pythonExecutable": str(venv / "bin" / "python"),
+                    "pythonPrefix": str(venv),
+                    "modulePaths": {
+                        name: str(venv / "lib" / "python3.12" / "site-packages" / filename)
+                        for name, filename in {
+                            "markupsafe": "markupsafe/__init__.py",
+                            "jinja2": "jinja2/__init__.py",
+                            "transformers": "transformers/__init__.py",
+                            "mineru": "mineru/__init__.py",
+                            "mineru.cli.common": "mineru/cli/common.py",
+                        }.items()
+                    },
+                },
+                sort_keys=True,
+            ) + "\n"
         elif command[-1:] == ["--version"]:
             stdout = "mineru, version 3.4.2\n"
         elif command[-3:] == ["pip", "freeze", "--all"]:
@@ -669,6 +778,53 @@ class VenvValidationTest(unittest.TestCase):
         else:
             stdout = ""
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    @staticmethod
+    def _valid_manifest_payload(active: Path) -> dict[str, object]:
+        packages = [
+            {"name": "markupsafe", "version": "3.0.3"},
+            {"name": "mineru", "version": "3.4.2"},
+        ]
+        canonical = json.dumps(packages, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n"
+        return {
+            "manifestVersion": 2,
+            "targetMineruVersion": "3.4.2",
+            "packages": packages,
+            "packageListSha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            "python": {
+                "version": "3.12.0",
+                "executable": str(active / "bin" / "python"),
+            },
+            "validation": {
+                "validatedAt": "2026-07-16T00:00:00.000000Z",
+                "readiness": True,
+                "runtimeImports": True,
+                "metadataVersions": True,
+                "versionCommand": True,
+                "mineruVersion": "3.4.2",
+                "markupSafeVersion": "3.0.3",
+            },
+        }
+
+    @classmethod
+    def _write_valid_manifest(cls, active: Path) -> Path:
+        cls._write_executables(active)
+        manifest = active / "mineru-venv-manifest.json"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            json.dumps(cls._valid_manifest_payload(active), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return manifest
+
+    @staticmethod
+    def _write_executables(venv: Path) -> None:
+        bin_dir = venv / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("python", "mineru", "mineru-api"):
+            path = bin_dir / name
+            path.write_text("#!/bin/sh\n", encoding="utf-8")
+            path.chmod(0o755)
 
     def test_install_and_validation_runners_have_distinct_bounded_io_contracts(self) -> None:
         install_runner = mock.Mock(return_value=subprocess.CompletedProcess(["pip"], 0))
@@ -783,7 +939,14 @@ class VenvValidationTest(unittest.TestCase):
             (fake / "mineru" / "cli" / "__init__.py").write_text("", encoding="utf-8")
             common.write_text("def read_fn(): pass\n", encoding="utf-8")
             check_script = root / "check.py"
-            check_script.write_text("print('{}')\n", encoding="utf-8")
+            check_script.write_text(
+                "print('{\"installed\":true,\"runtimeProbeOk\":true}')\n",
+                encoding="utf-8",
+            )
+            for name in ("mineru", "mineru-api"):
+                executable = venv / "bin" / name
+                executable.write_text("#!/bin/sh\n", encoding="utf-8")
+                executable.chmod(0o755)
 
             with self.assertRaises(subprocess.CalledProcessError) as raised:
                 rebuild_mineru_venv.validate_staging(
@@ -855,7 +1018,14 @@ class VenvValidationTest(unittest.TestCase):
     def test_staging_validation_uses_exact_commands_and_explicit_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             venv = Path(tmp) / "mineru-venv.new-fixed"
+            active = Path(tmp) / "mineru-venv"
             venv.mkdir()
+            bin_dir = venv / "bin"
+            bin_dir.mkdir()
+            for name in ("python", "mineru", "mineru-api"):
+                executable = bin_dir / name
+                executable.write_text("#!/bin/sh\n", encoding="utf-8")
+                executable.chmod(0o755)
             check_script = Path(tmp) / "scripts" / "check_mineru.py"
             check_script.parent.mkdir()
             check_script.write_text("# check\n", encoding="utf-8")
@@ -865,6 +1035,7 @@ class VenvValidationTest(unittest.TestCase):
                 check_script,
                 "3.4.2",
                 base_env={"PATH": "/test/bin", "UNRELATED": "kept"},
+                active_venv=active,
                 runner=self._runner,
             )
 
@@ -893,21 +1064,54 @@ class VenvValidationTest(unittest.TestCase):
                 self.assertEqual("false", env["MINERU_API_ENABLED"])
                 self.assertEqual("1", env["CHECK_MINERU_IN_WORKER_VENV"])
             self.assertEqual(venv / "mineru-venv-manifest.json", manifest)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            self.assertEqual(str(active / "bin" / "python"), payload["python"]["executable"])
+            self.assertNotIn(str(venv), manifest.read_text(encoding="utf-8"))
 
     def test_manifest_hashes_package_list_without_recording_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             venv = Path(tmp)
-            package_list = "safe==1\nprivate @ https://user:secret-token@example.invalid/pkg.whl\n"
+            active = venv / "active"
+            active.mkdir()
+            package_list = "Zed_Pkg==2\nsafe==1\nprivate @ https://user:secret-token@example.invalid/pkg.whl\n"
+            runtime = {
+                "mineruVersion": "3.4.2",
+                "markupSafeVersion": "3.0.3",
+                "pythonVersion": "3.12.0",
+            }
 
-            manifest_path = rebuild_mineru_venv.write_manifest(venv, "3.4.2", package_list)
+            manifest_path = rebuild_mineru_venv.write_manifest(
+                venv,
+                "3.4.2",
+                package_list,
+                active_venv=active,
+                readiness={"installed": True, "runtimeProbeOk": True},
+                runtime=runtime,
+                validated_at="2026-07-16T00:00:00.000000Z",
+            )
             manifest_text = manifest_path.read_text(encoding="utf-8")
             payload = json.loads(manifest_text)
 
-            self.assertEqual("3.4.2", payload["mineruVersion"])
-            self.assertEqual(hashlib.sha256(package_list.encode("utf-8")).hexdigest(), payload["packageListSha256"])
+            self.assertEqual("3.4.2", payload["targetMineruVersion"])
+            self.assertEqual(
+                [
+                    {"name": "private", "version": "<direct-reference>"},
+                    {"name": "safe", "version": "1"},
+                    {"name": "zed-pkg", "version": "2"},
+                ],
+                payload["packages"],
+            )
+            canonical = json.dumps(
+                payload["packages"], ensure_ascii=True, separators=(",", ":"), sort_keys=True
+            ) + "\n"
+            self.assertEqual(hashlib.sha256(canonical.encode("utf-8")).hexdigest(), payload["packageListSha256"])
+            self.assertEqual("3.12.0", payload["python"]["version"])
+            self.assertEqual(str(active / "bin" / "python"), payload["python"]["executable"])
+            self.assertEqual("2026-07-16T00:00:00.000000Z", payload["validation"]["validatedAt"])
+            self.assertTrue(payload["validation"]["readiness"])
             self.assertNotIn("secret-token", manifest_text)
             self.assertNotIn("https://", manifest_text)
-            self.assertNotIn("private", manifest_text)
+            self.assertNotIn("environment", manifest_text.lower())
 
     def test_staging_validation_rejects_unexpected_mineru_version(self) -> None:
         def wrong_version(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -919,6 +1123,7 @@ class VenvValidationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             venv = Path(tmp) / "staging"
             venv.mkdir()
+            self._write_executables(venv)
             check_script = Path(tmp) / "check.py"
 
             with self.assertRaisesRegex(RuntimeError, "expected 3.4.2"):
@@ -936,6 +1141,7 @@ class VenvValidationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             active = Path(tmp) / "mineru-venv"
             check_script = Path(tmp) / "scripts" / "check_mineru.py"
+            self._write_valid_manifest(active)
 
             rebuild_mineru_venv.validate_active(
                 active,
@@ -955,6 +1161,7 @@ class VenvValidationTest(unittest.TestCase):
                         rebuild_mineru_venv.build_runtime_import_probe(active, "3.4.2"),
                     ],
                     [str(active / "bin" / "mineru"), "--version"],
+                    [str(active / "bin" / "python"), "-I", "-m", "pip", "freeze", "--all"],
                 ],
                 [command for command, _kwargs in self.calls],
             )
@@ -964,9 +1171,64 @@ class VenvValidationTest(unittest.TestCase):
                 self.assertEqual("false", env["MINERU_API_ENABLED"])
                 self.assertEqual("1", env["CHECK_MINERU_IN_WORKER_VENV"])
 
+    def test_active_validation_rejects_missing_or_tampered_manifest(self) -> None:
+        mutations = {
+            "missing": None,
+            "target-version": ("targetMineruVersion", "3.4.1"),
+            "package-hash": ("packageListSha256", "0" * 64),
+            "staging-executable": ("python.executable", "/srv/mineru-venv.new-old/bin/python"),
+            "validation-fact": ("validation.runtimeImports", False),
+            "validation-time": ("validation.validatedAt", "garbageZ"),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                active = Path(tmp) / "mineru-venv"
+                active.mkdir()
+                self._write_executables(active)
+                check_script = Path(tmp) / "check.py"
+                if mutation is not None:
+                    payload = self._valid_manifest_payload(active)
+                    dotted, value = mutation
+                    container: dict[str, object] = payload
+                    parts = dotted.split(".")
+                    for part in parts[:-1]:
+                        container = container[part]  # type: ignore[assignment]
+                    container[parts[-1]] = value
+                    (active / "mineru-venv-manifest.json").write_text(
+                        json.dumps(payload),
+                        encoding="utf-8",
+                    )
+
+                with self.assertRaisesRegex(RuntimeError, "manifest"):
+                    rebuild_mineru_venv.validate_active(
+                        active,
+                        check_script,
+                        "3.4.2",
+                        base_env={"PATH": "/test/bin"},
+                        runner=self._runner,
+                    )
+
+    def test_validation_requires_python_and_mineru_executables_to_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            venv = Path(tmp) / "venv"
+            venv.mkdir()
+            check_script = Path(tmp) / "check.py"
+
+            with self.assertRaisesRegex(RuntimeError, "bin/python"):
+                rebuild_mineru_venv.validate_staging(
+                    venv,
+                    check_script,
+                    "3.4.2",
+                    base_env={},
+                    runner=self._runner,
+                )
+
+            self.assertEqual([], self.calls)
+
 
 class RebuildOrchestrationTest(unittest.TestCase):
     def _setup(self, root: Path, *, with_active: bool = True) -> tuple[rebuild_mineru_venv.BuildPaths, Path]:
+        root = root.resolve()
         target = root / "vendor" / "mineru-venv"
         target.parent.mkdir()
         if with_active:
@@ -996,6 +1258,9 @@ class RebuildOrchestrationTest(unittest.TestCase):
                 bin_dir = paths.staging / "bin"
                 bin_dir.mkdir(parents=True)
                 (paths.staging / "new-marker").write_text("new", encoding="utf-8")
+                python = bin_dir / "python"
+                python.write_text("#!/bin/sh\n", encoding="utf-8")
+                python.chmod(0o755)
                 for name in ("mineru", "mineru-api"):
                     self._entrypoint(bin_dir / name, bin_dir / "python")
                 (paths.staging / "pyvenv.cfg").write_text(
@@ -1004,6 +1269,8 @@ class RebuildOrchestrationTest(unittest.TestCase):
                 )
             elif fail_install and command[1:7] == ["-m", "pip", "--isolated", "install", "--upgrade", "pip"]:
                 raise subprocess.CalledProcessError(1, command)
+            elif command[0].startswith(str(paths.active.parent)) and not Path(command[0]).exists():
+                raise FileNotFoundError(command[0])
             if fail_active_readiness and command == [
                 str(paths.active / "bin" / "python"),
                 "-I",
@@ -1016,6 +1283,30 @@ class RebuildOrchestrationTest(unittest.TestCase):
                 stdout = "mineru, version 3.4.2\n"
             elif command[-3:] == ["pip", "freeze", "--all"]:
                 stdout = "MarkupSafe==3.0.3\nmineru==3.4.2\n"
+            elif command[1:3] == ["-I", "-c"]:
+                venv = Path(command[0]).parent.parent
+                stdout = json.dumps(
+                    {
+                        "mineruVersion": "3.4.2",
+                        "markupSafeVersion": "3.0.3",
+                        "pythonVersion": "3.12.0",
+                        "pythonExecutable": str(venv / "bin" / "python"),
+                        "pythonPrefix": str(venv),
+                        "modulePaths": {
+                            name: str(venv / "lib" / "site-packages" / filename)
+                            for name, filename in {
+                                "markupsafe": "markupsafe/__init__.py",
+                                "jinja2": "jinja2/__init__.py",
+                                "transformers": "transformers/__init__.py",
+                                "mineru": "mineru/__init__.py",
+                                "mineru.cli.common": "mineru/cli/common.py",
+                            }.items()
+                        },
+                    },
+                    sort_keys=True,
+                )
+            elif command[-2:] == ["--json", "--skip-api"]:
+                stdout = '{"installed":true,"runtimeProbeOk":true}\n'
             else:
                 stdout = ""
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
@@ -1045,6 +1336,8 @@ class RebuildOrchestrationTest(unittest.TestCase):
             self.assertEqual(paths, result)
             self.assertEqual("new", (paths.active / "new-marker").read_text(encoding="utf-8"))
             self.assertEqual("old", (paths.backup / "old-marker").read_text(encoding="utf-8"))
+            self.assertTrue((paths.active / "bin" / "python").exists())
+            self.assertTrue((paths.active / "bin" / "mineru").exists())
             self.assertTrue((paths.active / "mineru-venv-manifest.json").is_file())
             self.assertFalse(rebuild_mineru_venv.transaction_journal_path(paths.active).exists())
             self.assertFalse(paths.active.with_name(f"{paths.active.name}.bak-001").exists())
@@ -1072,6 +1365,7 @@ class RebuildOrchestrationTest(unittest.TestCase):
             root = Path(tmp)
             paths, check_script = self._setup(root)
             calls: list[tuple[list[str], dict[str, object]]] = []
+            prune_failed = mock.Mock()
 
             with self.assertRaises(subprocess.CalledProcessError):
                 rebuild_mineru_venv.rebuild_venv(
@@ -1084,11 +1378,13 @@ class RebuildOrchestrationTest(unittest.TestCase):
                     base_env={},
                     runner=self._runner(paths, calls, fail_install=True),
                     disk_usage=lambda _path: SimpleNamespace(free=100 * 1024**3),
+                    prune_failed=prune_failed,
                 )
 
             self.assertEqual("old", (paths.active / "old-marker").read_text(encoding="utf-8"))
             self.assertEqual("new", (paths.staging / "new-marker").read_text(encoding="utf-8"))
             self.assertFalse(paths.backup.exists())
+            prune_failed.assert_not_called()
             with rebuild_mineru_venv.rebuild_lock(paths.active):
                 pass
 
@@ -1232,6 +1528,56 @@ class RebuildOrchestrationTest(unittest.TestCase):
             self.assertEqual("new", (paths.active / "new-marker").read_text(encoding="utf-8"))
             self.assertEqual("old", (paths.backup / "old-marker").read_text(encoding="utf-8"))
 
+    def test_failed_staging_cleanup_exception_warns_without_failing_healthy_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, check_script = self._setup(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+            stderr = io.StringIO()
+
+            with mock.patch("sys.stderr", stderr):
+                result = rebuild_mineru_venv.rebuild_venv(
+                    paths.active,
+                    Path("/usr/bin/python3"),
+                    "3.4.2",
+                    check_script,
+                    2,
+                    timestamp="20260715T120000.000000Z-fixed",
+                    base_env={"PATH": "/test/bin"},
+                    runner=self._runner(paths, calls),
+                    disk_usage=lambda _path: SimpleNamespace(free=100 * 1024**3),
+                    prune_failed=mock.Mock(side_effect=PermissionError("cannot prune failed staging")),
+                )
+
+            self.assertEqual(paths, result)
+            self.assertEqual("new", (paths.active / "new-marker").read_text(encoding="utf-8"))
+            self.assertEqual("old", (paths.backup / "old-marker").read_text(encoding="utf-8"))
+            self.assertIn("warning", stderr.getvalue().lower())
+            self.assertIn("cannot prune failed staging", stderr.getvalue())
+
+    def test_failed_staging_cleanup_baseexception_is_not_swallowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths, check_script = self._setup(root)
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            with self.assertRaises(KeyboardInterrupt):
+                rebuild_mineru_venv.rebuild_venv(
+                    paths.active,
+                    Path("/usr/bin/python3"),
+                    "3.4.2",
+                    check_script,
+                    2,
+                    timestamp="20260715T120000.000000Z-fixed",
+                    base_env={"PATH": "/test/bin"},
+                    runner=self._runner(paths, calls),
+                    disk_usage=lambda _path: SimpleNamespace(free=100 * 1024**3),
+                    prune_failed=mock.Mock(side_effect=KeyboardInterrupt()),
+                )
+
+            self.assertEqual("new", (paths.active / "new-marker").read_text(encoding="utf-8"))
+            self.assertEqual("old", (paths.backup / "old-marker").read_text(encoding="utf-8"))
+
     def test_cli_defaults_match_server_contract(self) -> None:
         args = rebuild_mineru_venv.parse_args(
             [
@@ -1249,6 +1595,7 @@ class RebuildOrchestrationTest(unittest.TestCase):
         self.assertEqual("3.4.2", args.mineru_version)
         self.assertEqual(Path("/srv/scripts/check_mineru.py"), args.check_script)
         self.assertEqual(2, args.keep_backups)
+        self.assertEqual(2, args.keep_failed_staging)
         self.assertEqual(3600, args.install_timeout)
         self.assertEqual(300, args.check_timeout)
 
@@ -1265,6 +1612,21 @@ class RebuildOrchestrationTest(unittest.TestCase):
             for value in ("0", "-1"):
                 with self.subTest(option=option, value=value), self.assertRaises(SystemExit):
                     rebuild_mineru_venv.parse_args([*base, option, value])
+
+    def test_cli_failed_staging_retention_accepts_zero_and_rejects_negative(self) -> None:
+        base = [
+            "--target",
+            "/srv/vendor/mineru-venv",
+            "--python",
+            "/usr/bin/python3",
+            "--check-script",
+            "/srv/scripts/check_mineru.py",
+        ]
+
+        args = rebuild_mineru_venv.parse_args([*base, "--keep-failed-staging", "0"])
+        self.assertEqual(0, args.keep_failed_staging)
+        with self.assertRaises(SystemExit):
+            rebuild_mineru_venv.parse_args([*base, "--keep-failed-staging", "-1"])
 
     def test_main_returns_nonzero_and_reports_timeout(self) -> None:
         timeout = subprocess.TimeoutExpired(["pip", "install"], 10, output="partial install")
@@ -1291,7 +1653,33 @@ class VerifyOnlyTest(unittest.TestCase):
     def _runner(version_output: str, calls: list[list[str]]):
         def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             calls.append(command)
-            stdout = version_output if command[-1:] == ["--version"] else "{}\n"
+            active = Path(command[0]).parent.parent
+            if command[-1:] == ["--version"]:
+                stdout = version_output
+            elif command[-3:] == ["pip", "freeze", "--all"]:
+                stdout = "MarkupSafe==3.0.3\nmineru==3.4.2\n"
+            elif command[1:3] == ["-I", "-c"]:
+                stdout = json.dumps(
+                    {
+                        "mineruVersion": "3.4.2",
+                        "markupSafeVersion": "3.0.3",
+                        "pythonVersion": "3.12.0",
+                        "pythonExecutable": str(active / "bin" / "python"),
+                        "pythonPrefix": str(active),
+                        "modulePaths": {
+                            name: str(active / "lib" / "site-packages" / filename)
+                            for name, filename in {
+                                "markupsafe": "markupsafe/__init__.py",
+                                "jinja2": "jinja2/__init__.py",
+                                "transformers": "transformers/__init__.py",
+                                "mineru": "mineru/__init__.py",
+                                "mineru.cli.common": "mineru/cli/common.py",
+                            }.items()
+                        },
+                    }
+                )
+            else:
+                stdout = '{"installed":true,"runtimeProbeOk":true}\n'
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         return run
@@ -1339,9 +1727,10 @@ class VerifyOnlyTest(unittest.TestCase):
             "mineru, version 3.4.2\nmineru, version 3.4.1\n",
         )
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             active = root / "vendor" / "mineru-venv"
             active.mkdir(parents=True)
+            VenvValidationTest._write_valid_manifest(active)
             check_script = root / "scripts" / "check_mineru.py"
             check_script.parent.mkdir()
             check_script.write_text("# check\n", encoding="utf-8")

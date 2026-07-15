@@ -99,6 +99,18 @@ def utc_timestamp(now: datetime | None = None, token: str | None = None) -> str:
     return f"{instant.strftime('%Y%m%dT%H%M%S.%fZ')}-{suffix}"
 
 
+def _reject_symlink_components(path: Path, label: str) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(mode):
+            raise ValueError(f"{label} parent path contains symlink component: {current}")
+
+
 def _validate_static_request(paths: BuildPaths, check_script: Path, keep_backups: int) -> None:
     if not paths.active.is_absolute():
         raise ValueError("target must be absolute")
@@ -108,12 +120,15 @@ def _validate_static_request(paths: BuildPaths, check_script: Path, keep_backups
         raise ValueError("check-script must be absolute")
     if keep_backups < 0:
         raise ValueError("keep-backups must be zero or greater")
+    _reject_symlink_components(paths.active.parent, "target")
     if paths.active.is_symlink():
         raise ValueError(f"target must not be a symlink: {paths.active}")
     if paths.active.exists() and not paths.active.is_dir():
         raise ValueError(f"target must be a directory when it exists: {paths.active}")
     if not paths.active.parent.is_dir():
         raise ValueError(f"target parent must be an existing directory: {paths.active.parent}")
+    if check_script.is_symlink():
+        raise ValueError(f"check-script must not be a symlink: {check_script}")
     if not check_script.is_file():
         raise ValueError(f"check-script must be an existing file: {check_script}")
 
@@ -338,6 +353,30 @@ def prune_backups(target: Path, keep_backups: int) -> list[Path]:
     remove = backups[:-keep_backups] if keep_backups else backups
     for backup in remove:
         shutil.rmtree(backup)
+    return remove
+
+
+def prune_failed_staging(target: Path, keep_failed_staging: int) -> list[Path]:
+    if keep_failed_staging < 0:
+        raise ValueError("keep-failed-staging must be zero or greater")
+    name_pattern = re.compile(
+        rf"{re.escape(target.name)}\.new-\d{{8}}T\d{{6}}\.\d{{6}}Z-[0-9a-f]{{8}}"
+    )
+    candidates: list[tuple[int, str, Path]] = []
+    for path in target.parent.iterdir():
+        if name_pattern.fullmatch(path.name) is None:
+            continue
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISDIR(metadata.st_mode):
+            candidates.append((metadata.st_mtime_ns, path.name, path))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    ordered = [path for _modified, _name, path in candidates]
+    remove = ordered[:-keep_failed_staging] if keep_failed_staging else ordered
+    for staging in remove:
+        shutil.rmtree(staging)
     return remove
 
 
@@ -577,15 +616,178 @@ def _require_version(completed: subprocess.CompletedProcess[str], expected_versi
         raise RuntimeError(f"MinerU version check expected {expected_version}, got {actual_version}")
 
 
-def write_manifest(venv: Path, mineru_version: str, package_list: str) -> Path:
+def _require_venv_executables(venv: Path) -> None:
+    for name in ("python", "mineru", "mineru-api"):
+        executable = venv / "bin" / name
+        if not executable.exists() or not os.access(executable, os.X_OK):
+            raise RuntimeError(f"required venv executable is missing or not executable: {executable}")
+
+
+def _json_result(completed: subprocess.CompletedProcess[str], label: str) -> dict[str, object]:
+    try:
+        payload = json.loads(completed.stdout or "")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} validation did not return JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} validation must return a JSON object")
+    return payload
+
+
+def _readiness_result(completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
+    payload = _json_result(completed, "readiness")
+    if payload.get("installed") is not True or payload.get("runtimeProbeOk") is not True:
+        raise RuntimeError("readiness validation facts are not healthy")
+    return payload
+
+
+def _runtime_result(
+    completed: subprocess.CompletedProcess[str],
+    venv: Path,
+    expected_version: str,
+) -> dict[str, object]:
+    payload = _json_result(completed, "runtime import")
+    if payload.get("mineruVersion") != expected_version:
+        raise RuntimeError("runtime import MinerU metadata version is inconsistent")
+    if payload.get("markupSafeVersion") != "3.0.3":
+        raise RuntimeError("runtime import MarkupSafe metadata version is inconsistent")
+    if not isinstance(payload.get("pythonVersion"), str) or not payload["pythonVersion"]:
+        raise RuntimeError("runtime import result is missing Python version")
+    if payload.get("pythonExecutable") != str(venv / "bin" / "python"):
+        raise RuntimeError("runtime import Python executable is outside the target venv")
+    expected_modules = {"markupsafe", "jinja2", "transformers", "mineru", "mineru.cli.common"}
+    module_paths = payload.get("modulePaths")
+    if not isinstance(module_paths, dict) or set(module_paths) != expected_modules:
+        raise RuntimeError("runtime import result is missing required module paths")
+    for name, value in module_paths.items():
+        if not isinstance(value, str):
+            raise RuntimeError(f"runtime import path for {name} is invalid")
+        try:
+            Path(value).resolve().relative_to(venv.resolve())
+        except ValueError as exc:
+            raise RuntimeError(f"runtime import path for {name} is outside the target venv") from exc
+    return payload
+
+
+def normalize_package_list(package_list: str) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for raw_line in package_list.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        pinned = re.fullmatch(r"([A-Za-z0-9_.-]+)==([A-Za-z0-9_.+!-]+)", line)
+        direct = re.fullmatch(r"([A-Za-z0-9_.-]+)\s*@\s*.+", line)
+        editable = re.search(r"[#&]egg=([A-Za-z0-9_.-]+)", line)
+        if pinned:
+            name, version = pinned.groups()
+        elif direct:
+            name, version = direct.group(1), "<direct-reference>"
+        elif editable:
+            name, version = editable.group(1), "<direct-reference>"
+        else:
+            name, version = "<redacted-entry>", "<unparsed>"
+        canonical_name = re.sub(r"[-_.]+", "-", name).lower()
+        normalized.append({"name": canonical_name, "version": version})
+    return sorted(normalized, key=lambda item: (item["name"], item["version"]))
+
+
+def _package_list_digest(packages: list[dict[str, str]]) -> str:
+    canonical = json.dumps(packages, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n"
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def write_manifest(
+    venv: Path,
+    mineru_version: str,
+    package_list: str,
+    *,
+    active_venv: Path,
+    readiness: dict[str, object],
+    runtime: dict[str, object],
+    validated_at: str | None = None,
+) -> Path:
     manifest = venv / "mineru-venv-manifest.json"
+    packages = normalize_package_list(package_list)
+    timestamp = validated_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     payload = {
-        "manifestVersion": 1,
-        "mineruVersion": mineru_version,
-        "packageListSha256": hashlib.sha256(package_list.encode("utf-8")).hexdigest(),
+        "manifestVersion": 2,
+        "targetMineruVersion": mineru_version,
+        "packages": packages,
+        "packageListSha256": _package_list_digest(packages),
+        "python": {
+            "version": runtime["pythonVersion"],
+            "executable": str(active_venv / "bin" / "python"),
+        },
+        "validation": {
+            "validatedAt": timestamp,
+            "readiness": readiness.get("installed") is True and readiness.get("runtimeProbeOk") is True,
+            "runtimeImports": True,
+            "metadataVersions": True,
+            "versionCommand": True,
+            "mineruVersion": runtime["mineruVersion"],
+            "markupSafeVersion": runtime["markupSafeVersion"],
+        },
     }
     manifest.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
+
+
+def _verify_manifest(
+    venv: Path,
+    expected_version: str,
+    package_list: str,
+    runtime: dict[str, object],
+) -> None:
+    manifest = venv / "mineru-venv-manifest.json"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise RuntimeError(f"manifest is missing or unsafe: {manifest}")
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"manifest is not valid UTF-8 JSON: {manifest}") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "manifestVersion",
+        "targetMineruVersion",
+        "packages",
+        "packageListSha256",
+        "python",
+        "validation",
+    }:
+        raise RuntimeError("manifest has missing or unexpected fields")
+    packages = payload.get("packages")
+    if not isinstance(packages, list) or packages != normalize_package_list(package_list):
+        raise RuntimeError("manifest package list does not match active environment")
+    if payload.get("packageListSha256") != _package_list_digest(packages):
+        raise RuntimeError("manifest package-list hash is invalid")
+    if payload.get("manifestVersion") != 2 or payload.get("targetMineruVersion") != expected_version:
+        raise RuntimeError("manifest target version is inconsistent")
+    python = payload.get("python")
+    if not isinstance(python, dict) or python != {
+        "version": runtime["pythonVersion"],
+        "executable": str(venv / "bin" / "python"),
+    }:
+        raise RuntimeError("manifest Python facts are inconsistent")
+    validation = payload.get("validation")
+    required_facts = {
+        "readiness": True,
+        "runtimeImports": True,
+        "metadataVersions": True,
+        "versionCommand": True,
+        "mineruVersion": expected_version,
+        "markupSafeVersion": "3.0.3",
+    }
+    if (
+        not isinstance(validation, dict)
+        or set(validation) != {*required_facts, "validatedAt"}
+        or any(validation.get(key) != value for key, value in required_facts.items())
+    ):
+        raise RuntimeError("manifest validation facts are inconsistent")
+    validated_at = validation.get("validatedAt")
+    try:
+        if not isinstance(validated_at, str):
+            raise ValueError
+        datetime.strptime(validated_at, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        raise RuntimeError("manifest validation timestamp is invalid")
 
 
 def validate_staging(
@@ -594,23 +796,36 @@ def validate_staging(
     expected_version: str,
     *,
     base_env: dict[str, str],
+    active_venv: Path | None = None,
     check_timeout: int = DEFAULT_CHECK_TIMEOUT,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> Path:
+    _require_venv_executables(venv)
     python = str(venv / "bin" / "python")
     mineru = str(venv / "bin" / "mineru")
     env = _validation_env(base_env, venv)
-    _run_validation([python, "-I", str(check_script), "--json", "--skip-api"], env, check_timeout, runner)
-    _run_validation(
+    readiness_completed = _run_validation(
+        [python, "-I", str(check_script), "--json", "--skip-api"], env, check_timeout, runner
+    )
+    readiness = _readiness_result(readiness_completed)
+    runtime_completed = _run_validation(
         [python, "-I", "-c", build_runtime_import_probe(venv, expected_version)],
         env,
         check_timeout,
         runner,
     )
+    runtime = _runtime_result(runtime_completed, venv, expected_version)
     version = _run_validation([mineru, "--version"], env, check_timeout, runner)
     _require_version(version, expected_version)
     packages = _run_validation([python, "-I", "-m", "pip", "freeze", "--all"], env, check_timeout, runner)
-    return write_manifest(venv, expected_version, packages.stdout or "")
+    return write_manifest(
+        venv,
+        expected_version,
+        packages.stdout or "",
+        active_venv=active_venv or venv,
+        readiness=readiness,
+        runtime=runtime,
+    )
 
 
 def validate_active(
@@ -622,20 +837,23 @@ def validate_active(
     check_timeout: int = DEFAULT_CHECK_TIMEOUT,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> None:
+    _require_venv_executables(venv)
     env = _validation_env(base_env, venv)
     python = str(venv / "bin" / "python")
-    _run_validation(
+    readiness_completed = _run_validation(
         [python, "-I", str(check_script), "--json", "--skip-api"],
         env,
         check_timeout,
         runner,
     )
-    _run_validation(
+    _readiness_result(readiness_completed)
+    runtime_completed = _run_validation(
         [python, "-I", "-c", build_runtime_import_probe(venv, expected_version)],
         env,
         check_timeout,
         runner,
     )
+    runtime = _runtime_result(runtime_completed, venv, expected_version)
     version = _run_validation(
         [str(venv / "bin" / "mineru"), "--version"],
         env,
@@ -643,6 +861,13 @@ def validate_active(
         runner,
     )
     _require_version(version, expected_version)
+    packages = _run_validation(
+        [python, "-I", "-m", "pip", "freeze", "--all"],
+        env,
+        check_timeout,
+        runner,
+    )
+    _verify_manifest(venv, expected_version, packages.stdout or "", runtime)
 
 
 def verify_active_venv(
@@ -710,9 +935,13 @@ def rebuild_venv(
     directory_size: Callable[[Path], int] = directory_size_bytes,
     rename: Rename = _rename,
     prune: Callable[[Path, int], list[Path]] = prune_backups,
+    prune_failed: Callable[[Path, int], list[Path]] = prune_failed_staging,
+    keep_failed_staging: int = 2,
     install_timeout: int = DEFAULT_INSTALL_TIMEOUT,
     check_timeout: int = DEFAULT_CHECK_TIMEOUT,
 ) -> BuildPaths:
+    if keep_failed_staging < 0:
+        raise ValueError("keep-failed-staging must be zero or greater")
     paths = build_paths(target, timestamp or utc_timestamp())
     _validate_static_request(paths, check_script, keep_backups)
     env = sanitized_environment(dict(os.environ if base_env is None else base_env))
@@ -727,6 +956,7 @@ def rebuild_venv(
             check_script,
             mineru_version,
             base_env=env,
+            active_venv=paths.active,
             check_timeout=check_timeout,
             runner=runner,
         )
@@ -754,6 +984,10 @@ def rebuild_venv(
             prune(paths.active, keep_backups)
         except Exception as exc:
             print(f"WARNING: MinerU backup pruning failed after healthy activation: {exc}", file=sys.stderr)
+        try:
+            prune_failed(paths.active, keep_failed_staging)
+        except Exception as exc:
+            print(f"WARNING: MinerU failed-staging pruning failed after healthy activation: {exc}", file=sys.stderr)
     return paths
 
 
@@ -761,6 +995,13 @@ def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("timeout must be a positive integer")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be zero or greater")
     return parsed
 
 
@@ -772,6 +1013,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mineru-version", default="3.4.2")
     parser.add_argument("--check-script", type=Path, required=True)
     parser.add_argument("--keep-backups", type=int, default=2)
+    parser.add_argument("--keep-failed-staging", type=_nonnegative_int, default=2)
     parser.add_argument("--install-timeout", type=_positive_int, default=DEFAULT_INSTALL_TIMEOUT)
     parser.add_argument("--check-timeout", type=_positive_int, default=DEFAULT_CHECK_TIMEOUT)
     args = parser.parse_args(argv)
@@ -798,6 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
             args.mineru_version,
             args.check_script,
             args.keep_backups,
+            keep_failed_staging=args.keep_failed_staging,
             install_timeout=args.install_timeout,
             check_timeout=args.check_timeout,
         )
