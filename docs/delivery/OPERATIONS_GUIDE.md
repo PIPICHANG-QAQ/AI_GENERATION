@@ -240,6 +240,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --app-dir backend/python-worker
 构建镜像前先生成 Java jar 和前端静态资源：
 
 ```bash
+set -euo pipefail
 (cd backend && mvn clean -DskipTests package)
 (cd local-platform && npm run build)
 ```

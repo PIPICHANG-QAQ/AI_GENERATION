@@ -828,6 +828,7 @@ Expected: 代码更新但 `.env`、server-data 和新 venv 保持不变。
 ### Step 4：构建并启动容器
 
 ```bash
+set -euo pipefail
 cd /home/user/AI_GENERATION_DOCKER
 JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}" mvn -f backend/pom.xml clean -DskipTests package
 npm --prefix local-platform ci

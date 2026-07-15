@@ -144,12 +144,64 @@ class StartServerDockerTest(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return server
 
+    def extract_bash_blocks(self, section: str) -> list[str]:
+        remainders = section.split("```bash")[1:]
+        self.assertTrue(remainders, "documented section has no bash code block")
+        blocks = []
+        for remainder in remainders:
+            block, closing_fence, _ = remainder.partition("```")
+            self.assertTrue(closing_fence, "documented bash code block is not closed")
+            blocks.append(block.strip())
+        return blocks
+
     def extract_bash_block(self, section: str) -> str:
-        _, fence, remainder = section.partition("```bash")
-        self.assertTrue(fence, "documented section has no bash code block")
-        block, closing_fence, _ = remainder.partition("```")
-        self.assertTrue(closing_fence, "documented bash code block is not closed")
-        return block.strip()
+        return self.extract_bash_blocks(section)[0]
+
+    def documented_server_build_sections(self) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+        plan = RECOVERY_PLAN_PATH.read_text(encoding="utf-8")
+        runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
+        delivery = DELIVERY_PACKAGE_PATH.read_text(encoding="utf-8")
+        readme = README_PATH.read_text(encoding="utf-8")
+        operations = OPERATIONS_GUIDE_PATH.read_text(encoding="utf-8")
+        prefixed_npm_commands = ("--prefix local-platform ci", "--prefix local-platform run build")
+        return (
+            (
+                "Task8 rollback",
+                plan.split("### Step 8：失败回滚路径", 1)[1].split("## Task 9", 1)[0],
+                prefixed_npm_commands,
+            ),
+            (
+                "server runbook",
+                runbook.split("## 重建并启动服务", 1)[1].split("## 原子重建 MinerU venv", 1)[0],
+                prefixed_npm_commands,
+            ),
+            (
+                "Task8 production build",
+                plan.split("### Step 4：构建并启动容器", 1)[1].split("### Step 5", 1)[0],
+                prefixed_npm_commands,
+            ),
+            (
+                "delivery package server Docker",
+                delivery.split("如果要在目标服务器使用 `docker-compose.server.yml`", 1)[1].split(
+                    "Docker 部署仍不得", 1
+                )[0],
+                ("ci", "run build"),
+            ),
+            (
+                "README direct server Docker",
+                readme.split("先生成 Java jar 和前端静态资源：", 1)[1].split(
+                    "也可以直接使用服务器启动脚本", 1
+                )[0],
+                ("run build",),
+            ),
+            (
+                "operations direct server Docker",
+                operations.split("构建镜像前先生成 Java jar 和前端静态资源：", 1)[1].split(
+                    "默认访问：", 1
+                )[0],
+                ("run build",),
+            ),
+        )
 
     def run_documented_build_tail(
         self,
@@ -158,15 +210,18 @@ class StartServerDockerTest(unittest.TestCase):
         maven_status: int = 0,
         failing_npm_command: str = "",
     ) -> tuple[subprocess.CompletedProcess[str], bool]:
-        block = self.extract_bash_block(section)
-        lines = block.splitlines()
-        build_index = next(
-            index
-            for index, line in enumerate(lines)
-            if "mvn -f backend/pom.xml clean -DskipTests package" in line
+        blocks = self.extract_bash_blocks(section)
+        build_block_index, build_index = next(
+            (block_index, line_index)
+            for block_index, block in enumerate(blocks)
+            for line_index, line in enumerate(block.splitlines())
+            if "mvn" in line and "clean -DskipTests package" in line
         )
-        fail_fast = lines[0] if lines and lines[0] == "set -euo pipefail" else ""
-        build_tail = "\n".join(lines[build_index:])
+        build_lines = blocks[build_block_index].splitlines()
+        fail_fast = build_lines[0] if build_lines and build_lines[0] == "set -euo pipefail" else ""
+        build_tail = "\n".join(
+            ["\n".join(build_lines[build_index:]), *blocks[build_block_index + 1 :]]
+        )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             docker_marker = Path(temp_dir) / "docker-called"
@@ -369,25 +424,9 @@ class StartServerDockerTest(unittest.TestCase):
         self.assertEqual(sorted(positions), positions)
 
     def test_documented_rebuild_failures_stop_before_docker(self) -> None:
-        plan = RECOVERY_PLAN_PATH.read_text(encoding="utf-8")
-        runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
-        sections = (
-            (
-                "Task8 rollback",
-                plan.split("### Step 8：失败回滚路径", 1)[1].split("## Task 9", 1)[0],
-            ),
-            (
-                "server runbook",
-                runbook.split("## 重建并启动服务", 1)[1].split("## 原子重建 MinerU venv", 1)[0],
-            ),
-        )
-        failures = (
-            ("Maven", 42, ""),
-            ("frontend ci", 0, "--prefix local-platform ci"),
-            ("frontend build", 0, "--prefix local-platform run build"),
-        )
-
-        for section_name, section in sections:
+        for section_name, section, npm_commands in self.documented_server_build_sections():
+            failures = [("Maven", 42, "")]
+            failures.extend((f"npm {command}", 0, command) for command in npm_commands)
             for failure_name, maven_status, failing_npm_command in failures:
                 with self.subTest(section=section_name, failure=failure_name):
                     completed, docker_called = self.run_documented_build_tail(
@@ -397,6 +436,12 @@ class StartServerDockerTest(unittest.TestCase):
                     )
                     self.assertNotEqual(0, completed.returncode, completed.stderr)
                     self.assertFalse(docker_called, "Docker ran after a documented build failure")
+
+    def test_documented_server_build_blocks_start_fail_fast(self) -> None:
+        for section_name, section, _ in self.documented_server_build_sections():
+            with self.subTest(section=section_name):
+                block = self.extract_bash_block(section)
+                self.assertEqual("set -euo pipefail", block.splitlines()[0])
 
     def test_default_host_venv_drives_every_mineru_command(self) -> None:
         completed = self.run_bash(

@@ -162,6 +162,7 @@ tar -xzf /tmp/ai-generation-delivery.tar.gz -C "$TOGO_DIR"
 如果要在目标服务器使用 `docker-compose.server.yml`，需先在 TOGO 目录本机生成镜像构建产物：
 
 ```bash
+set -euo pipefail
 (cd backend && mvn clean -DskipTests package)
 (cd local-platform && npm ci && npm run build)
 docker compose -f docker-compose.server.yml up -d --build

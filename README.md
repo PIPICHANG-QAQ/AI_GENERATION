@@ -279,6 +279,7 @@ Python worker：http://localhost:8000
 先生成 Java jar 和前端静态资源：
 
 ```bash
+set -euo pipefail
 (cd backend && mvn clean -DskipTests package)
 (cd local-platform && npm run build)
 ```
