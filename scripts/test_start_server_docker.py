@@ -22,6 +22,7 @@ COMPOSE_PATH = SCRIPT_PATH.parents[1] / "docker-compose.server.yml"
 ENV_EXAMPLE_PATH = SCRIPT_PATH.parents[1] / ".env.example"
 README_PATH = SCRIPT_PATH.parents[1] / "README.md"
 OPERATIONS_GUIDE_PATH = SCRIPT_PATH.parents[1] / "docs" / "delivery" / "OPERATIONS_GUIDE.md"
+DELIVERY_PACKAGE_PATH = SCRIPT_PATH.parents[1] / "docs" / "delivery" / "DELIVERY_PACKAGE.md"
 RECOVERY_PLAN_PATH = (
     SCRIPT_PATH.parents[1]
     / "docs"
@@ -171,12 +172,21 @@ class StartServerDockerTest(unittest.TestCase):
         readme_server_docker = readme.split("## 服务器 Docker 部署", 1)[1]
         operations = OPERATIONS_GUIDE_PATH.read_text(encoding="utf-8")
         operations_server_docker = operations.split("### 5.1 单机 Docker Compose 部署", 1)[1].split("### 5.2", 1)[0]
+        delivery = DELIVERY_PACKAGE_PATH.read_text(encoding="utf-8")
+        delivery_server_docker = delivery.split("如果要在目标服务器使用 `docker-compose.server.yml`", 1)[1].split(
+            "## 5. 迁移后启动流程", 1
+        )[0]
         cases = (
             ("Task8", task8, "mvn -f backend/pom.xml clean -DskipTests package"),
             ("README server Docker", readme_server_docker, "(cd backend && mvn clean -DskipTests package)"),
             (
                 "operations server Docker",
                 operations_server_docker,
+                "(cd backend && mvn clean -DskipTests package)",
+            ),
+            (
+                "delivery package server Docker",
+                delivery_server_docker,
                 "(cd backend && mvn clean -DskipTests package)",
             ),
         )
