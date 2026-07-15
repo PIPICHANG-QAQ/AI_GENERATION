@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 import subprocess
 from pathlib import Path
@@ -92,10 +93,13 @@ def check_packaged_files(files: list[Path], failures: list[str]) -> None:
 
 def is_allowed_absolute_local_path(relative_path: str, matched_path: str) -> bool:
     """Allow documented server deployment paths while still rejecting accidental local leaks."""
+    if not matched_path.startswith("/") or matched_path.startswith("//"):
+        return False
+    normalized_path = posixpath.normpath(matched_path)
     return (
         relative_path in ALLOWED_ABSOLUTE_LOCAL_PATH_FILES
         and any(
-            matched_path == prefix or matched_path.startswith(f"{prefix}/")
+            normalized_path == prefix or normalized_path.startswith(f"{prefix}/")
             for prefix in ALLOWED_ABSOLUTE_LOCAL_PATH_PREFIXES
         )
     )

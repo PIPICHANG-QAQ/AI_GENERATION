@@ -42,6 +42,28 @@ class CheckProjectPortabilityTest(unittest.TestCase):
                 self.assertFalse(is_allowed_absolute_local_path(relative_path, f"{server_root}_EVIL"))
         self.assertFalse(is_allowed_absolute_local_path("scripts/unrelated.py", server_root))
 
+    def test_fixed_server_path_allowance_uses_posix_lexical_normalization(self):
+        server_root = str(Path("/") / "home" / "user" / "AI_GENERATION_DOCKER")
+        relative_path = "scripts/test_rebuild_mineru_venv.py"
+
+        self.assertFalse(
+            is_allowed_absolute_local_path(relative_path, f"{server_root}/../private")
+        )
+        self.assertFalse(
+            is_allowed_absolute_local_path(
+                relative_path,
+                f"{server_root}/vendor/../../.ssh/authorized_keys",
+            )
+        )
+        self.assertTrue(
+            is_allowed_absolute_local_path(
+                relative_path,
+                f"{server_root}/vendor/../vendor/mineru-venv",
+            )
+        )
+        self.assertFalse(is_allowed_absolute_local_path(relative_path, server_root.lstrip("/")))
+        self.assertFalse(is_allowed_absolute_local_path(relative_path, f"/{server_root}"))
+
     def test_allowed_server_path_does_not_hide_later_local_paths(self):
         server_path = str(
             Path("/") / "home" / "user" / "AI_GENERATION_DOCKER" / "vendor" / "mineru-venv"

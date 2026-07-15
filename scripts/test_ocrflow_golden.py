@@ -151,11 +151,24 @@ class CliTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         task = plan.split("## Task 5", 1)[1].split("## Task 6", 1)[0]
         compare_command = task.split("python3 scripts/ocrflow_golden.py compare \\", 1)[1].split("```", 1)[0]
-        capture_outputs = [
-            line.strip().split(maxsplit=1)[1].rstrip(" \\")
-            for line in task.splitlines()
-            if line.strip().startswith("--output ")
+        task_lines = task.splitlines()
+        capture_command = "python3 scripts/ocrflow_golden.py capture \\"
+        capture_starts = [
+            index for index, line in enumerate(task_lines) if line == capture_command
         ]
+        self.assertEqual(2, len(capture_starts))
+        capture_outputs = []
+        for start in capture_starts:
+            command_lines = [task_lines[start]]
+            while command_lines[-1].endswith("\\"):
+                command_lines.append(task_lines[start + len(command_lines)])
+            outputs = [
+                line.strip().split(maxsplit=1)[1].rstrip(" \\")
+                for line in command_lines
+                if line.strip().startswith("--output ")
+            ]
+            self.assertEqual(1, len(outputs))
+            capture_outputs.append(outputs[0])
         baseline = next(
             line.strip().split(maxsplit=1)[1].rstrip(" \\")
             for line in compare_command.splitlines()
@@ -168,7 +181,6 @@ class CliTest(unittest.TestCase):
         )
 
         self.assertNotIn("--manifest", compare_command)
-        self.assertEqual(2, len(capture_outputs))
         self.assertNotEqual(capture_outputs[0], capture_outputs[1])
         self.assertEqual(capture_outputs, [baseline, candidate])
         self.assertNotEqual(baseline, candidate)
