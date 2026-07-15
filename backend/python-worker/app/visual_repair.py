@@ -16,7 +16,7 @@ import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -102,7 +102,7 @@ def apply_visual_repairs(
     upload_path: str | Path | None,
     job_id: str,
     context: dict[str, Any] | None = None,
-    scratch_dir: Path | None = None,
+    scratch_dir: Path | Callable[[], Path] | None = None,
 ) -> dict[str, Any]:
     """对结构化题目应用题目级视觉修复。"""
     if os.getenv("OCR_VISUAL_REPAIR_ENABLED", "true").lower() == "false":
@@ -149,16 +149,19 @@ def apply_visual_repairs(
         "warnings": list(repair_context.get("warnings") or []),
     }
 
-    crop_root = (scratch_dir or output_dir).resolve(strict=True)
+    if not candidates:
+        return summary
+
+    selected_scratch_dir = scratch_dir() if callable(scratch_dir) else scratch_dir
+    crop_root = (selected_scratch_dir or output_dir).resolve(strict=True)
     crop_dir = crop_root / "visual_repair"
-    if candidates:
-        crop_dir = safe_scratch_child_directory(crop_root, "visual_repair")
-        for index, question in candidates:
-            crop_path = crop_dir / f"{index:03d}_{safe_crop_name(question)}.png"
-            if crop_path.is_symlink():
-                raise VisualRepairScratchError(
-                    f"visual repair crop target must not be a symlink: {crop_path.name}"
-                )
+    crop_dir = safe_scratch_child_directory(crop_root, "visual_repair")
+    for index, question in candidates:
+        crop_path = crop_dir / f"{index:03d}_{safe_crop_name(question)}.png"
+        if crop_path.is_symlink():
+            raise VisualRepairScratchError(
+                f"visual repair crop target must not be a symlink: {crop_path.name}"
+            )
 
     if max_workers > 1 and len(candidates) > 1:
         results: list[dict[str, Any]] = []

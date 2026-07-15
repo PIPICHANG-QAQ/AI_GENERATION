@@ -522,7 +522,7 @@ def collect_outputs_impl(job_id: str, bundle: CanonicalOcrBundle | None = None) 
             upload_path,
             job_id,
             visual_repair_context,
-            scratch_dir=build_postprocess_scratch_dir(POSTPROCESS_ROOT, job_id),
+            scratch_dir=lambda: build_postprocess_scratch_dir(POSTPROCESS_ROOT, job_id),
         )
         visual_status = "success" if visual_repair.get("enabled", True) else "skipped"
         preprocessed = visual_repair.get("preprocessed") or {}

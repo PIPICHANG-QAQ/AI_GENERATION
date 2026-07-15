@@ -394,6 +394,42 @@ def test_run_bundle_uses_canonical_visual_context_without_provider_scans(tmp_pat
     assert outputs["markdown"] == "1. canonical question"
 
 
+def test_run_bundle_does_not_create_scratch_when_visual_repair_is_disabled(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    source = tmp_path / "paper.png"
+    _write_fill_blank_source(source)
+    bundle = _canonical_visual_bundle("disabled-visual-repair", artifact_root, source)
+    postprocess_root = tmp_path / "postprocess"
+
+    outputs = _run_bundle_deterministically(
+        bundle,
+        tmp_path / "outputs",
+        postprocess_root,
+        visual_enabled=False,
+    )
+
+    assert outputs["visualRepair"]["enabled"] is False
+    assert not postprocess_root.exists()
+
+
+def test_run_bundle_does_not_create_scratch_without_visual_candidates(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    bundle = CanonicalOcrBundle(
+        document_id="no-visual-candidates",
+        input_sha256="sha",
+        canonical_markdown="1. canonical question",
+        artifact_root=str(artifact_root),
+    )
+    postprocess_root = tmp_path / "postprocess"
+
+    outputs = _run_bundle_deterministically(bundle, tmp_path / "outputs", postprocess_root)
+
+    assert outputs["visualRepair"]["candidateCount"] == 0
+    assert not postprocess_root.exists()
+
+
 def test_run_bundle_writes_derived_crop_only_to_worker_scratch_with_read_only_artifacts(tmp_path: Path) -> None:
     job_id = "read-only-artifacts"
     output_root = tmp_path / "outputs"
