@@ -125,6 +125,30 @@ class MermaidStructureCheckTest(unittest.TestCase):
             failures,
         )
 
+    def test_reports_removed_rendered_endpoint_with_stale_edge_and_custom_class(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n  B["B"]\n  classDef retired fill:#000;\n',
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<path data-id="L_B_Removed_Node-v2_0"/>'
+                '<g id="prefix-flowchart-B-0" class="node default"><text>B</text></g>'
+                '<g id="prefix-flowchart-Removed_Node-v2-7" class="node default retired renderer-utility">'
+                '<text>Removed</text></g>'
+                '</svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual(
+            [
+                "flow.svg: unexpected rendered node id for Removed_Node-v2",
+                "flow.svg: unexpected rendered class retired for Removed_Node-v2",
+                "flow.svg: unexpected rendered directed edge B -> Removed_Node-v2",
+            ],
+            failures,
+        )
+
     def test_worker_bundle_schema_requires_compatibility_artifact_root(self) -> None:
         worker_contract = (
             Path(__file__).resolve().parents[1] / "question-engine/openapi/worker.v1.yaml"

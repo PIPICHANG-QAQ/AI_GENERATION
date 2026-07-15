@@ -27,6 +27,9 @@ MERMAID_CLASS_STATEMENT = re.compile(
     r"^\s*class\s+([A-Za-z_][A-Za-z0-9_,-]*)\s+([A-Za-z_][A-Za-z0-9_-]*)\s*;?\s*$"
 )
 MERMAID_CLASS_DEFINITION = re.compile(r"^\s*classDef\s+([A-Za-z_][A-Za-z0-9_-]*)\b", re.MULTILINE)
+MERMAID_RENDERED_NODE_ID = re.compile(
+    r"(?:^|[-_])flowchart-(?P<node_id>[A-Za-z_][A-Za-z0-9_-]*)-(?P<render_index>[0-9]+)$"
+)
 
 
 def normalize_mermaid_label(value: str) -> str:
@@ -90,6 +93,17 @@ def rendered_mermaid_edges(rendered_ids: set[str], declared_nodes: set[str]) -> 
     return edges
 
 
+def rendered_mermaid_nodes(svg_root: ElementTree.Element) -> dict[str, list[ElementTree.Element]]:
+    """Index rendered flowchart node elements while preserving hyphens and underscores in Mermaid ids."""
+    nodes: dict[str, list[ElementTree.Element]] = {}
+    for element in svg_root.iter():
+        rendered_id = element.get("id") or ""
+        match = MERMAID_RENDERED_NODE_ID.search(rendered_id)
+        if match:
+            nodes.setdefault(match.group("node_id"), []).append(element)
+    return nodes
+
+
 def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
     """Check XML plus rendered flowchart nodes, labels, edges, and classes."""
     mmd = mmd_path.read_text(encoding="utf-8")
@@ -101,9 +115,10 @@ def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
         svg_root = ElementTree.parse(svg_path).getroot()
     except ElementTree.ParseError as exc:
         return [f"{svg_path.name}: invalid XML: {exc}"]
-    rendered_ids = {element.get("id", "") for element in svg_root.iter() if element.get("id")}
+    rendered_nodes = rendered_mermaid_nodes(svg_root)
     rendered_edge_ids = {element.get("data-id", "") for element in svg_root.iter() if element.get("data-id")}
-    rendered_edges = rendered_mermaid_edges(rendered_edge_ids, set(declared_nodes))
+    semantic_nodes = set(declared_nodes) | set(rendered_nodes)
+    rendered_edges = rendered_mermaid_edges(rendered_edge_ids, semantic_nodes)
     source_custom_classes = set(MERMAID_CLASS_DEFINITION.findall(mmd))
     source_custom_classes.update(
         class_name
@@ -112,17 +127,14 @@ def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
     )
     failures: list[str] = []
     missing_nodes: set[str] = set()
-    for node_id in declared_nodes:
-        rendered_node = re.compile(rf"(?:^|-)flowchart-{re.escape(node_id)}-[0-9]+$")
-        node_elements = [
-            element
-            for element in svg_root.iter()
-            if element.get("id") and rendered_node.search(element.get("id", ""))
-        ]
+    for node_id in sorted(semantic_nodes):
+        node_elements = rendered_nodes.get(node_id) or []
         if not node_elements:
             failures.append(f"{svg_path.name}: missing rendered node id for {node_id}")
             missing_nodes.add(node_id)
             continue
+        if node_id not in declared_nodes:
+            failures.append(f"{svg_path.name}: unexpected rendered node id for {node_id}")
         expected_label = declared_labels.get(node_id)
         if expected_label:
             rendered_label = normalize_mermaid_label(" ".join(node_elements[0].itertext()))
