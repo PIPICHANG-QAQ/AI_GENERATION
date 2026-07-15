@@ -143,7 +143,7 @@ class CliTest(unittest.TestCase):
                 self.assertNotEqual(0, code)
                 self.assertEqual("invalid_arguments", report["status"])
 
-    def test_recovery_plan_uses_complete_captured_pair_compare_mode(self) -> None:
+    def test_recovery_plan_compares_two_independent_captures(self) -> None:
         root = Path(__file__).resolve().parents[1]
         plan = (
             root / "docs" / "superpowers" / "plans"
@@ -151,10 +151,27 @@ class CliTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         task = plan.split("## Task 5", 1)[1].split("## Task 6", 1)[0]
         compare_command = task.split("python3 scripts/ocrflow_golden.py compare \\", 1)[1].split("```", 1)[0]
+        capture_outputs = [
+            line.strip().split(maxsplit=1)[1].rstrip(" \\")
+            for line in task.splitlines()
+            if line.strip().startswith("--output ")
+        ]
+        baseline = next(
+            line.strip().split(maxsplit=1)[1].rstrip(" \\")
+            for line in compare_command.splitlines()
+            if line.strip().startswith("--baseline ")
+        )
+        candidate = next(
+            line.strip().split(maxsplit=1)[1].rstrip(" \\")
+            for line in compare_command.splitlines()
+            if line.strip().startswith("--candidate ")
+        )
 
         self.assertNotIn("--manifest", compare_command)
-        self.assertIn("--baseline .artifacts/recovery/local-golden.json", compare_command)
-        self.assertIn("--candidate .artifacts/recovery/local-golden.json", compare_command)
+        self.assertEqual(2, len(capture_outputs))
+        self.assertNotEqual(capture_outputs[0], capture_outputs[1])
+        self.assertEqual(capture_outputs, [baseline, candidate])
+        self.assertNotEqual(baseline, candidate)
 
     def test_baseline_compare_outputs_machine_readable_diff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

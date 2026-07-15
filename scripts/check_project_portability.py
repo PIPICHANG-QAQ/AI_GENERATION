@@ -78,9 +78,11 @@ def check_packaged_files(files: list[Path], failures: list[str]) -> None:
             continue
 
         if rel not in ABSOLUTE_PATH_PATTERN_SOURCE_FILES:
-            match = ABSOLUTE_LOCAL_PATH_RE.search(text)
-            if match and not is_allowed_absolute_local_path(rel, match.group(0)):
-                failures.append(f"absolute local path leaked into portable file: {rel}: {match.group(0)}")
+            for match in ABSOLUTE_LOCAL_PATH_RE.finditer(text):
+                if not is_allowed_absolute_local_path(rel, match.group(0)):
+                    failures.append(
+                        f"absolute local path leaked into portable file: {rel}: {match.group(0)}"
+                    )
 
         lines = text.splitlines()
         first_line = lines[0] if lines else ""
@@ -92,7 +94,10 @@ def is_allowed_absolute_local_path(relative_path: str, matched_path: str) -> boo
     """Allow documented server deployment paths while still rejecting accidental local leaks."""
     return (
         relative_path in ALLOWED_ABSOLUTE_LOCAL_PATH_FILES
-        and any(matched_path.startswith(prefix) for prefix in ALLOWED_ABSOLUTE_LOCAL_PATH_PREFIXES)
+        and any(
+            matched_path == prefix or matched_path.startswith(f"{prefix}/")
+            for prefix in ALLOWED_ABSOLUTE_LOCAL_PATH_PREFIXES
+        )
     )
 
 
