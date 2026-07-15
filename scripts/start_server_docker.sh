@@ -20,6 +20,21 @@ need_command() {
   fi
 }
 
+normalize_mineru_api_enabled() {
+  local default_value="$1"
+  local normalized
+  normalized="$(printf '%s' "${MINERU_API_ENABLED:-${default_value}}" | tr '[:upper:]' '[:lower:]')"
+  case "${normalized}" in
+    true|false)
+      export MINERU_API_ENABLED="${normalized}"
+      ;;
+    *)
+      echo "MINERU_API_ENABLED must be true or false." >&2
+      return 1
+      ;;
+  esac
+}
+
 absolute_from_root() {
   local value="$1"
   if [[ "${value}" != /* ]]; then
@@ -63,10 +78,14 @@ import sys
 
 try:
     status = json.load(sys.stdin)["providerStatus"]
+    api_enabled = status.get("apiEnabled")
     ready = (
         status.get("installed") is True
         and status.get("runtimeProbeOk") is True
-        and (status.get("apiEnabled") is not True or status.get("apiReady") is True)
+        and (
+            api_enabled is False
+            or (api_enabled is True and status.get("apiReady") is True)
+        )
     )
 except (KeyError, TypeError, ValueError):
     ready = False
@@ -75,23 +94,50 @@ raise SystemExit(0 if ready else 1)
 }
 
 java_health_ready() {
-  curl -fsS "${health_url}" >/dev/null 2>&1
+  local request_timeout="$1"
+  curl -fsS --connect-timeout "${request_timeout}" --max-time "${request_timeout}" "${health_url}" >/dev/null 2>&1
 }
 
 ocr_runtime_ready() {
-  curl -fsS "${ocr_runtime_url}" 2>/dev/null | ocr_runtime_payload_is_ready
+  local request_timeout="$1"
+  curl -fsS --connect-timeout "${request_timeout}" --max-time "${request_timeout}" "${ocr_runtime_url}" 2>/dev/null \
+    | ocr_runtime_payload_is_ready
 }
 
 server_readiness_probe() {
+  local deadline="$1"
   local java_status=0
   local ocr_status=0
-  java_health_ready || java_status=$?
-  ocr_runtime_ready || ocr_status=$?
+  local request_timeout
+
+  request_timeout="$(request_timeout_for_deadline "${deadline}")" || return 1
+  java_health_ready "${request_timeout}" || java_status=$?
+  request_timeout="$(request_timeout_for_deadline "${deadline}")" || return 1
+  ocr_runtime_ready "${request_timeout}" || ocr_status=$?
   [[ "${java_status}" -eq 0 && "${ocr_status}" -eq 0 ]]
 }
 
 startup_timeout_seconds() {
   printf '%s\n' "${QUESTION_ENGINE_STARTUP_TIMEOUT_SECONDS:-600}"
+}
+
+remaining_deadline_seconds() {
+  local deadline="$1"
+  local remaining=$((deadline - $(date +%s)))
+  printf '%s\n' "${remaining}"
+}
+
+request_timeout_for_deadline() {
+  local deadline="$1"
+  local remaining
+  remaining="$(remaining_deadline_seconds "${deadline}")"
+  if [[ "${remaining}" -le 0 ]]; then
+    return 1
+  fi
+  if [[ "${remaining}" -gt 5 ]]; then
+    remaining=5
+  fi
+  printf '%s\n' "${remaining}"
 }
 
 wait_for_server_readiness() {
@@ -106,22 +152,30 @@ wait_for_server_readiness() {
   fi
   deadline=$(( $(date +%s) + timeout_seconds ))
   while true; do
-    if server_readiness_probe; then
-      return 0
-    fi
-    if [[ "$(date +%s)" -ge "${deadline}" ]]; then
+    if [[ "$(remaining_deadline_seconds "${deadline}")" -le 0 ]]; then
       return 1
     fi
-    sleep "${poll_seconds}"
+    if server_readiness_probe "${deadline}"; then
+      return 0
+    fi
+    local remaining
+    remaining="$(remaining_deadline_seconds "${deadline}")"
+    if [[ "${remaining}" -le 0 ]]; then
+      return 1
+    fi
+    local sleep_seconds
+    sleep_seconds="$(awk -v poll="${poll_seconds}" -v remaining="${remaining}" \
+      'BEGIN { print (poll < remaining ? poll : remaining) }')"
+    sleep "${sleep_seconds}"
   done
 }
 
 show_startup_diagnostics() {
   echo "Java health response:" >&2
-  curl -sS "${health_url}" >&2 || true
+  curl -sS --connect-timeout 1 --max-time 1 "${health_url}" >&2 || true
   echo >&2
   echo "OCR runtime response:" >&2
-  curl -sS "${ocr_runtime_url}" >&2 || true
+  curl -sS --connect-timeout 1 --max-time 1 "${ocr_runtime_url}" >&2 || true
   echo >&2
   docker compose -f "${COMPOSE_FILE}" ps >&2 || true
   docker compose -f "${COMPOSE_FILE}" logs --tail=120 question-engine >&2 || true
@@ -139,8 +193,8 @@ require_server_readiness() {
     return 0
   fi
   echo "服务未在统一启动期限内就绪（Java + OCR runtime）" >&2
-  show_startup_diagnostics
   cleanup_failed_service
+  show_startup_diagnostics || true
   return "${status}"
 }
 
@@ -181,7 +235,7 @@ build_server_artifacts() {
 main() {
   cd "${ROOT_DIR}"
   load_environment
-  export MINERU_API_ENABLED="${MINERU_API_ENABLED:-true}"
+  normalize_mineru_api_enabled true
 
   need_command docker
   need_command curl

@@ -198,6 +198,20 @@ class MineruOcrProvider(OcrProvider):
         api_url = self._api_url()
         return f"{api_url.rstrip('/')}/openapi.json" if api_url else None
 
+    @staticmethod
+    def _open_api_url(url: str, timeout: float):
+        class RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, request, fp, code, message, headers, new_url):
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    code,
+                    f"MinerU OpenAPI redirect is not allowed: {new_url}",
+                    headers,
+                    fp,
+                )
+
+        return urllib.request.build_opener(RejectRedirectHandler()).open(url, timeout=timeout)
+
     def _probe_api(self) -> dict[str, Any]:
         openapi_url = self._api_openapi_url()
         result: dict[str, Any] = {
@@ -215,7 +229,7 @@ class MineruOcrProvider(OcrProvider):
             return result
 
         try:
-            with urllib.request.urlopen(openapi_url, timeout=3.0) as response:
+            with self._open_api_url(openapi_url, timeout=3.0) as response:
                 status = response.status
                 response_url = response.geturl()
                 if not isinstance(status, int):
@@ -616,7 +630,7 @@ class MineruOcrProvider(OcrProvider):
         """执行 status 逻辑。"""
         command, resolution = self.resolve_command()
         api_enabled = self._api_enabled()
-        api_required = api_enabled and check_api is not False
+        api_required = api_enabled if check_api is None else check_api
         if api_required:
             api_status = self._probe_api()
         else:

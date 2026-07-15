@@ -51,7 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
 
     ready = payload.get("installed") is True and payload.get("runtimeProbeOk") is True
-    if not args.skip_api and payload.get("apiEnabled") is True:
+    if args.check_api or (not args.skip_api and payload.get("apiEnabled") is True):
         ready = ready and payload.get("apiReady") is True
     return 0 if ready else 1
 

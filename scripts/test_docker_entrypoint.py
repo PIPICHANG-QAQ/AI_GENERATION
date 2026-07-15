@@ -201,6 +201,29 @@ start_optional_mineru_api
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertFalse(calls.exists())
 
+    def test_api_enabled_is_normalized_case_insensitively_and_invalid_values_fail(self):
+        completed = self._run_harness(
+            """
+set +e
+MINERU_API_ENABLED=TRUE
+normalize_mineru_api_enabled false
+upper_status=$?
+upper_value=$MINERU_API_ENABLED
+MINERU_API_ENABLED=False
+normalize_mineru_api_enabled false
+mixed_status=$?
+mixed_value=$MINERU_API_ENABLED
+MINERU_API_ENABLED=invalid
+normalize_mineru_api_enabled false
+invalid_status=$?
+printf '%s %s %s %s %s\n' "$upper_status" "$upper_value" "$mixed_status" "$mixed_value" "$invalid_status"
+"""
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("0 true 0 false 1", completed.stdout.strip())
+        self.assertIn("MINERU_API_ENABLED", completed.stderr)
+
     def test_readiness_timeout_cleans_api_process_before_main_exits(self):
         with tempfile.TemporaryDirectory() as tmp:
             child_pid_file = Path(tmp) / "api-child"

@@ -28,9 +28,9 @@ services:
       JAVA_STORAGE_LOCAL_ROOT: /data/java_files
       JAVA_DOMAIN_LIBRARY_STORE_PATH: /data/library_store.json
       OCR_FLOW_PROVIDER: mineru
-      MINERU_COMMAND: ${MINERU_COMMAND:-${HOST_MINERU_VENV:-${PWD}/vendor/mineru-venv}/bin/mineru}
+      MINERU_COMMAND: ${HOST_MINERU_VENV:-${PWD}/vendor/mineru-venv}/bin/mineru
       MINERU_API_ENABLED: ${MINERU_API_ENABLED:-true}
-      MINERU_API_COMMAND: ${MINERU_API_COMMAND:-${HOST_MINERU_VENV:-${PWD}/vendor/mineru-venv}/bin/mineru-api}
+      MINERU_API_COMMAND: ${HOST_MINERU_VENV:-${PWD}/vendor/mineru-venv}/bin/mineru-api
       MINERU_API_HOST: ${MINERU_API_HOST:-127.0.0.1}
       MINERU_API_PORT: ${MINERU_API_PORT:-8002}
       MINERU_API_URL: ${MINERU_API_URL:-http://127.0.0.1:8002}
@@ -79,8 +79,9 @@ services:
           curl -fsS http://127.0.0.1:8018/api/capabilities/ocr-flow/runtime |
           /opt/question-engine/venv/bin/python -c
           'import json,sys; s=json.load(sys.stdin)["providerStatus"];
+          e=s.get("apiEnabled");
           ok=s.get("installed") is True and s.get("runtimeProbeOk") is True
-          and (s.get("apiEnabled") is not True or s.get("apiReady") is True);
+          and (e is False or (e is True and s.get("apiReady") is True));
           raise SystemExit(0 if ok else 1)'
       interval: 30s
       timeout: 15s

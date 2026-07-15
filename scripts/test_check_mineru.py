@@ -68,8 +68,13 @@ class CheckMineruCliTest(unittest.TestCase):
             self.assertEqual(0, check_mineru.main(["--json", "--check-api"]))
             provider_status.assert_called_once_with(check_api=True)
 
-    def test_check_api_succeeds_when_api_mode_is_disabled(self):
+    def test_check_api_requires_readiness_when_api_mode_is_disabled(self):
         with mock.patch.object(check_mineru, "provider_status", return_value=self.RUNTIME_READY):
+            self.assertEqual(1, check_mineru.main(["--json", "--check-api"]))
+
+    def test_check_api_succeeds_for_forced_ready_disabled_mode(self):
+        forced_ready = {**self.RUNTIME_READY, "apiReady": True}
+        with mock.patch.object(check_mineru, "provider_status", return_value=forced_ready):
             self.assertEqual(0, check_mineru.main(["--json", "--check-api"]))
 
     def test_skip_api_succeeds_without_api_readiness(self):
