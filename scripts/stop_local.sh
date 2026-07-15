@@ -64,19 +64,35 @@ stop_pid() {
 }
 
 stop_pid_file() {
-  local service="$1"
-  local file="${PID_DIR}/${service}.pid"
-  [[ -f "${file}" ]] || return 0
+  local file="$1"
+  [[ -f "${file}" && ! -L "${file}" ]] || return 0
 
+  local content
   local pid
-  pid="$(tr -dc '0-9' < "${file}")"
-  if [[ -z "${pid}" ]]; then
-    rm -f "${file}"
+  content="$(<"${file}")"
+  if [[ "${content}" =~ ^[[:space:]]*([1-9][0-9]*)[[:space:]]*$ ]]; then
+    pid="${BASH_REMATCH[1]}"
+  else
+    rm -f -- "${file}"
     return 0
   fi
   if stop_pid "${pid}"; then
-    rm -f "${file}"
+    rm -f -- "${file}"
   fi
+}
+
+stop_pid_files() {
+  [[ -d "${PID_DIR}" ]] || return 0
+  local file
+  local name
+  local pattern='^(frontend|java-backend|python-worker)( [1-9][0-9]*)?\.pid$'
+  while IFS= read -r -d '' file; do
+    [[ "${file%/*}" == "${PID_DIR}" ]] || continue
+    [[ -f "${file}" && ! -L "${file}" ]] || continue
+    name="${file##*/}"
+    [[ "${name}" =~ ${pattern} ]] || continue
+    stop_pid_file "${file}"
+  done < <(find "${PID_DIR}" -type f -print0)
 }
 
 stop_screen_sessions() {
@@ -135,9 +151,7 @@ main() {
   for service in "${SERVICES[@]}"; do
     stop_screen_sessions "${service}"
   done
-  for service in "${SERVICES[@]}"; do
-    stop_pid_file "${service}"
-  done
+  stop_pid_files
 
   local ports=(
     "$(configured_port PYTHON_WORKER_PORT 8000)"

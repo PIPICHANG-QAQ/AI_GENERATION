@@ -85,6 +85,49 @@ def _run_bundle_deterministically(
         return OcrPostProcessingPipeline().run_bundle(bundle)
 
 
+def test_normalize_office_html_tables_preserves_plain_and_unclosed_table_text_exactly() -> None:
+    plain = "  plain markdown\n\n\n"
+    unclosed = (
+        "  before\n"
+        "<table><tr><td>1. complete table</td></tr></table>\n"
+        "<table><tr><td>2. unclosed table</td></tr>\n\n"
+    )
+
+    assert ocr_processing.normalize_office_html_tables(plain) == plain
+    assert ocr_processing.normalize_office_html_tables(unclosed) == unclosed
+
+
+def test_normalize_office_html_tables_preserves_commonmark_fences_and_inline_code() -> None:
+    markdown = (
+        "````html\n"
+        "<table><tr><td>99. backtick code</td></tr></table>\n"
+        "```\n"
+        "<table><tr><td>98. still fenced after short closer</td></tr></table>\n"
+        "`````\n"
+        "   ~~~html\n"
+        "<table><tr><td>97. tilde code</td></tr></table>\n"
+        "   ~~~\n"
+        "`<table><tr><td>96. inline code</td></tr></table>`\n"
+        "<table><tr><td><p>1. external question</p></td></tr></table>"
+    )
+    expected = markdown.rsplit("<table", 1)[0] + "1. external question"
+
+    assert ocr_processing.normalize_office_html_tables(markdown) == expected
+
+
+def test_normalize_office_html_tables_replaces_multiple_tables_without_touching_surroundings() -> None:
+    markdown = (
+        " \n\nlead\n"
+        "<table><tr><td><p>1. first</p></td></tr></table>\n\n\n"
+        "middle `code`\n"
+        "<TABLE class=\"sheet\"><TR><TH>2. second</TH></TR></TABLE>\n"
+        "tail\n\n "
+    )
+    expected = " \n\nlead\n1. first\n\n\nmiddle `code`\n2. second\ntail\n\n "
+
+    assert ocr_processing.normalize_office_html_tables(markdown) == expected
+
+
 def test_collect_outputs_facade_delegates_to_single_pipeline_instance() -> None:
     expected = {"questions": []}
 
@@ -417,6 +460,44 @@ def test_run_bundle_normalizes_office_html_table_before_question_boundaries(tmp_
     )
 
     assert outputs["markdown"] == "1. x + 1 = 2, find x.\nA. 0 B. 1 C. 2 D. 3"
+    assert len(outputs["questions"]) == 1
+    assert outputs["questions"][0]["number"] == 1
+
+
+def test_run_bundle_preserves_code_examples_while_normalizing_external_table(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    canonical_markdown = (
+        "```html\n"
+        "<table><tr><td>99. fenced example</td></tr></table>\n"
+        "```\n\n"
+        "`<table><tr><td>98. inline example</td></tr></table>`\n\n"
+        "<table>\n"
+        "  <tr><th><p>1. x + 1 = 2, find x.</p></th></tr>\n"
+        "  <tr><td><p>A. 0   B. 1   C. 2   D. 3</p></td></tr>\n"
+        "</table>"
+    )
+    bundle = CanonicalOcrBundle(
+        document_id="mixed-code-and-office-table",
+        input_sha256="sha",
+        canonical_markdown=canonical_markdown,
+        artifact_root=str(artifact_root),
+    )
+
+    outputs = _run_bundle_deterministically(
+        bundle,
+        tmp_path / "outputs",
+        tmp_path / "postprocess",
+        visual_enabled=False,
+    )
+
+    assert outputs["markdown"] == (
+        "```html\n"
+        "<table><tr><td>99. fenced example</td></tr></table>\n"
+        "```\n\n"
+        "`<table><tr><td>98. inline example</td></tr></table>`\n\n"
+        "1. x + 1 = 2, find x.\nA. 0 B. 1 C. 2 D. 3"
+    )
     assert len(outputs["questions"]) == 1
     assert outputs["questions"][0]["number"] == 1
 

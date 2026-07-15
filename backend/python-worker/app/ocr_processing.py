@@ -34,7 +34,8 @@ from app.visual_repair import (
 from app.ocr.contracts import CanonicalOcrBundle, validate_bundle_artifact_paths
 
 
-HTML_TABLE_PATTERN = re.compile(r"<table\b[^>]*>.*?</table\s*>", re.IGNORECASE | re.DOTALL)
+COMMONMARK_FENCE_OPEN_PATTERN = re.compile(r"^ {0,3}(`{3,}|~{3,})([^\r\n]*)$")
+BACKTICK_RUN_PATTERN = re.compile(r"`+")
 
 
 class _HtmlTableTextExtractor(HTMLParser):
@@ -67,19 +68,154 @@ class _HtmlTableTextExtractor(HTMLParser):
         return "\n".join(self._lines)
 
 
+class _HtmlTableSpanLocator(HTMLParser):
+    def __init__(self, source: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self._source = source
+        self._line_offsets = [0, *(match.end() for match in re.finditer("\n", source))]
+        self._depth = 0
+        self._start: int | None = None
+        self.spans: list[tuple[int, int]] = []
+
+    def _offset(self) -> int:
+        line, column = self.getpos()
+        return self._line_offsets[line - 1] + column
+
+    def handle_starttag(self, tag: str, _attrs) -> None:
+        if tag.lower() != "table":
+            return
+        if self._depth == 0:
+            self._start = self._offset()
+        self._depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "table" or self._depth == 0:
+            return
+        self._depth -= 1
+        if self._depth != 0 or self._start is None:
+            return
+        end_match = re.match(r"</table\s*>", self._source[self._offset() :], re.IGNORECASE)
+        if end_match is None:
+            self._depth = 1
+            return
+        self.spans.append((self._start, self._offset() + end_match.end()))
+        self._start = None
+
+    @property
+    def has_unclosed_table(self) -> bool:
+        return self._depth != 0
+
+
+def _line_content(line: str) -> str:
+    if line.endswith("\n"):
+        line = line[:-1]
+        if line.endswith("\r"):
+            line = line[:-1]
+    elif line.endswith("\r"):
+        line = line[:-1]
+    return line
+
+
+def _fenced_code_ranges(markdown: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    fence_start: int | None = None
+    fence_character = ""
+    fence_length = 0
+    offset = 0
+
+    for line in markdown.splitlines(keepends=True):
+        content = _line_content(line)
+        if fence_start is None:
+            opening = COMMONMARK_FENCE_OPEN_PATTERN.fullmatch(content)
+            if opening is not None:
+                fence = opening.group(1)
+                info = opening.group(2)
+                if fence[0] == "~" or "`" not in info:
+                    fence_start = offset
+                    fence_character = fence[0]
+                    fence_length = len(fence)
+        else:
+            closing = re.fullmatch(
+                rf" {{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*",
+                content,
+            )
+            if closing is not None:
+                ranges.append((fence_start, offset + len(line)))
+                fence_start = None
+                fence_character = ""
+                fence_length = 0
+        offset += len(line)
+
+    if fence_start is not None:
+        ranges.append((fence_start, len(markdown)))
+    return ranges
+
+
+def _inline_code_ranges(markdown: str, start: int, end: int) -> list[tuple[int, int]]:
+    runs = list(BACKTICK_RUN_PATTERN.finditer(markdown, start, end))
+    ranges: list[tuple[int, int]] = []
+    index = 0
+    while index < len(runs):
+        opening = runs[index]
+        closing_index = index + 1
+        while closing_index < len(runs) and len(runs[closing_index].group(0)) != len(opening.group(0)):
+            closing_index += 1
+        if closing_index == len(runs):
+            index += 1
+            continue
+        ranges.append((opening.start(), runs[closing_index].end()))
+        index = closing_index + 1
+    return ranges
+
+
+def _markdown_code_ranges(markdown: str) -> list[tuple[int, int]]:
+    fenced = _fenced_code_ranges(markdown)
+    protected = list(fenced)
+    cursor = 0
+    for start, end in fenced:
+        protected.extend(_inline_code_ranges(markdown, cursor, start))
+        cursor = end
+    protected.extend(_inline_code_ranges(markdown, cursor, len(markdown)))
+    return sorted(protected)
+
+
+def _mask_markdown_ranges(markdown: str, ranges: list[tuple[int, int]]) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in ranges:
+        pieces.append(markdown[cursor:start])
+        pieces.append(re.sub(r"[^\r\n]", " ", markdown[start:end]))
+        cursor = end
+    pieces.append(markdown[cursor:])
+    return "".join(pieces)
+
+
 def normalize_office_html_tables(markdown: str) -> str:
     """Expose Office table cell text to the existing Markdown boundary parser."""
     if "<table" not in markdown.lower():
         return markdown
 
-    def replace_table(match: re.Match[str]) -> str:
+    visible_markdown = _mask_markdown_ranges(markdown, _markdown_code_ranges(markdown))
+    locator = _HtmlTableSpanLocator(visible_markdown)
+    locator.feed(visible_markdown)
+    locator.close()
+    if locator.has_unclosed_table or not locator.spans:
+        return markdown
+
+    def replace_table(table: str) -> str:
         parser = _HtmlTableTextExtractor()
-        parser.feed(match.group(0))
+        parser.feed(table)
         parser.close()
         return parser.text()
 
-    normalized = HTML_TABLE_PATTERN.sub(replace_table, markdown)
-    return re.sub(r"\n{3,}", "\n\n", normalized).strip()
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in locator.spans:
+        pieces.append(markdown[cursor:start])
+        pieces.append(replace_table(markdown[start:end]))
+        cursor = end
+    pieces.append(markdown[cursor:])
+    return "".join(pieces)
 
 
 def build_postprocess_input(bundle: CanonicalOcrBundle) -> dict[str, Any]:

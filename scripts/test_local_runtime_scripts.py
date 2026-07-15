@@ -127,6 +127,107 @@ class LocalRuntimeScriptsTest(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("refusing to stop non-project PID", completed.stderr)
 
+    def test_stop_local_removes_duplicate_stale_and_invalid_pid_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = self._temporary_stop_script(root)
+            exited = self._start_sleep(root)
+            exited.terminate()
+            exited.wait(timeout=2)
+            stale_file = root / ".run" / "pids" / "frontend 2.pid"
+            invalid_file = root / ".run" / "pids" / "java-backend 3.pid"
+            stale_file.write_text(f"{exited.pid}\n", encoding="utf-8")
+            invalid_file.write_text("12 invalid\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                ["bash", str(script)],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertFalse(stale_file.exists())
+            self.assertFalse(invalid_file.exists())
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_stop_local_terminates_project_process_from_duplicate_pid_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = self._temporary_stop_script(root)
+            process = self._start_sleep(root)
+            self.addCleanup(self._terminate_process, process)
+            pid_file = root / ".run" / "pids" / "python-worker 7.pid"
+            pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                ["bash", str(script)],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self._wait_for_exit(process)
+            self.assertFalse(pid_file.exists())
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
+    def test_stop_local_refuses_external_process_from_duplicate_pid_file(self) -> None:
+        with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as external_tmp:
+            root = Path(project_tmp)
+            script = self._temporary_stop_script(root)
+            process = self._start_sleep(Path(external_tmp))
+            self.addCleanup(self._terminate_process, process)
+            pid_file = root / ".run" / "pids" / "frontend 9.pid"
+            pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                ["bash", str(script)],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertIsNone(process.poll())
+            self.assertTrue(pid_file.is_file())
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("refusing to stop non-project PID", completed.stderr)
+
+    def test_stop_local_ignores_unrelated_files_and_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = self._temporary_stop_script(root)
+            pid_dir = root / ".run" / "pids"
+            unrelated = [
+                pid_dir / "frontend-evil.pid",
+                pid_dir / "frontend 0.pid",
+                pid_dir / "frontend 01.pid",
+                pid_dir / "notes with spaces.txt",
+            ]
+            for path in unrelated:
+                path.write_text("invalid\n", encoding="utf-8")
+            target = pid_dir / "external-target.pid"
+            target.write_text("invalid\n", encoding="utf-8")
+            symlink = pid_dir / "java-backend 2.pid"
+            symlink.symlink_to(target)
+
+            completed = subprocess.run(
+                ["bash", str(script)],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertTrue(all(path.is_file() for path in unrelated))
+            self.assertTrue(symlink.is_symlink())
+            self.assertEqual("invalid\n", target.read_text(encoding="utf-8"))
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+
     def test_stop_local_stops_every_duplicate_screen_session_by_full_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as external_tmp:
             root = Path(tmp)
