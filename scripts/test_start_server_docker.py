@@ -17,7 +17,9 @@ from pathlib import Path
 
 
 SCRIPT_PATH = Path(__file__).with_name("start_server_docker.sh").resolve()
+ENTRYPOINT_PATH = SCRIPT_PATH.with_name("docker-entrypoint.sh")
 COMPOSE_PATH = SCRIPT_PATH.parents[1] / "docker-compose.server.yml"
+ENV_EXAMPLE_PATH = SCRIPT_PATH.parents[1] / ".env.example"
 HEALTH_PAYLOAD_CASES = (
     (
         "disabled",
@@ -272,6 +274,58 @@ class StartServerDockerTest(unittest.TestCase):
                     self.assertIn("MINERU_API_ENABLED", completed.stderr)
                     self.assertIn("exactly true or false", completed.stderr)
                     self.assertIn("surrounding whitespace", completed.stderr)
+
+    def test_launcher_effective_api_mode_matches_direct_compose_default(self) -> None:
+        compose = COMPOSE_PATH.read_text(encoding="utf-8")
+        self.assertIn("MINERU_API_ENABLED: ${MINERU_API_ENABLED:-true}", compose)
+        self.assertIn("MINERU_API_ENABLED=true", ENV_EXAMPLE_PATH.read_text(encoding="utf-8").splitlines())
+        cases = (
+            (None, "true", 0),
+            ("", "true", 0),
+            ("false", "false", 0),
+            ("False", "false", 0),
+            ("invalid", None, 1),
+            (" TRUE ", None, 1),
+        )
+        for raw_value, expected_value, expected_status in cases:
+            with self.subTest(raw_value=raw_value):
+                assignment = "unset MINERU_API_ENABLED" if raw_value is None else f"MINERU_API_ENABLED={raw_value!r}"
+                launcher = self.run_bash(
+                    f"""
+                    load_environment() {{ :; }}
+                    need_command() {{ :; }}
+                    docker() {{ :; }}
+                    configure_mineru_environment() {{ :; }}
+                    configure_public_urls() {{ PUBLIC_HOST=test; HTTP_PORT=80; }}
+                    host_mineru_preflight() {{ printf '%s\n' "$MINERU_API_ENABLED"; }}
+                    build_server_artifacts() {{ :; }}
+                    require_server_readiness() {{ :; }}
+                    {assignment}
+                    main
+                    """
+                )
+                direct_compose = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        f"""
+                        source "{ENTRYPOINT_PATH}"
+                        {assignment}
+                        MINERU_API_ENABLED="${{MINERU_API_ENABLED:-true}}"
+                        normalize_mineru_api_enabled
+                        printf '%s\n' "$MINERU_API_ENABLED"
+                        """,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertEqual(expected_status, launcher.returncode, launcher.stderr)
+                self.assertEqual(expected_status, direct_compose.returncode, direct_compose.stderr)
+                if expected_value is not None:
+                    self.assertEqual(expected_value, launcher.stdout.splitlines()[0])
+                    self.assertEqual(expected_value, direct_compose.stdout.strip())
 
     def test_hard_deadline_bounds_hanging_http_and_cleanup_runs(self) -> None:
         class HangingHandler(BaseHTTPRequestHandler):

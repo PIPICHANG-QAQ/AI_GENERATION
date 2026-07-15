@@ -239,6 +239,7 @@ build_server_artifacts() {
 main() {
   cd "${ROOT_DIR}"
   load_environment
+  MINERU_API_ENABLED="${MINERU_API_ENABLED:-true}"
   normalize_mineru_api_enabled
 
   need_command docker
