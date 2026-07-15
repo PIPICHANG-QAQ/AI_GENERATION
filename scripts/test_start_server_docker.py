@@ -20,6 +20,13 @@ SCRIPT_PATH = Path(__file__).with_name("start_server_docker.sh").resolve()
 ENTRYPOINT_PATH = SCRIPT_PATH.with_name("docker-entrypoint.sh")
 COMPOSE_PATH = SCRIPT_PATH.parents[1] / "docker-compose.server.yml"
 ENV_EXAMPLE_PATH = SCRIPT_PATH.parents[1] / ".env.example"
+RECOVERY_PLAN_PATH = (
+    SCRIPT_PATH.parents[1]
+    / "docs"
+    / "superpowers"
+    / "plans"
+    / "2026-07-15-production-recovery-and-ocr-readiness.md"
+)
 HEALTH_PAYLOAD_CASES = (
     (
         "disabled",
@@ -132,6 +139,36 @@ class StartServerDockerTest(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return server
+
+    def test_server_artifact_build_cleans_maven_output_before_packaging(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            maven_args = root / "maven-args"
+            completed = self.run_bash(
+                f"""
+                ROOT_DIR='{root}'
+                mkdir -p "$ROOT_DIR/backend" "$ROOT_DIR/local-platform/node_modules"
+                cd "$ROOT_DIR"
+                mvn() {{
+                  printf '%s\n' "$*" >'{maven_args}'
+                  mkdir -p target
+                  : >target/ai-question-bank-test.jar
+                }}
+                npm() {{ :; }}
+                build_server_artifacts
+                """
+            )
+
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual("clean -DskipTests package", maven_args.read_text(encoding="utf-8").strip())
+
+    def test_task8_java_build_cleans_preserved_target_before_packaging(self) -> None:
+        plan = RECOVERY_PLAN_PATH.read_text(encoding="utf-8")
+        task8 = plan.split("## Task 8", 1)[1].split("## Task 9", 1)[0]
+        self.assertIn(
+            'mvn -f backend/pom.xml clean -DskipTests package',
+            task8,
+        )
 
     def test_default_host_venv_drives_every_mineru_command(self) -> None:
         completed = self.run_bash(
