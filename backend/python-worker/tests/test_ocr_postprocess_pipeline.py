@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,25 @@ def _write_fill_blank_source(path: Path) -> None:
     draw.text((20, 20), "1. complete ____", fill="black")
     draw.line((80, 80, 250, 80), fill="black", width=2)
     image.save(path)
+
+
+def _scratch_job_dir(postprocess_root: Path, document_id: str) -> Path:
+    digest = hashlib.sha256(document_id.encode("utf-8")).hexdigest()
+    return postprocess_root / f"job-{digest}"
+
+
+def _canonical_visual_bundle(document_id: str, artifact_root: Path, source: Path) -> CanonicalOcrBundle:
+    return CanonicalOcrBundle(
+        document_id=document_id,
+        input_sha256="sha",
+        canonical_markdown="# 填空题\n\n1. complete ____",
+        pages=(OcrPage(0, 320, 180),),
+        layout_blocks=(
+            OcrLayoutBlock("question-1", "text", 0, (0, 0, 300, 150), 320, 180, 0, text="1. complete ____"),
+        ),
+        source_document_ref=SourceDocumentRef(path=str(source)),
+        artifact_root=str(artifact_root),
+    )
 
 
 def _run_bundle_deterministically(
@@ -381,17 +401,7 @@ def test_run_bundle_writes_derived_crop_only_to_worker_scratch_with_read_only_ar
     artifact_root.mkdir(parents=True)
     source = tmp_path / "paper.png"
     _write_fill_blank_source(source)
-    bundle = CanonicalOcrBundle(
-        document_id=job_id,
-        input_sha256="sha",
-        canonical_markdown="# 填空题\n\n1. complete ____",
-        pages=(OcrPage(0, 320, 180),),
-        layout_blocks=(
-            OcrLayoutBlock("question-1", "text", 0, (0, 0, 300, 150), 320, 180, 0, text="1. complete ____"),
-        ),
-        source_document_ref=SourceDocumentRef(path=str(source)),
-        artifact_root=str(artifact_root),
-    )
+    bundle = _canonical_visual_bundle(job_id, artifact_root, source)
     postprocess_root = tmp_path / "postprocess"
     artifact_root.chmod(0o555)
     try:
@@ -400,9 +410,90 @@ def test_run_bundle_writes_derived_crop_only_to_worker_scratch_with_read_only_ar
         artifact_root.chmod(0o755)
 
     assert outputs["visualRepair"]["cropCount"] == 1
-    crops = list((postprocess_root / job_id).rglob("*.png"))
+    crops = list(_scratch_job_dir(postprocess_root, job_id).rglob("*.png"))
     assert len(crops) == 1
     assert not (artifact_root / "visual_repair").exists()
+
+
+@pytest.mark.parametrize(
+    "document_id_kind",
+    [
+        "posix-traversal",
+        "posix-absolute",
+        "windows-drive-backslash",
+        "windows-drive-forward-slash",
+        "windows-parent-backslash",
+        "windows-unc",
+    ],
+)
+def test_run_bundle_hashes_untrusted_document_id_before_selecting_scratch_directory(
+    tmp_path: Path,
+    document_id_kind: str,
+) -> None:
+    postprocess_root = tmp_path / "postprocess"
+    outside = tmp_path / "outside"
+    document_ids = {
+        "posix-traversal": "../outside-traversal",
+        "posix-absolute": str(outside / "absolute-job"),
+        "windows-drive-backslash": r"C:\outside\job",
+        "windows-drive-forward-slash": "C:/outside/job",
+        "windows-parent-backslash": r"..\outside\job",
+        "windows-unc": r"\\server\share\job",
+    }
+    document_id = document_ids[document_id_kind]
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    source = tmp_path / "paper.png"
+    _write_fill_blank_source(source)
+    bundle = _canonical_visual_bundle(document_id, artifact_root, source)
+
+    outputs = _run_bundle_deterministically(bundle, tmp_path / "outputs", postprocess_root)
+
+    expected_job_dir = _scratch_job_dir(postprocess_root, document_id)
+    assert outputs["visualRepair"]["cropCount"] == 1
+    assert len(list(expected_job_dir.rglob("*.png"))) == 1
+    assert sorted(path.name for path in postprocess_root.iterdir()) == [expected_job_dir.name]
+    assert not outside.exists()
+    assert not (tmp_path / "outside-traversal").exists()
+
+
+def test_run_bundle_rejects_preexisting_scratch_job_directory_symlink(tmp_path: Path) -> None:
+    document_id = "job-dir-symlink"
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    source = tmp_path / "paper.png"
+    _write_fill_blank_source(source)
+    bundle = _canonical_visual_bundle(document_id, artifact_root, source)
+    postprocess_root = tmp_path / "postprocess"
+    postprocess_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _scratch_job_dir(postprocess_root, document_id).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        _run_bundle_deterministically(bundle, tmp_path / "outputs", postprocess_root)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_run_bundle_rejects_preexisting_crop_file_symlink(tmp_path: Path) -> None:
+    document_id = "crop-file-symlink"
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    source = tmp_path / "paper.png"
+    _write_fill_blank_source(source)
+    bundle = _canonical_visual_bundle(document_id, artifact_root, source)
+    postprocess_root = tmp_path / "postprocess"
+    crop_dir = _scratch_job_dir(postprocess_root, document_id) / "visual_repair"
+    crop_dir.mkdir(parents=True)
+    outside_file = tmp_path / "outside.png"
+    outside_file.write_bytes(b"sentinel")
+    (crop_dir / "000_q_1.png").symlink_to(outside_file)
+
+    with pytest.raises(ValueError, match="symlink"):
+        _run_bundle_deterministically(bundle, tmp_path / "outputs", postprocess_root)
+
+    assert outside_file.read_bytes() == b"sentinel"
 
 
 def test_legacy_collect_and_adapter_bundle_have_real_artifact_level_parity(tmp_path: Path) -> None:

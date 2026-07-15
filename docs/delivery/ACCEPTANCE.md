@@ -71,7 +71,7 @@
 - 非法 schema、缺失 Markdown/`artifactRoot`、不存在的根目录、无法解析的图片引用、绝对/越界/不存在的已声明 artifact path 和错误 bbox 必须在进入后处理前以 `CanonicalOcrBundleError` 失败；`sourceDocumentRef.path` 不受根目录包含性约束。
 - 默认 MinerU adapter 的 `run(jobId)` 与等价 bundle 的 `run_bundle(bundle)` 必须在确定性工件测试中保持归一化 outputs 一致，并确认两条路径均执行真实 `collect_outputs_impl()`。
 - 显式 bundle 加入未声明的 `*_content_list_v2.json`（含指向 root 外的 symlink）、`*_content_list.json` 或 `*_middle.json` 后 outputs 必须不变；bundle 路径不得调用 provider-native rglob/load helper。
-- `artifactRoot` 只读时 `run_bundle()` 必须仍可完成，派生视觉 crop 只能出现在 `PYTHON_WORKER_STORAGE_ROOT/postprocess/<jobId>`。
+- `artifactRoot` 只读时 `run_bundle()` 必须仍可完成，派生视觉 crop 只能出现在 `PYTHON_WORKER_STORAGE_ROOT/postprocess/job-<sha256(documentId)>`；路径组件和 crop 目标为 symlink 时必须拒绝且不得写到 root 外。
 - 替换 provider 的受控真实语料 gate 必须比较题数、选项、小问、题图 placement、公式、LLM/OCR 调用数量与延迟，不得只比较任务是否成功；该 gate 当前仍待执行。
 - `tests/ocrflow-performance/baseline-ref.json` 为 `pending-controlled-baseline` 时，性能验收保持未完成，不得现场录制或伪造 compare 基线。
 - `GET /api/capabilities/ocr-flow/runtime` 在 Python worker 可达时必须返回 `selectedProvider`、`availableProviders`、`allowedExtensions` 和 provider 状态。

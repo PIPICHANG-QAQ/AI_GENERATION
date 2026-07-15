@@ -6,12 +6,14 @@ Pix2Text 或其它备用 OCR 覆盖高置信主链路结果。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,72 @@ from app.question_markdown import (
 
 QUESTION_NUMBER_PREFIX_RE = re.compile(r"^\s*(?:#{1,6}\s*)?(\d{1,3})[\.．、]\s*")
 TRACEBACK_RE = re.compile(r"traceback|exception|error:", re.I)
+
+
+class VisualRepairScratchError(ValueError):
+    """Raised when visual-repair scratch storage is not a safe real directory."""
+
+
+def build_postprocess_scratch_dir(postprocess_root: Path, document_id: str) -> Path:
+    """Create a contained job scratch directory without using documentId as a path component."""
+    if postprocess_root.is_symlink():
+        raise VisualRepairScratchError("postprocess scratch root must not be a symlink")
+    postprocess_root.mkdir(parents=True, exist_ok=True)
+    if postprocess_root.is_symlink() or not postprocess_root.is_dir():
+        raise VisualRepairScratchError("postprocess scratch root must be a real directory")
+    resolved_root = postprocess_root.resolve(strict=True)
+    digest = hashlib.sha256(document_id.encode("utf-8")).hexdigest()
+    job_dir = postprocess_root / f"job-{digest}"
+    if job_dir.is_symlink():
+        raise VisualRepairScratchError("postprocess scratch job directory must not be a symlink")
+    job_dir.mkdir(exist_ok=True)
+    if job_dir.is_symlink() or not job_dir.is_dir():
+        raise VisualRepairScratchError("postprocess scratch job path must be a real directory")
+    resolved_job_dir = job_dir.resolve(strict=True)
+    try:
+        resolved_job_dir.relative_to(resolved_root)
+    except ValueError as exc:
+        raise VisualRepairScratchError("postprocess scratch job directory escapes its root") from exc
+    return resolved_job_dir
+
+
+def safe_scratch_child_directory(root: Path, name: str) -> Path:
+    """Create one real child directory and validate that it stays inside root."""
+    if root.is_symlink() or not root.is_dir():
+        raise VisualRepairScratchError("visual repair scratch root must be a real directory")
+    resolved_root = root.resolve(strict=True)
+    child = root / name
+    if child.is_symlink():
+        raise VisualRepairScratchError(f"visual repair scratch component must not be a symlink: {name}")
+    child.mkdir(exist_ok=True)
+    if child.is_symlink() or not child.is_dir():
+        raise VisualRepairScratchError(f"visual repair scratch component must be a real directory: {name}")
+    resolved_child = child.resolve(strict=True)
+    try:
+        resolved_child.relative_to(resolved_root)
+    except ValueError as exc:
+        raise VisualRepairScratchError(f"visual repair scratch component escapes its root: {name}") from exc
+    return resolved_child
+
+
+def save_crop_without_following_symlinks(crop: Image.Image, crop_path: Path) -> None:
+    """Atomically replace a real crop file without ever writing through a symlink target."""
+    if crop_path.is_symlink():
+        raise VisualRepairScratchError(f"visual repair crop target must not be a symlink: {crop_path.name}")
+    temporary = crop_path.parent / f".{crop_path.name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            descriptor = -1
+            crop.save(file, format="PNG")
+        if crop_path.is_symlink():
+            raise VisualRepairScratchError(f"visual repair crop target must not be a symlink: {crop_path.name}")
+        os.replace(temporary, crop_path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def apply_visual_repairs(
@@ -81,10 +149,16 @@ def apply_visual_repairs(
         "warnings": list(repair_context.get("warnings") or []),
     }
 
-    crop_root = scratch_dir or output_dir
+    crop_root = (scratch_dir or output_dir).resolve(strict=True)
     crop_dir = crop_root / "visual_repair"
     if candidates:
-        crop_dir.mkdir(parents=True, exist_ok=True)
+        crop_dir = safe_scratch_child_directory(crop_root, "visual_repair")
+        for index, question in candidates:
+            crop_path = crop_dir / f"{index:03d}_{safe_crop_name(question)}.png"
+            if crop_path.is_symlink():
+                raise VisualRepairScratchError(
+                    f"visual repair crop target must not be a symlink: {crop_path.name}"
+                )
 
     if max_workers > 1 and len(candidates) > 1:
         results: list[dict[str, Any]] = []
@@ -220,7 +294,7 @@ def repair_visual_question(
             return result
 
         crop_path = crop_dir / f"{index:03d}_{safe_crop_name(question)}.png"
-        crop.save(crop_path)
+        save_crop_without_following_symlinks(crop, crop_path)
         result["cropCount"] = 1
 
         underlines = detect_underline_segments(crop)

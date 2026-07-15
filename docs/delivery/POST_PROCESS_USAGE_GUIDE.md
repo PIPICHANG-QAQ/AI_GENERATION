@@ -161,7 +161,7 @@ app/ocr/
 - `mathValidation`、边界置信度和人工复核原因；
 - 现有标准化、AI 补全及指标元数据。
 
-视觉修复产生的 crop 属于 worker 派生 scratch，写入 `PYTHON_WORKER_STORAGE_ROOT/postprocess/<jobId>/visual_repair`，不会写入只读 `artifactRoot`，也不会进入 provider 证据契约。
+视觉修复产生的 crop 属于 worker 派生 scratch，写入 `PYTHON_WORKER_STORAGE_ROOT/postprocess/job-<sha256(documentId)>/visual_repair`。documentId 不直接成为路径组件，scratch 目录和 crop 目标 symlink 会被拒绝；派生文件不会写入只读 `artifactRoot`，也不会进入 provider 证据契约。
 
 provider 替换不得要求 Java API、前端工作台或题库模型理解 provider 私有结构。
 

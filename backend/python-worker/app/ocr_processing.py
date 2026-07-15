@@ -26,6 +26,7 @@ from app.image_placement import reconcile_structure_image_placements
 from app.question_layout import load_image_placement_evidence
 from app.visual_repair import (
     apply_visual_repairs,
+    build_postprocess_scratch_dir,
     prepare_canonical_visual_repair_context,
     prepare_visual_repair_context,
 )
@@ -521,7 +522,7 @@ def collect_outputs_impl(job_id: str, bundle: CanonicalOcrBundle | None = None) 
             upload_path,
             job_id,
             visual_repair_context,
-            scratch_dir=POSTPROCESS_ROOT / job_id,
+            scratch_dir=build_postprocess_scratch_dir(POSTPROCESS_ROOT, job_id),
         )
         visual_status = "success" if visual_repair.get("enabled", True) else "skipped"
         preprocessed = visual_repair.get("preprocessed") or {}
