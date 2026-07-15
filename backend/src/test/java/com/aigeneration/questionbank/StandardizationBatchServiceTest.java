@@ -160,7 +160,12 @@ class StandardizationBatchServiceTest {
 
     @Test
     void createBuildsOneItemPerCanonicalQuestionAndRejectsSecondActiveJob() {
+        StandardizationBatchJobEntity active = new StandardizationBatchJobEntity();
+        active.setId("active-job");
+        active.setTaskId("task-1");
+        active.setStatus("running");
         when(questionService.listByTask("task-1")).thenReturn(List.of(question("q1"), question("q2")));
+        when(jobMapper.selectActiveByTaskId("task-1")).thenReturn(null, active);
 
         Map<String, Object> created = service.create("task-1");
 
@@ -169,12 +174,8 @@ class StandardizationBatchServiceTest {
         verify(jobMapper).insert(any(StandardizationBatchJobEntity.class));
         verify(itemMapper, org.mockito.Mockito.times(2)).insert(org.mockito.ArgumentMatchers.argThat(item -> item.getTotalItems() == 1));
 
-        StandardizationBatchJobEntity active = new StandardizationBatchJobEntity();
-        active.setId("active-job");
-        active.setTaskId("task-1");
-        active.setStatus("running");
-        when(jobMapper.selectActiveByTaskId("task-1")).thenReturn(active);
         assertThrows(ResponseStatusException.class, () -> service.create("task-1"));
+        verify(jobMapper, org.mockito.Mockito.times(2)).selectActiveByTaskId("task-1");
     }
 
     @Test

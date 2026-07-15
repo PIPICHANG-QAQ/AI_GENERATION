@@ -9,6 +9,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -20,6 +22,99 @@ from ocrflow_golden import (
     main,
     validate_controlled_corpus,
 )
+
+
+EXPECTED_GOLDEN_MANIFEST = "tests/ocrflow-golden/manifest.json"
+GOLDEN_ARTIFACT_OUTPUT_RE = re.compile(r"\.artifacts/recovery/[^/\s]+\.json\Z")
+
+
+def parse_ocrflow_plan_commands(task_markdown: str) -> list[list[str]]:
+    """Parse multiline OCR Flow CLI commands from one plan task."""
+    commands: list[list[str]] = []
+    lines = task_markdown.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line.startswith("python3 scripts/ocrflow_golden.py "):
+            index += 1
+            continue
+        fragments: list[str] = []
+        while True:
+            continued = line.endswith("\\")
+            fragments.append(line[:-1].rstrip() if continued else line)
+            if not continued:
+                break
+            index += 1
+            if index >= len(lines):
+                raise ValueError("unterminated OCR Flow command")
+            line = lines[index].strip()
+        commands.append(shlex.split(" ".join(fragments)))
+        index += 1
+    return commands
+
+
+def require_single_option(command: list[str], option: str) -> str:
+    positions = [index for index, token in enumerate(command) if token == option]
+    if len(positions) != 1:
+        raise ValueError(f"expected exactly one {option}")
+    position = positions[0]
+    if position + 1 >= len(command) or command[position + 1].startswith("--"):
+        raise ValueError(f"missing value for {option}")
+    return command[position + 1]
+
+
+def validate_recovery_plan_golden_commands(
+    task_markdown: str,
+) -> tuple[list[list[str]], list[str], list[str]]:
+    commands = parse_ocrflow_plan_commands(task_markdown)
+    captures = [command for command in commands if command[2:3] == ["capture"]]
+    compares = [command for command in commands if command[2:3] == ["compare"]]
+    if len(captures) != 2:
+        raise ValueError("Task 5 must contain exactly two capture commands")
+    if len(compares) != 1:
+        raise ValueError("Task 5 must contain exactly one compare command")
+
+    capture_outputs: list[str] = []
+    for capture in captures:
+        if require_single_option(capture, "--manifest") != EXPECTED_GOLDEN_MANIFEST:
+            raise ValueError("capture must use the controlled golden manifest")
+        if require_single_option(capture, "--mode") != "replay":
+            raise ValueError("capture must use replay mode")
+        output = require_single_option(capture, "--output")
+        if not GOLDEN_ARTIFACT_OUTPUT_RE.fullmatch(output):
+            raise ValueError("capture output must be a recovery JSON artifact")
+        capture_outputs.append(output)
+    if len(set(capture_outputs)) != 2:
+        raise ValueError("capture outputs must be different files")
+
+    compare = compares[0]
+    if "--manifest" in compare:
+        raise ValueError("pair compare must not use a manifest")
+    baseline = require_single_option(compare, "--baseline")
+    candidate = require_single_option(compare, "--candidate")
+    if baseline == candidate or [baseline, candidate] != capture_outputs:
+        raise ValueError("compare inputs must map to the two capture outputs")
+    return captures, compare, capture_outputs
+
+
+def remove_first_command_block(task_markdown: str, command_start: str) -> str:
+    lines = task_markdown.splitlines(keepends=True)
+    for start, line in enumerate(lines):
+        if line.strip() != command_start:
+            continue
+        end = start
+        while lines[end].rstrip().endswith("\\"):
+            end += 1
+        return "".join(lines[:start] + lines[end + 1:])
+    raise ValueError(f"command not found: {command_start}")
+
+
+def remove_first_line_containing(text: str, needle: str) -> str:
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if needle in line:
+            return "".join(lines[:index] + lines[index + 1:])
+    raise ValueError(f"line not found: {needle}")
 
 
 class ComparatorTest(unittest.TestCase):
@@ -150,40 +245,44 @@ class CliTest(unittest.TestCase):
             / "2026-07-15-production-recovery-and-ocr-readiness.md"
         ).read_text(encoding="utf-8")
         task = plan.split("## Task 5", 1)[1].split("## Task 6", 1)[0]
-        compare_command = task.split("python3 scripts/ocrflow_golden.py compare \\", 1)[1].split("```", 1)[0]
-        task_lines = task.splitlines()
-        capture_command = "python3 scripts/ocrflow_golden.py capture \\"
-        capture_starts = [
-            index for index, line in enumerate(task_lines) if line == capture_command
-        ]
-        self.assertEqual(2, len(capture_starts))
-        capture_outputs = []
-        for start in capture_starts:
-            command_lines = [task_lines[start]]
-            while command_lines[-1].endswith("\\"):
-                command_lines.append(task_lines[start + len(command_lines)])
-            outputs = [
-                line.strip().split(maxsplit=1)[1].rstrip(" \\")
-                for line in command_lines
-                if line.strip().startswith("--output ")
-            ]
-            self.assertEqual(1, len(outputs))
-            capture_outputs.append(outputs[0])
-        baseline = next(
-            line.strip().split(maxsplit=1)[1].rstrip(" \\")
-            for line in compare_command.splitlines()
-            if line.strip().startswith("--baseline ")
-        )
-        candidate = next(
-            line.strip().split(maxsplit=1)[1].rstrip(" \\")
-            for line in compare_command.splitlines()
-            if line.strip().startswith("--candidate ")
-        )
+        captures, compare, capture_outputs = validate_recovery_plan_golden_commands(task)
 
-        self.assertNotIn("--manifest", compare_command)
+        self.assertEqual(2, len(captures))
+        self.assertEqual("compare", compare[2])
         self.assertNotEqual(capture_outputs[0], capture_outputs[1])
-        self.assertEqual(capture_outputs, [baseline, candidate])
-        self.assertNotEqual(baseline, candidate)
+
+    def test_recovery_plan_golden_validation_rejects_unsafe_mutations(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        plan = (
+            root / "docs" / "superpowers" / "plans"
+            / "2026-07-15-production-recovery-and-ocr-readiness.md"
+        ).read_text(encoding="utf-8")
+        task = plan.split("## Task 5", 1)[1].split("## Task 6", 1)[0]
+        mutations = {
+            "live mode": task.replace("--mode replay", "--mode live", 1),
+            "missing manifest": remove_first_line_containing(
+                task,
+                f"--manifest {EXPECTED_GOLDEN_MANIFEST}",
+            ),
+            "different manifest": task.replace(
+                EXPECTED_GOLDEN_MANIFEST,
+                "tests/ocrflow-golden/different-manifest.json",
+                1,
+            ),
+            "output outside artifacts": task.replace(
+                "--output .artifacts/recovery/local-golden-baseline.json",
+                "--output tmp/local-golden-baseline.json",
+                1,
+            ),
+            "missing capture": remove_first_command_block(
+                task,
+                "python3 scripts/ocrflow_golden.py capture \\",
+            ),
+        }
+
+        for mutation, mutated_task in mutations.items():
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                validate_recovery_plan_golden_commands(mutated_task)
 
     def test_baseline_compare_outputs_machine_readable_diff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

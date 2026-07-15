@@ -14,14 +14,12 @@ from package_question_engine_delivery import EXCLUDE_PARTS, ROOT, iter_files, va
 
 
 ABSOLUTE_LOCAL_PATH_RE = re.compile(
-    "|".join(
-        [
-            r"/Users/[^\s`'\"<>]+",
-            r"/home/[^\s`'\"<>]+",
-            r"/var/folders/[^\s`'\"<>]+",
-            r"/opt/homebrew/[^\s`'\"<>]+",
-        ]
-    )
+    r"(?<![A-Za-z0-9_./\\-])/+(?:Users|home|var/folders|opt/homebrew)/"
+    r"[^\s`'\"<>:;,()\[\]{}!?]+"
+)
+HTTP_URL_RE = re.compile(r"\bhttps?://[^\s`'\"<>,;)\]}]+", re.IGNORECASE)
+PERIOD_PATH_SEPARATOR_RE = re.compile(
+    r"\.(?=/+(?:Users|home|var/folders|opt/homebrew)/)"
 )
 
 ALLOWED_SHEBANG_PREFIXES = (
@@ -67,6 +65,34 @@ def read_text(path: Path) -> str | None:
         return None
 
 
+def find_absolute_local_paths(text: str) -> list[str]:
+    """Return every absolute local path candidate found in text."""
+    scan_view = text.replace("\\/", "/")
+    scan_view = HTTP_URL_RE.sub(lambda match: " " * len(match.group(0)), scan_view)
+    scan_view = PERIOD_PATH_SEPARATOR_RE.sub(" ", scan_view)
+    return [
+        _strip_trailing_path_period(match.group(0))
+        for match in ABSOLUTE_LOCAL_PATH_RE.finditer(scan_view)
+    ]
+
+
+def _strip_trailing_path_period(candidate: str) -> str:
+    while candidate.endswith(".") and not candidate.endswith(("/.", "/..")):
+        candidate = candidate[:-1]
+    return candidate
+
+
+def check_text_paths(relative_path: str, text: str) -> list[str]:
+    """Report disallowed absolute local paths found in one portable text file."""
+    if relative_path in ABSOLUTE_PATH_PATTERN_SOURCE_FILES:
+        return []
+    return [
+        f"absolute local path leaked into portable file: {relative_path}: {matched_path}"
+        for matched_path in find_absolute_local_paths(text)
+        if not is_allowed_absolute_local_path(relative_path, matched_path)
+    ]
+
+
 def check_packaged_files(files: list[Path], failures: list[str]) -> None:
     failures.extend(validate(files))
 
@@ -78,12 +104,7 @@ def check_packaged_files(files: list[Path], failures: list[str]) -> None:
         if text is None:
             continue
 
-        if rel not in ABSOLUTE_PATH_PATTERN_SOURCE_FILES:
-            for match in ABSOLUTE_LOCAL_PATH_RE.finditer(text):
-                if not is_allowed_absolute_local_path(rel, match.group(0)):
-                    failures.append(
-                        f"absolute local path leaked into portable file: {rel}: {match.group(0)}"
-                    )
+        failures.extend(check_text_paths(rel, text))
 
         lines = text.splitlines()
         first_line = lines[0] if lines else ""

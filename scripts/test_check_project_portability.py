@@ -2,30 +2,18 @@ import tempfile
 import unittest
 import sys
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts import check_project_portability
-from scripts.check_project_portability import is_allowed_absolute_local_path, iter_source_tree_paths
+from scripts.check_project_portability import (
+    check_text_paths,
+    find_absolute_local_paths,
+    is_allowed_absolute_local_path,
+    iter_source_tree_paths,
+)
 
 
 class CheckProjectPortabilityTest(unittest.TestCase):
-    def check_text(self, relative_path: str, text: str) -> list[str]:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            path = root / relative_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
-            failures: list[str] = []
-            with mock.patch.object(check_project_portability, "ROOT", root), mock.patch.object(
-                check_project_portability,
-                "validate",
-                return_value=[],
-            ):
-                check_project_portability.check_packaged_files([path], failures)
-        return failures
-
     def test_fixed_server_path_is_allowed_in_recovery_plan_and_runbook_contract_test(self):
         server_root = str(Path("/") / "home" / "user" / "AI_GENERATION_DOCKER")
         allowed_files = (
@@ -45,24 +33,78 @@ class CheckProjectPortabilityTest(unittest.TestCase):
     def test_fixed_server_path_allowance_uses_posix_lexical_normalization(self):
         server_root = str(Path("/") / "home" / "user" / "AI_GENERATION_DOCKER")
         relative_path = "scripts/test_rebuild_mineru_venv.py"
+        private_path = f"{server_root}/../private"
+        ssh_path = f"{server_root}/vendor/../../.ssh/authorized_keys"
+        inside_path = f"{server_root}/vendor/../vendor/mineru-venv"
 
-        self.assertFalse(
-            is_allowed_absolute_local_path(relative_path, f"{server_root}/../private")
+        failures = check_text_paths(
+            relative_path,
+            " ".join((private_path, ssh_path, inside_path)),
         )
-        self.assertFalse(
-            is_allowed_absolute_local_path(
-                relative_path,
-                f"{server_root}/vendor/../../.ssh/authorized_keys",
-            )
-        )
-        self.assertTrue(
-            is_allowed_absolute_local_path(
-                relative_path,
-                f"{server_root}/vendor/../vendor/mineru-venv",
-            )
-        )
+
+        self.assertEqual(2, len(failures))
+        self.assertTrue(any(private_path in failure for failure in failures))
+        self.assertTrue(any(ssh_path in failure for failure in failures))
+        self.assertFalse(any(inside_path in failure for failure in failures))
         self.assertFalse(is_allowed_absolute_local_path(relative_path, server_root.lstrip("/")))
         self.assertFalse(is_allowed_absolute_local_path(relative_path, f"/{server_root}"))
+
+    def test_punctuation_separates_allowed_and_local_path_candidates(self):
+        server_root = str(Path("/") / "home" / "user" / "AI_GENERATION_DOCKER")
+        user_path = str(Path("/") / "Users" / "example" / "private.txt")
+        relative_path = "scripts/test_rebuild_mineru_venv.py"
+
+        for separator in (":", ";", ",", ".", ")"):
+            with self.subTest(separator=separator):
+                text = f"{server_root}{separator}{user_path}"
+                self.assertEqual(
+                    [server_root, user_path],
+                    find_absolute_local_paths(text),
+                )
+                failures = check_text_paths(relative_path, text)
+                self.assertEqual(1, len(failures))
+                self.assertIn(user_path, failures[0])
+
+    def test_allowed_root_and_subpath_are_clean_before_trailing_punctuation(self):
+        server_root = str(Path("/") / "home" / "user" / "AI_GENERATION_DOCKER")
+        server_child = f"{server_root}/vendor/mineru-venv"
+        relative_path = "scripts/test_rebuild_mineru_venv.py"
+
+        for candidate in (server_root, server_child):
+            for punctuation in (":", ";", ",", ".", ")"):
+                with self.subTest(candidate=candidate, punctuation=punctuation):
+                    text = f"documented path: {candidate}{punctuation} next"
+                    self.assertEqual([candidate], find_absolute_local_paths(text))
+                    self.assertEqual([], check_text_paths(relative_path, text))
+
+    def test_json_escaped_slashes_are_normalized_before_scanning(self):
+        user_path = str(Path("/") / "Users" / "example" / "private.txt")
+        escaped_path = user_path.replace("/", "\\/")
+
+        self.assertEqual([user_path], find_absolute_local_paths(escaped_path))
+        failures = check_text_paths("docs/example.json", escaped_path)
+        self.assertEqual(1, len(failures))
+        self.assertIn(user_path, failures[0])
+
+    def test_double_leading_slash_is_one_rejected_candidate(self):
+        server_root = str(Path("/") / "home" / "user" / "AI_GENERATION_DOCKER")
+        double_slash_path = f"/{server_root}"
+        relative_path = "scripts/test_rebuild_mineru_venv.py"
+
+        self.assertEqual([double_slash_path], find_absolute_local_paths(double_slash_path))
+        failures = check_text_paths(relative_path, double_slash_path)
+        self.assertEqual(1, len(failures))
+        self.assertIn(double_slash_path, failures[0])
+
+    def test_https_urls_are_not_treated_as_local_paths(self):
+        user_suffix = "/".join(("Users", "example", "private.txt"))
+        server_suffix = "/".join(("home", "user", "AI_GENERATION_DOCKER", "guide"))
+        text = f"https://example.com/{user_suffix} https://example.com/{server_suffix}"
+        escaped_text = text.replace("/", "\\/")
+
+        self.assertEqual([], find_absolute_local_paths(text))
+        self.assertEqual([], find_absolute_local_paths(escaped_text))
+        self.assertEqual([], check_text_paths("docs/example.md", text))
 
     def test_allowed_server_path_does_not_hide_later_local_paths(self):
         server_path = str(
@@ -71,11 +113,15 @@ class CheckProjectPortabilityTest(unittest.TestCase):
         user_path = str(Path("/") / "Users" / "example" / "private.txt")
         temporary_path = str(Path("/") / "var" / "folders" / "example" / "private.txt")
 
-        failures = self.check_text(
+        failures = check_text_paths(
             "scripts/test_rebuild_mineru_venv.py",
             " ".join((server_path, user_path, temporary_path)),
         )
 
+        self.assertEqual(
+            [server_path, user_path, temporary_path],
+            find_absolute_local_paths(" ".join((server_path, user_path, temporary_path))),
+        )
         self.assertEqual(2, len(failures))
         self.assertTrue(any(user_path in failure for failure in failures))
         self.assertTrue(any(temporary_path in failure for failure in failures))
@@ -87,11 +133,15 @@ class CheckProjectPortabilityTest(unittest.TestCase):
         user_path = str(Path("/") / "Users" / "example" / "private.txt")
         temporary_path = str(Path("/") / "var" / "folders" / "example" / "private.txt")
 
-        failures = self.check_text(
+        failures = check_text_paths(
             "scripts/test_rebuild_mineru_venv.py",
             " ".join((user_path, temporary_path, server_path)),
         )
 
+        self.assertEqual(
+            [user_path, temporary_path, server_path],
+            find_absolute_local_paths(" ".join((user_path, temporary_path, server_path))),
+        )
         self.assertEqual(2, len(failures))
         self.assertTrue(any(user_path in failure for failure in failures))
         self.assertTrue(any(temporary_path in failure for failure in failures))
