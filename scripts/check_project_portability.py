@@ -45,6 +45,8 @@ ALLOWED_ABSOLUTE_LOCAL_PATH_FILES = {
     "docs/server/README.md",
     "docs/server/RUNBOOK.md",
     "docs/superpowers/plans/2026-07-06-ocr-flow-llm-efficiency.md",
+    "docs/superpowers/plans/2026-07-15-production-recovery-and-ocr-readiness.md",
+    "scripts/test_rebuild_mineru_venv.py",
 }
 
 ABSOLUTE_PATH_PATTERN_SOURCE_FILES = {

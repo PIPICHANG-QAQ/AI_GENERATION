@@ -5,10 +5,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.check_project_portability import iter_source_tree_paths
+from scripts.check_project_portability import is_allowed_absolute_local_path, iter_source_tree_paths
 
 
 class CheckProjectPortabilityTest(unittest.TestCase):
+    def test_fixed_server_path_is_allowed_in_recovery_plan_and_runbook_contract_test(self):
+        server_path = str(Path("/") / "home" / "user" / "AI_GENERATION_DOCKER" / "vendor" / "mineru-venv")
+
+        self.assertTrue(
+            is_allowed_absolute_local_path(
+                "docs/superpowers/plans/2026-07-15-production-recovery-and-ocr-readiness.md",
+                server_path,
+            )
+        )
+        self.assertTrue(is_allowed_absolute_local_path("scripts/test_rebuild_mineru_venv.py", server_path))
+        self.assertFalse(is_allowed_absolute_local_path("scripts/unrelated.py", server_path))
+
     def test_source_tree_walk_prunes_excluded_dependency_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -624,7 +624,6 @@ python3 scripts/ocrflow_golden.py capture \
   --mode replay \
   --output .artifacts/recovery/local-golden.json
 python3 scripts/ocrflow_golden.py compare \
-  --manifest tests/ocrflow-golden/manifest.json \
   --baseline .artifacts/recovery/local-golden.json \
   --candidate .artifacts/recovery/local-golden.json
 ```

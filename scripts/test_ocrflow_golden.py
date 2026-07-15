@@ -143,6 +143,19 @@ class CliTest(unittest.TestCase):
                 self.assertNotEqual(0, code)
                 self.assertEqual("invalid_arguments", report["status"])
 
+    def test_recovery_plan_uses_complete_captured_pair_compare_mode(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        plan = (
+            root / "docs" / "superpowers" / "plans"
+            / "2026-07-15-production-recovery-and-ocr-readiness.md"
+        ).read_text(encoding="utf-8")
+        task = plan.split("## Task 5", 1)[1].split("## Task 6", 1)[0]
+        compare_command = task.split("python3 scripts/ocrflow_golden.py compare \\", 1)[1].split("```", 1)[0]
+
+        self.assertNotIn("--manifest", compare_command)
+        self.assertIn("--baseline .artifacts/recovery/local-golden.json", compare_command)
+        self.assertIn("--candidate .artifacts/recovery/local-golden.json", compare_command)
+
     def test_baseline_compare_outputs_machine_readable_diff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
