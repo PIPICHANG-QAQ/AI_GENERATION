@@ -7,10 +7,12 @@ Provider 只负责把输入文件转换为 OCR 工件。题库后处理由执行
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from importlib import metadata
@@ -28,7 +30,9 @@ RUNTIME_IMPORT_PROBE = (
     "from mineru.cli.common import read_fn"
 )
 RUNTIME_PROBE_CACHE_TTL_SECONDS = 60.0
+RUNTIME_PROBE_CACHE_MAX_ENTRIES = 32
 RUNTIME_PROBE_MAX_TIMEOUT_SECONDS = 15
+PYTHON_EXECUTABLE_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,15 @@ class ProviderCommand:
     source: str
 
 
+@dataclass(frozen=True)
+class RuntimeProbeTarget:
+    command_path: Path | None
+    command_target: Path | None
+    python: Path | None
+    python_target: Path | None
+    error: str | None = None
+
+
 class OcrProvider:
     """OCR provider 抽象基类，定义 provider 能力和执行接口。"""
     name = ""
@@ -83,7 +96,11 @@ class OcrProvider:
 class MineruOcrProvider(OcrProvider):
     """MinerU OCR provider 实现。"""
     name = "mineru"
-    _runtime_probe_cache: dict[tuple[object, ...], tuple[float, dict[str, Any]]] = {}
+    _runtime_probe_cache: dict[
+        tuple[object, ...],
+        tuple[tuple[object, ...], float, dict[str, Any]],
+    ] = {}
+    _runtime_probe_lock = threading.Lock()
 
     def __init__(self, app_root: Path, version_timeout_seconds: int) -> None:
         """执行   init   逻辑。"""
@@ -263,22 +280,145 @@ class MineruOcrProvider(OcrProvider):
         resolved = shutil.which(executable)
         return Path(resolved).absolute() if resolved else None
 
-    def _runtime_python_candidate(self, command: ProviderCommand) -> Path | None:
+    @staticmethod
+    def _runtime_target_error(
+        command_path: Path | None,
+        command_target: Path | None,
+        message: str,
+    ) -> RuntimeProbeTarget:
+        return RuntimeProbeTarget(command_path, command_target, None, None, message)
+
+    @staticmethod
+    def _python_interpreter_error(interpreter: Path, interpreter_target: Path) -> str | None:
+        if not PYTHON_EXECUTABLE_RE.fullmatch(interpreter_target.name):
+            return f"Python interpreter {interpreter} resolves to non-Python executable {interpreter_target}."
+        try:
+            with interpreter_target.open("rb") as fp:
+                marker = fp.read(2)
+        except OSError as exc:
+            return f"Unable to inspect Python interpreter {interpreter}: {exc}"
+        if marker == b"#!":
+            return f"Python interpreter {interpreter} resolves to an unsupported script wrapper."
+        return None
+
+    def _resolve_runtime_target(self, command: ProviderCommand) -> RuntimeProbeTarget:
         executable = self._command_executable_path(command)
+        if executable is None:
+            value = command.args[0] if command.args else "<empty>"
+            return self._runtime_target_error(None, None, f"Unable to resolve the MinerU executable: {value}.")
+
+        try:
+            executable_target = executable.resolve(strict=True)
+        except OSError as exc:
+            return self._runtime_target_error(executable, None, f"Unable to resolve the MinerU executable: {exc}")
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                f"MinerU executable is missing or not runnable: {executable}.",
+            )
+
         if command.source == "python-entrypoint":
             current_python = Path(sys.executable).absolute()
-            if executable is None or executable.resolve() != current_python.resolve():
-                return None
-            return current_python
-        if executable is None:
-            return None
-        return (executable.parent / "python").absolute()
+            if executable != current_python:
+                return self._runtime_target_error(
+                    executable,
+                    executable_target,
+                    f"MinerU Python entrypoint must use the exact current worker interpreter {current_python}.",
+                )
+            interpreter_error = self._python_interpreter_error(current_python, executable_target)
+            if interpreter_error:
+                return self._runtime_target_error(executable, executable_target, interpreter_error)
+            return RuntimeProbeTarget(executable, executable_target, current_python, executable_target)
+
+        if PYTHON_EXECUTABLE_RE.fullmatch(Path(command.args[0]).name):
+            interpreter_error = self._python_interpreter_error(executable, executable_target)
+            if interpreter_error:
+                return self._runtime_target_error(executable, executable_target, interpreter_error)
+            return RuntimeProbeTarget(executable, executable_target, executable, executable_target)
+
+        try:
+            with executable_target.open("rb") as fp:
+                first_line = fp.readline(4096)
+            shebang_line = first_line.decode("utf-8").rstrip("\r\n")
+        except (OSError, UnicodeDecodeError) as exc:
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                f"Unable to inspect MinerU script shebang: {exc}",
+            )
+
+        if not shebang_line.startswith("#!"):
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                "MinerU script shebang is missing or malformed.",
+            )
+        shebang_parts = shebang_line[2:].strip().split()
+        if len(shebang_parts) != 1:
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                "MinerU script shebang must contain one unambiguous absolute Python interpreter.",
+            )
+
+        shebang_python = Path(shebang_parts[0])
+        if not shebang_python.is_absolute() or not PYTHON_EXECUTABLE_RE.fullmatch(shebang_python.name):
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                "MinerU script shebang must use an absolute Python interpreter, not env or a wrapper.",
+            )
+        if not shebang_python.is_file() or not os.access(shebang_python, os.X_OK):
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                f"MinerU script shebang interpreter is missing or not runnable: {shebang_python}.",
+            )
+        try:
+            shebang_python_target = shebang_python.resolve(strict=True)
+        except OSError as exc:
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                f"Unable to resolve MinerU script shebang interpreter {shebang_python}: {exc}",
+            )
+        interpreter_error = self._python_interpreter_error(shebang_python, shebang_python_target)
+        if interpreter_error:
+            return self._runtime_target_error(executable, executable_target, interpreter_error)
+
+        sibling_python = executable_target.parent / "python"
+        if not sibling_python.is_file() or not os.access(sibling_python, os.X_OK):
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                f"MinerU runtime interpreter is missing or not runnable: {sibling_python}.",
+            )
+        try:
+            same_environment = shebang_python.parent.resolve() == executable_target.parent.resolve()
+            same_interpreter = os.path.samefile(shebang_python, sibling_python)
+        except OSError:
+            same_environment = False
+            same_interpreter = False
+        if not same_environment or not same_interpreter:
+            return self._runtime_target_error(
+                executable,
+                executable_target,
+                f"MinerU script interpreter mismatch: shebang {shebang_python}, sibling {sibling_python}.",
+            )
+
+        return RuntimeProbeTarget(
+            executable,
+            executable_target,
+            shebang_python,
+            shebang_python_target,
+        )
+
+    def _runtime_python_candidate(self, command: ProviderCommand) -> Path | None:
+        return self._resolve_runtime_target(command).python
 
     def _runtime_python(self, command: ProviderCommand) -> Path | None:
-        python = self._runtime_python_candidate(command)
-        if python is None or not python.is_file() or not os.access(python, os.X_OK):
-            return None
-        return python
+        return self._resolve_runtime_target(command).python
 
     @staticmethod
     def _mtime_ns(path: Path | None) -> int | None:
@@ -289,77 +429,95 @@ class MineruOcrProvider(OcrProvider):
         except OSError:
             return None
 
-    def _runtime_probe_cache_key(self, command: ProviderCommand) -> tuple[object, ...]:
-        executable = self._command_executable_path(command)
-        runtime_python = self._runtime_python_candidate(command)
+    @staticmethod
+    def _runtime_probe_identity(command: ProviderCommand, target: RuntimeProbeTarget) -> tuple[object, ...]:
         return (
-            command.source,
-            tuple(command.args),
-            str(executable) if executable else None,
-            self._mtime_ns(executable),
-            str(runtime_python) if runtime_python else None,
-            self._mtime_ns(runtime_python),
+            str(target.command_path) if target.command_path else (command.args[0] if command.args else None),
+            tuple(command.args[1:]),
         )
 
-    def _runtime_python_error(self, command: ProviderCommand) -> str:
-        executable = self._command_executable_path(command)
-        if command.source == "python-entrypoint":
-            return (
-                "MinerU Python entrypoint does not use the current worker interpreter "
-                f"{Path(sys.executable).absolute()}."
-            )
-        if executable is None:
-            return f"Unable to resolve the MinerU executable: {command.args[0] if command.args else '<empty>'}."
-        return f"MinerU runtime interpreter is missing or not runnable: {executable.parent / 'python'}."
+    def _runtime_probe_fingerprint(self, target: RuntimeProbeTarget) -> tuple[object, ...]:
+        return (
+            str(target.command_target) if target.command_target else None,
+            self._mtime_ns(target.command_target),
+            str(target.python) if target.python else None,
+            str(target.python_target) if target.python_target else None,
+            self._mtime_ns(target.python_target),
+            target.error,
+        )
+
+    @classmethod
+    def _prune_runtime_probe_cache(cls, now: float) -> None:
+        expired = [
+            identity
+            for identity, (_fingerprint, cached_at, _result) in cls._runtime_probe_cache.items()
+            if not 0 <= now - cached_at < RUNTIME_PROBE_CACHE_TTL_SECONDS
+        ]
+        for identity in expired:
+            cls._runtime_probe_cache.pop(identity, None)
+
+    @classmethod
+    def _trim_runtime_probe_cache(cls) -> None:
+        while len(cls._runtime_probe_cache) > RUNTIME_PROBE_CACHE_MAX_ENTRIES:
+            oldest = min(cls._runtime_probe_cache, key=lambda key: cls._runtime_probe_cache[key][1])
+            cls._runtime_probe_cache.pop(oldest, None)
 
     def _probe_runtime(self, command: ProviderCommand) -> dict[str, Any]:
-        cache_key = self._runtime_probe_cache_key(command)
-        now = self._monotonic()
-        cached = self._runtime_probe_cache.get(cache_key)
-        if cached is not None and 0 <= now - cached[0] < RUNTIME_PROBE_CACHE_TTL_SECONDS:
-            return dict(cached[1])
+        with self._runtime_probe_lock:
+            target = self._resolve_runtime_target(command)
+            identity = self._runtime_probe_identity(command, target)
+            fingerprint = self._runtime_probe_fingerprint(target)
+            now = self._monotonic()
+            self._prune_runtime_probe_cache(now)
+            cached = self._runtime_probe_cache.get(identity)
+            if cached is not None and cached[0] == fingerprint:
+                return dict(cached[2])
 
-        python = self._runtime_python(command)
-        if python is None:
-            result: dict[str, Any] = {
-                "runtimeProbeOk": False,
-                "runtimePython": None,
-                "runtimeError": self._runtime_python_error(command),
-            }
-        else:
-            try:
-                completed = subprocess.run(
-                    [str(python), "-c", RUNTIME_IMPORT_PROBE],
-                    capture_output=True,
-                    text=True,
-                    timeout=min(self.version_timeout_seconds, RUNTIME_PROBE_MAX_TIMEOUT_SECONDS),
-                    check=False,
-                )
-                error = (completed.stderr or completed.stdout).strip()
-                result = {
-                    "runtimeProbeOk": completed.returncode == 0,
-                    "runtimePython": str(python),
-                    "runtimeError": (
-                        None
-                        if completed.returncode == 0
-                        else (error[-2000:] or f"Runtime import probe exited with code {completed.returncode}.")
-                    ),
-                }
-            except subprocess.TimeoutExpired as exc:
+            python = target.python
+            if python is None:
                 result = {
                     "runtimeProbeOk": False,
-                    "runtimePython": str(python),
-                    "runtimeError": f"Runtime import probe timed out after {exc.timeout} seconds.",
+                    "runtimePython": None,
+                    "runtimeError": target.error or "Unable to resolve the Python interpreter for MinerU.",
                 }
-            except OSError as exc:
-                result = {
-                    "runtimeProbeOk": False,
-                    "runtimePython": str(python),
-                    "runtimeError": f"Runtime import probe could not start: {exc}",
-                }
+            else:
+                try:
+                    completed = subprocess.run(
+                        [str(python), "-c", RUNTIME_IMPORT_PROBE],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=min(self.version_timeout_seconds, RUNTIME_PROBE_MAX_TIMEOUT_SECONDS),
+                        check=False,
+                    )
+                    error = (completed.stderr or completed.stdout).strip()
+                    result = {
+                        "runtimeProbeOk": completed.returncode == 0,
+                        "runtimePython": str(python),
+                        "runtimeError": (
+                            None
+                            if completed.returncode == 0
+                            else (error[-2000:] or f"Runtime import probe exited with code {completed.returncode}.")
+                        ),
+                    }
+                except subprocess.TimeoutExpired as exc:
+                    result = {
+                        "runtimeProbeOk": False,
+                        "runtimePython": str(python),
+                        "runtimeError": f"Runtime import probe timed out after {exc.timeout} seconds.",
+                    }
+                except (subprocess.SubprocessError, UnicodeError, OSError) as exc:
+                    result = {
+                        "runtimeProbeOk": False,
+                        "runtimePython": str(python),
+                        "runtimeError": f"Runtime import probe failed: {exc}",
+                    }
 
-        self._runtime_probe_cache[cache_key] = (now, dict(result))
-        return result
+            completed_at = self._monotonic()
+            self._runtime_probe_cache[identity] = (fingerprint, completed_at, dict(result))
+            self._trim_runtime_probe_cache()
+            return result
 
     def resolve_command(self) -> tuple[ProviderCommand | None, dict[str, Any]]:
         """执行 resolve command 逻辑。"""
