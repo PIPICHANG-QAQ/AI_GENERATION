@@ -1,0 +1,233 @@
+{
+  "version": 1,
+  "allowlist": [
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/export_service.py",
+      "pattern": "/api/import-tasks/([^/]+)/questions/([^/]+)/images/([^/?#]+)",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/export_service.py",
+      "pattern": "/api/ocr/jobs/([^/]+)/files/(.+)$",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/question_layout.py",
+      "pattern": "/api/import-tasks/{task.get('id')}/source/paper/pages/0?v={version}",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/question_layout.py",
+      "pattern": "/api/import-tasks/{task.get('id')}/source/paper/pages/{page_index}?v={version}",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/question_markdown.py",
+      "pattern": "/api/ocr/jobs/{job_id}/files/{relative}",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/ai/analysis",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks",
+      "count": 2
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/batch-delete",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}",
+      "count": 3
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/bank",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/image-library",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/questions/{question_id}",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/questions/{question_id}/analysis",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/questions/{question_id}/bank",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/questions/{question_id}/images",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/questions/{question_id}/images/{filename}",
+      "count": 2
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/questions/{question_id}/standardize/ai",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/source/paper/pages/{page_index}",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/import-tasks/{task_id}/source/{kind}",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/knowledge-points",
+      "count": 2
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/knowledge-points/{point_id}",
+      "count": 2
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/markdown/standardize/ai",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/markdown/standardize/local",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/ocr/jobs",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/ocr/jobs/{job_id}",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/ocr/jobs/{job_id}/files/{relative_path:path}",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/ocr/jobs/{job_id}/questions/{question_id}/manual-markdown",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/ocr/jobs/{job_id}/result",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/papers",
+      "count": 2
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/papers/{paper_id}",
+      "count": 3
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/papers/{paper_id}/export",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/question-bank/questions",
+      "count": 2
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/question-bank/questions/{question_id}",
+      "count": 3
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/question-bank/questions/{question_id}/analysis",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/question-bank/questions/{question_id}/image-library",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/question-bank/questions/{question_id}/images",
+      "count": 1
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/question-bank/questions/{question_id}/images/{filename}",
+      "count": 2
+    },
+    {
+      "rule": "python-worker-business-api",
+      "path": "backend/python-worker/app/worker_routes.py",
+      "pattern": "/api/question-bank/questions/{question_id}/standardize/ai",
+      "count": 1
+    }
+  ]
+}

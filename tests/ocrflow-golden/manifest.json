@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "ocrflow-golden.v1",
+  "randomIdPaths": [
+    "job.jobId"
+  ],
+  "cases": [
+    {
+      "id": "platform-markdown-basic",
+      "paper": "docs/samples/platform-integration/paper.md",
+      "answer": "docs/samples/platform-integration/answer.md",
+      "runner": "java-question-processing",
+      "replayInput": "backend/src/test/resources/golden/ocrflow/processing-job.json",
+      "expected": "docs/samples/platform-integration/expected-question-package.v1.json"
+    }
+  ]
+}

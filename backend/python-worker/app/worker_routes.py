@@ -1052,3 +1052,10 @@ def worker_export_render(payload: dict[str, Any]) -> FileResponse:
         path = export_paper_docx(paper, questions, include_answer)
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+# Versioned worker APIs are registered after all compatibility functions have
+# been defined.  The wrapper module only delegates to these functions.
+from app.routes.worker_v1 import router as worker_v1_router  # noqa: E402
+
+app.include_router(worker_v1_router)

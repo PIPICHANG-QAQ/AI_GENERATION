@@ -6,7 +6,7 @@
 
 - `paper.md`：脱敏试卷。
 - `answer.md`：脱敏答案。
-- `expected-question-package.v1.json`：预期结构示例，不要求字段值与实际 OCR 完全一致，但字段形状必须一致。
+- `expected-question-package.v1.json`：由脱敏 raw processing-job 通过当前 Java 聚合服务生成的冻结输出；它是 backend canonical expected 的字节一致公共副本。
 
 使用：
 

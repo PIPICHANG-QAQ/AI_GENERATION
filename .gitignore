@@ -20,3 +20,9 @@ server-data/
 tmp/
 protocal/
 vendor/
+
+# OCR Flow golden artifacts and local controlled/sensitive corpus copies
+/.artifacts/ocrflow-*
+/tests/ocrflow-golden/controlled/
+/tests/ocrflow-golden/local/
+/tests/ocrflow-golden/private/

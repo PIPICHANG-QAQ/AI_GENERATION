@@ -8,6 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from check_ocrflow_boundaries import check_boundaries
 from package_question_engine_delivery import EXCLUDE_PARTS, ROOT, iter_files, validate
 
 
@@ -142,6 +143,10 @@ def check_local_install_state(failures: list[str]) -> None:
         failures.append("local-platform/package.json exists but node_modules is missing; run ./scripts/install_frontend.sh")
 
 
+def check_architecture_boundaries(failures: list[str]) -> None:
+    failures.extend(check_boundaries(ROOT))
+
+
 def main() -> int:
     failures: list[str] = []
     check_packaged_files(iter_files(include_local_platform=False), failures)
@@ -149,6 +154,7 @@ def main() -> int:
     check_packaged_files(iter_files(include_local_platform=True, include_mineru_wheelhouse=True), failures)
     check_source_tree_symlinks(failures)
     check_local_install_state(failures)
+    check_architecture_boundaries(failures)
 
     if failures:
         for failure in failures:

@@ -4,10 +4,44 @@ import unittest
 from unittest.mock import patch
 
 from app import ocr_processing, question_boundary
-from app.ocr_processing import apply_auto_semantic_repairs, build_llm_metrics, select_structure_candidate
+from app.ocr.contracts import CanonicalOcrBundle, OcrAsset, OcrLayoutBlock, OcrPage, SourceDocumentRef
+from app.ocr_processing import apply_auto_semantic_repairs, build_llm_metrics, build_postprocess_input, select_structure_candidate
 
 
 class OcrProcessingTest(unittest.TestCase):
+    def test_bundle_input_preserves_assets_layout_and_source_reference(self):
+        bundle = CanonicalOcrBundle(
+            document_id="external-job",
+            input_sha256="sha",
+            canonical_markdown="1. 如图 ![](images/a.png)",
+            assets=(OcrAsset("asset-a", "a.png", "images/a.png", "/files/a.png", 3, "image/png"),),
+            pages=(OcrPage(0, 100, 200),),
+            layout_blocks=(OcrLayoutBlock("layout-a", "image", 0, (1, 2, 30, 40), 100, 200, 0, image_ref="images/a.png"),),
+            source_document_ref=SourceDocumentRef(path="/tmp/paper.pdf"),
+            artifact_root="/tmp/artifacts",
+        )
+
+        postprocess_input = build_postprocess_input(bundle)
+
+        self.assertEqual("1. 如图 ![](images/a.png)", postprocess_input["markdown"])
+        self.assertEqual("images/a.png", postprocess_input["assets"][0]["path"])
+        self.assertEqual("png", postprocess_input["assets"][0]["type"])
+        self.assertEqual("layout-a", postprocess_input["layoutItems"][0]["blockId"])
+        self.assertEqual("/tmp/paper.pdf", postprocess_input["uploadPath"])
+
+    def test_bundle_input_preserves_legacy_jpg_extension_for_asset_type(self):
+        bundle = CanonicalOcrBundle(
+            document_id="external-job",
+            input_sha256="sha",
+            canonical_markdown="1. 如图 ![](images/a.jpg)",
+            assets=(OcrAsset("asset-a", "a.jpg", "images/a.jpg", "/files/a.jpg", 3, "image/jpeg"),),
+            artifact_root="/tmp/artifacts",
+        )
+
+        postprocess_input = build_postprocess_input(bundle)
+
+        self.assertEqual("jpg", postprocess_input["assets"][0]["type"])
+
     def test_invalid_fallback_does_not_replace_better_primary_candidate(self):
         primary = {
             "questions": [
@@ -114,7 +148,7 @@ class OcrProcessingTest(unittest.TestCase):
         self.assertEqual(125, metrics["totalDurationMs"])
 
     def test_collect_outputs_keeps_layout_read_only_for_question_extraction(self):
-        collect_outputs_source = inspect.getsource(ocr_processing.collect_outputs)
+        collect_outputs_source = inspect.getsource(ocr_processing.collect_outputs_impl)
         detect_boundaries_source = inspect.getsource(question_boundary.detect_local_boundaries)
 
         self.assertFalse(hasattr(ocr_processing, "question_image_refs_by_layout"))
