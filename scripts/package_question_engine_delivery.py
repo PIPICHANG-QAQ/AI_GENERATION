@@ -101,6 +101,7 @@ REQUIRED_IN_PACKAGE = [
     "docker-compose.server.yml",
     "deploy/nginx.conf",
     "scripts/deploy_local.sh",
+    "scripts/stop_local.sh",
     "scripts/build_mineru_wheelhouse.sh",
     "scripts/check_mineru.py",
     "scripts/test_check_mineru.py",

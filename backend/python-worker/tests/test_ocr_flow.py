@@ -175,6 +175,22 @@ class MineruOcrProviderTest(unittest.TestCase):
         self.assertFalse(run.call_args.kwargs["check"])
         self.assertNotIn("shell", run.call_args.kwargs)
 
+    def test_runtime_probe_timeout_is_independent_of_fast_version_probe_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app_root = Path(tmp)
+            command_path, _runtime_python = self._write_local_python_mineru(app_root)
+            provider = MineruOcrProvider(app_root, 3)
+            command = self._provider_command(command_path)
+
+            with patch(
+                "app.ocr_flow.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as run:
+                probe = self._runtime_probe(provider)(command)
+
+        self.assertTrue(probe["runtimeProbeOk"])
+        self.assertEqual(15, run.call_args.kwargs["timeout"])
+
     def test_status_selects_command_when_runtime_probe_is_healthy(self):
         with tempfile.TemporaryDirectory() as tmp:
             app_root = Path(tmp)

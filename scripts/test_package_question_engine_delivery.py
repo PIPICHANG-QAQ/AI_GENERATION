@@ -9,6 +9,16 @@ import package_question_engine_delivery as delivery
 
 
 class DeliveryBoundaryTest(unittest.TestCase):
+    def test_local_stop_script_is_individually_required(self) -> None:
+        required = "scripts/stop_local.sh"
+
+        self.assertIn(required, delivery.REQUIRED_IN_PACKAGE)
+        files = [delivery.ROOT / relative for relative in delivery.REQUIRED_IN_PACKAGE if relative != required]
+        self.assertIn(
+            f"missing required delivery file: {required}",
+            delivery.validate(files),
+        )
+
     def test_startup_dependencies_are_individually_required(self) -> None:
         startup_dependencies = (
             "scripts/docker-entrypoint.sh",

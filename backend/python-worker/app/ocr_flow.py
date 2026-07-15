@@ -570,7 +570,7 @@ class MineruOcrProvider(OcrProvider):
                         text=True,
                         encoding="utf-8",
                         errors="replace",
-                        timeout=min(self.version_timeout_seconds, RUNTIME_PROBE_MAX_TIMEOUT_SECONDS),
+                        timeout=RUNTIME_PROBE_MAX_TIMEOUT_SECONDS,
                         check=False,
                     )
                     error = (completed.stderr or completed.stdout).strip()

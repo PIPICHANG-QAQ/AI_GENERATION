@@ -660,7 +660,7 @@ Expected: worker `8001`、Java `8019`、前端 `5174` 均监听；`.run/deploy.e
 ### Step 2：逐层检查健康和业务路径
 
 ```bash
-curl -fsS http://127.0.0.1:8001/health
+curl -fsS http://127.0.0.1:8001/api/health
 curl -fsS http://127.0.0.1:8019/api/java/health
 curl -fsS http://127.0.0.1:8019/api/capabilities/ocr-flow/runtime
 curl -fsS http://127.0.0.1:5174/

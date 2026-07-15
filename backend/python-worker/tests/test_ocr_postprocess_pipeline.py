@@ -394,6 +394,33 @@ def test_run_bundle_uses_canonical_visual_context_without_provider_scans(tmp_pat
     assert outputs["markdown"] == "1. canonical question"
 
 
+def test_run_bundle_normalizes_office_html_table_before_question_boundaries(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    bundle = CanonicalOcrBundle(
+        document_id="office-table-question",
+        input_sha256="sha",
+        canonical_markdown=(
+            "<table>\n"
+            "  <tr><th><p>1. x + 1 = 2, find x.</p></th></tr>\n"
+            "  <tr><td><p>A. 0   B. 1   C. 2   D. 3</p></td></tr>\n"
+            "</table>"
+        ),
+        artifact_root=str(artifact_root),
+    )
+
+    outputs = _run_bundle_deterministically(
+        bundle,
+        tmp_path / "outputs",
+        tmp_path / "postprocess",
+        visual_enabled=False,
+    )
+
+    assert outputs["markdown"] == "1. x + 1 = 2, find x.\nA. 0 B. 1 C. 2 D. 3"
+    assert len(outputs["questions"]) == 1
+    assert outputs["questions"][0]["number"] == 1
+
+
 def test_run_bundle_does_not_create_scratch_when_visual_repair_is_disabled(tmp_path: Path) -> None:
     artifact_root = tmp_path / "artifacts"
     artifact_root.mkdir()
