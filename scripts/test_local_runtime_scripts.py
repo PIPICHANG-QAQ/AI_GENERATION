@@ -105,6 +105,7 @@ class LocalRuntimeScriptsTest(unittest.TestCase):
     def _process_start_identity(pid: int) -> str:
         completed = subprocess.run(
             ["ps", "-p", str(pid), "-o", "lstart="],
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
             text=True,
             capture_output=True,
             timeout=2,
@@ -243,11 +244,34 @@ class LocalRuntimeScriptsTest(unittest.TestCase):
             )
             content = pid_file.read_text(encoding="utf-8") if pid_file.is_file() else ""
 
+            identities = []
+            for timezone in ("UTC", "Asia/Shanghai"):
+                identity = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$IDENTITY_SCRIPT"; process_start_identity "$TARGET_PID"',
+                    ],
+                    env={
+                        **os.environ,
+                        "IDENTITY_SCRIPT": str(LOCAL_PROCESS_IDENTITY_SCRIPT),
+                        "TARGET_PID": str(os.getpid()),
+                        "TZ": timezone,
+                    },
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+                self.assertEqual(0, identity.returncode, identity.stderr)
+                identities.append(identity.stdout.strip())
+
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("version=1\n", content)
         self.assertIn("service=python-worker\n", content)
         self.assertRegex(content, r"(?m)^pid=[1-9][0-9]*$")
         self.assertRegex(content, r"(?m)^start=\S.+$")
+        self.assertEqual(identities[0], identities[1])
 
     def test_stop_local_terminates_versioned_records_for_every_service_signature(self) -> None:
         for service in ("python-worker", "java-backend", "frontend"):
@@ -401,7 +425,8 @@ class LocalRuntimeScriptsTest(unittest.TestCase):
             script = self._temporary_stop_script(root)
             fake_bin = root / "bin"
             fake_bin.mkdir()
-            screen_daemon = fake_bin / "screen-session-daemon"
+            screen_daemon = root / "daemon" / "SCREEN"
+            screen_daemon.parent.mkdir()
             screen_daemon.write_text(
                 "#!/usr/bin/env bash\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
                 encoding="utf-8",
@@ -520,6 +545,151 @@ esac
         self.assertNotEqual(0, completed.returncode)
         self.assertNotIn("Local services stopped.", completed.stdout)
         self.assertIn("could not stop project process", completed.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            state = root / "process-state"
+            state.write_text("original\n", encoding="utf-8")
+            kill_calls = root / "kill-calls"
+            original_start = "Mon Jan 1 00:00:00 2024"
+            reused_start = "Mon Jan 1 00:00:01 2024"
+            (fake_bin / "ps").write_text(
+                f"""#!/usr/bin/env bash
+case "$*" in
+  *'stat='*) printf 'S\\n' ;;
+  *'lstart='*)
+    if [[ "$(<\"$PROCESS_STATE\")" == "original" ]]; then
+      printf '{original_start}\\n'
+    else
+      printf '{reused_start}\\n'
+    fi
+    ;;
+  *'command='*) printf '%s\\n' '{root}/backend/python-worker/.venv/bin/python -m uvicorn app.main:app --app-dir backend/python-worker' ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            (fake_bin / "lsof").write_text(
+                f"#!/usr/bin/env bash\nprintf 'p4242\\nn{root}\\n'\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "kill").write_text(
+                """#!/usr/bin/env bash
+if [[ "$1" == "-0" ]]; then exit 0; fi
+printf '%s\n' "$*" >> "$KILL_CALLS"
+if [[ "$1" == "4242" ]]; then printf 'reused\n' > "$PROCESS_STATE"; fi
+exit 0
+""",
+                encoding="utf-8",
+            )
+            (fake_bin / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            for path in fake_bin.iterdir():
+                path.chmod(0o755)
+            bash_env = root / "bash-env"
+            bash_env.write_text("enable -n kill\n", encoding="utf-8")
+
+            reused = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$IDENTITY_SCRIPT"; terminate_pid_verified 4242 python-worker "$ROOT"',
+                ],
+                env={
+                    **os.environ,
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "BASH_ENV": str(bash_env),
+                    "IDENTITY_SCRIPT": str(LOCAL_PROCESS_IDENTITY_SCRIPT),
+                    "ROOT": str(root.resolve()),
+                    "PROCESS_STATE": str(state),
+                    "KILL_CALLS": str(kill_calls),
+                    "STOP_LOCAL_WAIT_ATTEMPTS": "1",
+                    "STOP_LOCAL_WAIT_INTERVAL": "0",
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(0, reused.returncode, reused.stderr)
+            self.assertEqual(["4242"], kill_calls.read_text(encoding="utf-8").splitlines())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            sentinel = root / "injected"
+            kill_calls = root / "kill-calls"
+            (fake_bin / "ps").write_text(
+                f"""#!/usr/bin/env bash
+case "$*" in
+  *'stat='*) printf 'S\\n' ;;
+  *'lstart='*) printf 'Mon Jan 1 00:00:00 2024\\n' ;;
+  *'command='*) printf '%s\\n' '{root}/backend/python-worker/.venv/bin/python -m uvicorn app.main:app --app-dir backend/python-worker' ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            (fake_bin / "lsof").write_text(
+                f"#!/usr/bin/env bash\nprintf 'p4242\\nn{root}\\n'\n",
+                encoding="utf-8",
+            )
+            (fake_bin / "kill").write_text(
+                """#!/usr/bin/env bash
+if [[ "$1" == "-0" ]]; then exit 0; fi
+printf '%s\n' "$*" >> "$KILL_CALLS"
+exit 0
+""",
+                encoding="utf-8",
+            )
+            (fake_bin / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            for path in fake_bin.iterdir():
+                path.chmod(0o755)
+            bash_env = root / "bash-env"
+            bash_env.write_text("enable -n kill\n", encoding="utf-8")
+            invalid_configs = (
+                {"STOP_LOCAL_WAIT_ATTEMPTS": ""},
+                {"STOP_LOCAL_WAIT_ATTEMPTS": "0"},
+                {"STOP_LOCAL_WAIT_ATTEMPTS": "-1"},
+                {"STOP_LOCAL_WAIT_ATTEMPTS": "1.5"},
+                {"STOP_LOCAL_WAIT_ATTEMPTS": "1000000"},
+                {"STOP_LOCAL_WAIT_ATTEMPTS": '$(touch "$SENTINEL")'},
+                {"STOP_LOCAL_WAIT_INTERVAL": ""},
+                {"STOP_LOCAL_WAIT_INTERVAL": "-1"},
+                {"STOP_LOCAL_WAIT_INTERVAL": "+1"},
+                {"STOP_LOCAL_WAIT_INTERVAL": "nan"},
+                {"STOP_LOCAL_WAIT_INTERVAL": "1000000"},
+            )
+            for config in invalid_configs:
+                with self.subTest(config=config):
+                    sentinel.unlink(missing_ok=True)
+                    kill_calls.unlink(missing_ok=True)
+                    invalid = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            'source "$IDENTITY_SCRIPT"; terminate_pid_verified 4242 python-worker "$ROOT"',
+                        ],
+                        env={
+                            **os.environ,
+                            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                            "BASH_ENV": str(bash_env),
+                            "IDENTITY_SCRIPT": str(LOCAL_PROCESS_IDENTITY_SCRIPT),
+                            "ROOT": str(root),
+                            "KILL_CALLS": str(kill_calls),
+                            "SENTINEL": str(sentinel),
+                            **config,
+                        },
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertNotEqual(0, invalid.returncode)
+                    self.assertFalse(kill_calls.exists())
+                    self.assertFalse(sentinel.exists())
 
     def test_stop_local_leaves_unrelated_port_listener_and_returns_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

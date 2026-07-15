@@ -64,7 +64,7 @@ stop_pid_file() {
     return 1
   fi
 
-  if ! terminate_pid_verified "${pid}"; then
+  if ! terminate_pid_verified "${pid}" "${service}" "${ROOT_DIR}" "" "${recorded_start}"; then
     echo "could not stop project process ${pid} for ${service}" >&2
     return 1
   fi
@@ -92,7 +92,7 @@ stop_screen_sessions() {
   local service="$1"
   command -v screen >/dev/null 2>&1 || return 0
   local session_name="$(screen_prefix)_${service//-/_}"
-  local session_id session_pid result=0
+  local session_id session_pid session_start result=0
   while IFS= read -r session_id; do
     [[ -n "${session_id}" ]] || continue
     session_pid="${session_id%%.*}"
@@ -102,12 +102,18 @@ stop_screen_sessions() {
       result=1
       continue
     fi
+    session_start="$(process_start_identity "${session_pid}" || true)"
+    if [[ -z "${session_start}" ]]; then
+      echo "refusing to stop non-project screen session ${session_id}" >&2
+      result=1
+      continue
+    fi
     if ! screen -S "${session_id}" -X quit >/dev/null 2>&1; then
       echo "could not stop project screen session ${session_id}" >&2
       result=1
       continue
     fi
-    if ! terminate_pid_verified "${session_pid}"; then
+    if ! terminate_pid_verified "${session_pid}" "${service}" "${ROOT_DIR}" "${session_name}" "${session_start}"; then
       echo "could not stop project process ${session_pid} for ${service}" >&2
       result=1
     fi
@@ -133,7 +139,7 @@ stop_service_pids_on_port() {
       echo "leaving unrelated listener PID ${pid} on port ${port}" >&2
       continue
     fi
-    if ! terminate_pid_verified "${pid}"; then
+    if ! terminate_pid_verified "${pid}" "${service}" "${ROOT_DIR}"; then
       echo "could not stop project process ${pid} for ${service}" >&2
       result=1
     fi

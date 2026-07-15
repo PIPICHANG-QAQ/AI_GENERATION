@@ -120,7 +120,7 @@ stop_service_pids_on_port() {
     if ! pid_matches_service "${service}" "${pid}" "${ROOT_DIR}"; then
       return 1
     fi
-    if ! terminate_pid_verified "${pid}"; then
+    if ! terminate_pid_verified "${pid}" "${service}" "${ROOT_DIR}"; then
       echo "Could not stop ${service} process ${pid} on port ${port}." >&2
       return 1
     fi

@@ -13,7 +13,7 @@ local_pid_is_running() {
 process_start_identity() {
   local pid="$1"
   local identity
-  identity="$(ps -p "${pid}" -o lstart= 2>/dev/null || true)"
+  identity="$(LC_ALL=C TZ=UTC ps -p "${pid}" -o lstart= 2>/dev/null || true)"
   identity="$(printf '%s\n' "${identity}" | awk '{$1=$1; print}')"
   [[ -n "${identity}" ]] || return 1
   printf '%s\n' "${identity}"
@@ -84,13 +84,17 @@ screen_pid_matches_service() {
   local root="$3"
   local session="$4"
   local_pid_is_running "${pid}" || return 1
-  local command cwd wrapper
+  local command normalized_command cwd wrapper
   command="$(process_command "${pid}")"
+  normalized_command="$(printf '%s\n' "${command}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
   cwd="$(process_cwd "${pid}")"
   wrapper=".run/${service}.sh"
   cwd_belongs_to_project "${cwd}" "${root}" || return 1
-  [[ "${command}" == *screen* &&
-     "${command}" == *"${session}"* &&
+  case " ${normalized_command} " in
+    *"/screen "*|*" screen "*) ;;
+    *) return 1 ;;
+  esac
+  [[ "${command}" == *"${session}"* &&
      "${command}" == *"${wrapper}"* ]]
 }
 
@@ -156,27 +160,124 @@ read_pid_record() {
   PID_RECORD_IS_VERSIONED="true"
 }
 
+stop_wait_attempts_valid() {
+  local value="$1"
+  [[ "${value}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${#value}" -le 3 ]] || return 1
+  (( value <= 600 ))
+}
+
+stop_wait_interval_valid() {
+  local value="$1"
+  [[ "${value}" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ || "${value}" =~ ^\.[0-9]+$ ]] || return 1
+  local whole fraction=""
+  if [[ "${value}" == .* ]]; then
+    whole=0
+    fraction="${value#.}"
+  else
+    whole="${value%%.*}"
+    if [[ "${value}" == *.* ]]; then
+      fraction="${value#*.}"
+    fi
+  fi
+  [[ "${#whole}" -le 2 ]] || return 1
+  if (( whole < 60 )); then
+    return 0
+  fi
+  (( whole == 60 )) || return 1
+  [[ -z "${fraction}" || "${fraction}" =~ ^0+$ ]]
+}
+
+termination_target_status() {
+  local pid="$1"
+  local expected_start="$2"
+  local service="$3"
+  local root="$4"
+  local screen_session="$5"
+  local current_start
+
+  local_pid_is_running "${pid}" || return 10
+  current_start="$(process_start_identity "${pid}" || true)"
+  [[ -n "${current_start}" && "${current_start}" == "${expected_start}" ]] || return 10
+  if [[ -n "${screen_session}" ]]; then
+    screen_pid_matches_service "${service}" "${pid}" "${root}" "${screen_session}" || return 20
+  else
+    pid_matches_service "${service}" "${pid}" "${root}" || return 20
+  fi
+}
+
 terminate_pid_verified() {
   local pid="$1"
-  local attempts="${STOP_LOCAL_WAIT_ATTEMPTS:-30}"
-  local interval="${STOP_LOCAL_WAIT_INTERVAL:-0.2}"
-  local count
+  local service="$2"
+  local root="$3"
+  local screen_session="${4:-}"
+  local prior_expected_start="${5:-}"
+  local attempts interval expected_start status count
+
+  if [[ "${STOP_LOCAL_WAIT_ATTEMPTS+x}" == x ]]; then
+    attempts="${STOP_LOCAL_WAIT_ATTEMPTS}"
+  else
+    attempts=30
+  fi
+  if [[ "${STOP_LOCAL_WAIT_INTERVAL+x}" == x ]]; then
+    interval="${STOP_LOCAL_WAIT_INTERVAL}"
+  else
+    interval=0.2
+  fi
+  if ! stop_wait_attempts_valid "${attempts}" || ! stop_wait_interval_valid "${interval}"; then
+    echo "invalid local stop wait configuration" >&2
+    return 1
+  fi
+
   local_pid_is_running "${pid}" || return 0
+  expected_start="$(process_start_identity "${pid}" || true)"
+  [[ -n "${expected_start}" ]] || return 0
+  if [[ -n "${prior_expected_start}" && "${expected_start}" != "${prior_expected_start}" ]]; then
+    return 0
+  fi
+
+  status=0
+  termination_target_status "${pid}" "${expected_start}" "${service}" "${root}" "${screen_session}" || status=$?
+  case "${status}" in
+    0) ;;
+    10) return 0 ;;
+    *) return 1 ;;
+  esac
 
   kill "${pid}" 2>/dev/null || true
   count=0
   while (( count < attempts )); do
-    local_pid_is_running "${pid}" || return 0
+    status=0
+    termination_target_status "${pid}" "${expected_start}" "${service}" "${root}" "${screen_session}" || status=$?
+    case "${status}" in
+      0) ;;
+      10) return 0 ;;
+      *) return 1 ;;
+    esac
     sleep "${interval}"
     count=$((count + 1))
   done
 
+  status=0
+  termination_target_status "${pid}" "${expected_start}" "${service}" "${root}" "${screen_session}" || status=$?
+  case "${status}" in
+    0) ;;
+    10) return 0 ;;
+    *) return 1 ;;
+  esac
   kill -9 "${pid}" 2>/dev/null || true
+
   count=0
   while (( count < attempts )); do
-    local_pid_is_running "${pid}" || return 0
+    status=0
+    termination_target_status "${pid}" "${expected_start}" "${service}" "${root}" "${screen_session}" || status=$?
+    case "${status}" in
+      0) ;;
+      10) return 0 ;;
+      *) return 1 ;;
+    esac
     sleep "${interval}"
     count=$((count + 1))
   done
-  ! local_pid_is_running "${pid}"
+  return 1
 }
