@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).with_name("start_server_docker.sh").resolve()
 ENTRYPOINT_PATH = SCRIPT_PATH.with_name("docker-entrypoint.sh")
+DOCKERFILE_PATH = SCRIPT_PATH.parents[1] / "Dockerfile"
 COMPOSE_PATH = SCRIPT_PATH.parents[1] / "docker-compose.server.yml"
 ENV_EXAMPLE_PATH = SCRIPT_PATH.parents[1] / ".env.example"
 README_PATH = SCRIPT_PATH.parents[1] / "README.md"
@@ -289,6 +291,25 @@ class StartServerDockerTest(unittest.TestCase):
 
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertEqual("clean -DskipTests package", maven_args.read_text(encoding="utf-8").strip())
+
+    def test_docker_image_normalizes_frontend_permissions_for_nginx_worker(self) -> None:
+        dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+        copy_command = "COPY local-platform/dist /usr/share/nginx/html"
+        permission_command = "chmod -R a+rX /usr/share/nginx/html"
+        self.assertIn(copy_command, dockerfile)
+        self.assertIn(permission_command, dockerfile)
+        self.assertLess(dockerfile.index(copy_command), dockerfile.index(permission_command))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            html = Path(temp_dir) / "html"
+            html.mkdir(mode=0o700)
+            index = html / "index.html"
+            index.write_text("ok\n", encoding="utf-8")
+            index.chmod(0o600)
+            subprocess.run(["chmod", "-R", "a+rX", str(html)], check=True)
+
+            self.assertTrue(stat.S_IMODE(html.stat().st_mode) & stat.S_IXOTH)
+            self.assertTrue(stat.S_IMODE(index.stat().st_mode) & stat.S_IROTH)
 
     def test_server_artifact_build_without_maven_uses_existing_jar(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

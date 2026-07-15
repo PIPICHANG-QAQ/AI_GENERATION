@@ -49,6 +49,7 @@ COPY scripts/docker-entrypoint.sh scripts/check_mineru.py /app/scripts/
 
 RUN chmod +x /app/scripts/docker-entrypoint.sh /app/scripts/check_mineru.py \
     && mkdir -p /data /app/backend/storage /run/nginx \
+    && chmod -R a+rX /usr/share/nginx/html \
     && chown -R www-data:www-data /usr/share/nginx/html
 
 EXPOSE 8080 8018
