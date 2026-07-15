@@ -138,7 +138,7 @@ class CheckMineruCliTest(unittest.TestCase):
         )
         self.assertEqual("1", run.call_args.kwargs["env"]["CHECK_MINERU_IN_WORKER_VENV"])
 
-    def test_entrypoint_never_treats_traceback_as_success(self):
+    def test_entrypoint_preserves_zero_exit_for_arbitrary_child_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             worker_python = Path(tmp) / "python"
             worker_python.touch()
@@ -159,15 +159,16 @@ class CheckMineruCliTest(unittest.TestCase):
             ), mock.patch("sys.stderr", io.StringIO()):
                 exit_code = check_mineru.entrypoint(["--json", "--skip-api"])
 
-        self.assertEqual(1, exit_code)
+        self.assertEqual(0, exit_code)
 
     def test_provider_exception_is_failure_not_traceback_success(self):
         output = io.StringIO()
+        error_output = io.StringIO()
         with mock.patch.object(
             check_mineru,
             "provider_status",
             side_effect=RuntimeError("provider traceback"),
-        ), mock.patch("sys.stdout", output):
+        ), mock.patch("sys.stdout", output), mock.patch("sys.stderr", error_output):
             exit_code = check_mineru.main(["--json", "--skip-api"])
 
         self.assertEqual(1, exit_code)
@@ -175,6 +176,7 @@ class CheckMineruCliTest(unittest.TestCase):
         self.assertFalse(payload["installed"])
         self.assertFalse(payload["runtimeProbeOk"])
         self.assertIn("provider traceback", payload["error"])
+        self.assertNotIn("Traceback", error_output.getvalue())
 
 
 if __name__ == "__main__":

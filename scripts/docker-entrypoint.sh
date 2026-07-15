@@ -76,7 +76,7 @@ pids+=("$!")
 nginx -g "daemon off;" &
 pids+=("$!")
 
-wait -n "${pids[@]}"
-status="$?"
+status=0
+wait -n "${pids[@]}" || status=$?
 terminate
 exit "${status}"

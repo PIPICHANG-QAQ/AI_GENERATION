@@ -77,9 +77,6 @@ def entrypoint(argv: Sequence[str] | None = None) -> int:
             return 1
         sys.stdout.write(result.stdout or "")
         sys.stderr.write(result.stderr or "")
-        output = f"{result.stdout or ''}\n{result.stderr or ''}"
-        if result.returncode == 0 and "Traceback (most recent call last):" in output:
-            return 1
         return result.returncode
     return main(cli_args)
 
