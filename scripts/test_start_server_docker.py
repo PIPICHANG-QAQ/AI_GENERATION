@@ -20,6 +20,8 @@ SCRIPT_PATH = Path(__file__).with_name("start_server_docker.sh").resolve()
 ENTRYPOINT_PATH = SCRIPT_PATH.with_name("docker-entrypoint.sh")
 COMPOSE_PATH = SCRIPT_PATH.parents[1] / "docker-compose.server.yml"
 ENV_EXAMPLE_PATH = SCRIPT_PATH.parents[1] / ".env.example"
+README_PATH = SCRIPT_PATH.parents[1] / "README.md"
+OPERATIONS_GUIDE_PATH = SCRIPT_PATH.parents[1] / "docs" / "delivery" / "OPERATIONS_GUIDE.md"
 RECOVERY_PLAN_PATH = (
     SCRIPT_PATH.parents[1]
     / "docs"
@@ -165,10 +167,22 @@ class StartServerDockerTest(unittest.TestCase):
     def test_task8_java_build_cleans_preserved_target_before_packaging(self) -> None:
         plan = RECOVERY_PLAN_PATH.read_text(encoding="utf-8")
         task8 = plan.split("## Task 8", 1)[1].split("## Task 9", 1)[0]
-        self.assertIn(
-            'mvn -f backend/pom.xml clean -DskipTests package',
-            task8,
+        readme = README_PATH.read_text(encoding="utf-8")
+        readme_server_docker = readme.split("## 服务器 Docker 部署", 1)[1]
+        operations = OPERATIONS_GUIDE_PATH.read_text(encoding="utf-8")
+        operations_server_docker = operations.split("### 5.1 单机 Docker Compose 部署", 1)[1].split("### 5.2", 1)[0]
+        cases = (
+            ("Task8", task8, "mvn -f backend/pom.xml clean -DskipTests package"),
+            ("README server Docker", readme_server_docker, "(cd backend && mvn clean -DskipTests package)"),
+            (
+                "operations server Docker",
+                operations_server_docker,
+                "(cd backend && mvn clean -DskipTests package)",
+            ),
         )
+        for name, section, command in cases:
+            with self.subTest(name=name):
+                self.assertIn(command, section)
 
     def test_default_host_venv_drives_every_mineru_command(self) -> None:
         completed = self.run_bash(

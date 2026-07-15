@@ -279,7 +279,7 @@ Python worker：http://localhost:8000
 先生成 Java jar 和前端静态资源：
 
 ```bash
-(cd backend && mvn -DskipTests package)
+(cd backend && mvn clean -DskipTests package)
 (cd local-platform && npm run build)
 ```
 
