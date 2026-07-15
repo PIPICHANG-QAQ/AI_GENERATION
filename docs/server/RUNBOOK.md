@@ -24,9 +24,11 @@ healthy
 ## 重建并启动服务
 
 ```bash
+set -euo pipefail
 cd /home/user/AI_GENERATION_DOCKER
 JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}" mvn -f backend/pom.xml clean -DskipTests package
-npm --prefix local-platform ci && npm --prefix local-platform run build
+npm --prefix local-platform ci
+npm --prefix local-platform run build
 sudo docker compose -f docker-compose.server.yml build question-engine
 sudo docker compose -f docker-compose.server.yml up -d --force-recreate question-engine
 sudo docker compose -f docker-compose.server.yml ps

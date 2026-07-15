@@ -144,6 +144,75 @@ class StartServerDockerTest(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return server
 
+    def extract_bash_block(self, section: str) -> str:
+        _, fence, remainder = section.partition("```bash")
+        self.assertTrue(fence, "documented section has no bash code block")
+        block, closing_fence, _ = remainder.partition("```")
+        self.assertTrue(closing_fence, "documented bash code block is not closed")
+        return block.strip()
+
+    def run_documented_build_tail(
+        self,
+        section: str,
+        *,
+        maven_status: int = 0,
+        failing_npm_command: str = "",
+    ) -> tuple[subprocess.CompletedProcess[str], bool]:
+        block = self.extract_bash_block(section)
+        lines = block.splitlines()
+        build_index = next(
+            index
+            for index, line in enumerate(lines)
+            if "mvn -f backend/pom.xml clean -DskipTests package" in line
+        )
+        fail_fast = lines[0] if lines and lines[0] == "set -euo pipefail" else ""
+        build_tail = "\n".join(lines[build_index:])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            docker_marker = Path(temp_dir) / "docker-called"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "DOCKER_MARKER": str(docker_marker),
+                    "FAKE_MAVEN_STATUS": str(maven_status),
+                    "FAKE_NPM_FAILURE": failing_npm_command,
+                }
+            )
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f"""
+                    mvn() {{ return "$FAKE_MAVEN_STATUS"; }}
+                    npm() {{
+                      if [[ -n "$FAKE_NPM_FAILURE" && "$*" == "$FAKE_NPM_FAILURE" ]]; then
+                        return 43
+                      fi
+                      return 0
+                    }}
+                    python3() {{ return 0; }}
+                    docker() {{ printf '%s\n' "$*" >>"$DOCKER_MARKER"; }}
+                    sudo() {{
+                      if [[ "${{1-}}" == "docker" ]]; then
+                        shift
+                        docker "$@"
+                      else
+                        "$@"
+                      fi
+                    }}
+                    {fail_fast}
+                    {build_tail}
+                    """,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            docker_called = docker_marker.exists()
+
+        return completed, docker_called
+
     def test_server_artifact_build_cleans_maven_output_before_packaging(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -268,30 +337,66 @@ class StartServerDockerTest(unittest.TestCase):
     def test_task8_rollback_rebuilds_application_artifacts_before_restart(self) -> None:
         plan = RECOVERY_PLAN_PATH.read_text(encoding="utf-8")
         rollback = plan.split("### Step 8：失败回滚路径", 1)[1].split("## Task 9", 1)[0]
+        block = self.extract_bash_block(rollback)
+        self.assertEqual("set -euo pipefail", block.splitlines()[0])
         commands = (
             'rsync -a --delete',
             'mvn -f backend/pom.xml clean -DskipTests package',
-            'npm --prefix local-platform ci && npm --prefix local-platform run build',
+            'npm --prefix local-platform ci',
+            'npm --prefix local-platform run build',
             'docker compose -f docker-compose.server.yml up -d --build question-engine',
         )
         for command in commands:
-            self.assertIn(command, rollback)
-        positions = [rollback.index(command) for command in commands]
+            self.assertIn(command, block)
+        positions = [block.index(command) for command in commands]
         self.assertEqual(sorted(positions), positions)
 
     def test_runbook_rebuilds_application_artifacts_before_compose_start(self) -> None:
         runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
         rebuild = runbook.split("## 重建并启动服务", 1)[1].split("## 原子重建 MinerU venv", 1)[0]
+        block = self.extract_bash_block(rebuild)
+        self.assertEqual("set -euo pipefail", block.splitlines()[0])
         commands = (
             'mvn -f backend/pom.xml clean -DskipTests package',
-            'npm --prefix local-platform ci && npm --prefix local-platform run build',
+            'npm --prefix local-platform ci',
+            'npm --prefix local-platform run build',
             'docker compose -f docker-compose.server.yml build question-engine',
             'docker compose -f docker-compose.server.yml up -d --force-recreate question-engine',
         )
         for command in commands:
-            self.assertIn(command, rebuild)
-        positions = [rebuild.index(command) for command in commands]
+            self.assertIn(command, block)
+        positions = [block.index(command) for command in commands]
         self.assertEqual(sorted(positions), positions)
+
+    def test_documented_rebuild_failures_stop_before_docker(self) -> None:
+        plan = RECOVERY_PLAN_PATH.read_text(encoding="utf-8")
+        runbook = RUNBOOK_PATH.read_text(encoding="utf-8")
+        sections = (
+            (
+                "Task8 rollback",
+                plan.split("### Step 8：失败回滚路径", 1)[1].split("## Task 9", 1)[0],
+            ),
+            (
+                "server runbook",
+                runbook.split("## 重建并启动服务", 1)[1].split("## 原子重建 MinerU venv", 1)[0],
+            ),
+        )
+        failures = (
+            ("Maven", 42, ""),
+            ("frontend ci", 0, "--prefix local-platform ci"),
+            ("frontend build", 0, "--prefix local-platform run build"),
+        )
+
+        for section_name, section in sections:
+            for failure_name, maven_status, failing_npm_command in failures:
+                with self.subTest(section=section_name, failure=failure_name):
+                    completed, docker_called = self.run_documented_build_tail(
+                        section,
+                        maven_status=maven_status,
+                        failing_npm_command=failing_npm_command,
+                    )
+                    self.assertNotEqual(0, completed.returncode, completed.stderr)
+                    self.assertFalse(docker_called, "Docker ran after a documented build failure")
 
     def test_default_host_venv_drives_every_mineru_command(self) -> None:
         completed = self.run_bash(
