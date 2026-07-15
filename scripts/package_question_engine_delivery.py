@@ -104,6 +104,8 @@ REQUIRED_IN_PACKAGE = [
     "scripts/build_mineru_wheelhouse.sh",
     "scripts/check_mineru.py",
     "scripts/test_check_mineru.py",
+    "scripts/rebuild_mineru_venv.py",
+    "scripts/test_rebuild_mineru_venv.py",
     "scripts/docker-entrypoint.sh",
     "scripts/start_server_docker.sh",
     "scripts/test_docker_entrypoint.py",

@@ -32,6 +32,72 @@ sudo docker compose -f docker-compose.server.yml ps
 
 重建后需要确认 `mineru-api` 常驻进程仍在。
 
+## 原子重建 MinerU venv
+
+服务器 venv 必须在服务器上联网解析 Linux 制品，不设置 `MINERU_WHEELHOUSE`，也不使用本地 macOS wheelhouse。切换期间必须停止 `question-engine` 容器；只有 active venv 的 readiness 和版本检查都成功后才能重启：
+
+```bash
+cd /home/user/AI_GENERATION_DOCKER
+set -euo pipefail
+
+sudo docker compose -f docker-compose.server.yml stop question-engine
+sudo docker compose -f docker-compose.server.yml ps
+
+python3 scripts/rebuild_mineru_venv.py \
+  --target /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv \
+  --python /usr/bin/python3 \
+  --mineru-version 3.4.2 \
+  --check-script /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py \
+  --keep-backups 2
+
+MINERU_COMMAND=/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru \
+MINERU_API_ENABLED=false \
+CHECK_MINERU_IN_WORKER_VENV=1 \
+  /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/python \
+  /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py --json --skip-api
+/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru --version
+
+sudo docker compose -f docker-compose.server.yml up -d question-engine
+sudo docker compose -f docker-compose.server.yml ps
+```
+
+安装、staging 验证或 active 复验失败时，不要启动容器。脚本会保留 staging 供诊断；若切换后复验失败，会把新环境移回原 staging 路径并恢复旧 active（如果旧 active 存在）。
+
+## 回滚 MinerU venv
+
+先从本次重建记录中选择经过验收的精确 backup 路径，替换下面示例时间戳；不得用 `find | sort | tail` 猜测最新目录。回滚同样必须先停容器，readiness 成功后才重启：
+
+```bash
+cd /home/user/AI_GENERATION_DOCKER
+set -euo pipefail
+
+backup="/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv.bak-20260715T120000.000000Z-xxxxxxxx"
+test -d "$backup"
+test ! -L "$backup"
+
+sudo docker compose -f docker-compose.server.yml stop question-engine
+sudo docker compose -f docker-compose.server.yml ps
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+mv vendor/mineru-venv "vendor/mineru-venv.failed-${stamp}"
+if ! mv "$backup" vendor/mineru-venv; then
+  mv "vendor/mineru-venv.failed-${stamp}" vendor/mineru-venv
+  exit 1
+fi
+
+MINERU_COMMAND=/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru \
+MINERU_API_ENABLED=false \
+CHECK_MINERU_IN_WORKER_VENV=1 \
+  /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/python \
+  /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py --json --skip-api
+/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru --version
+
+sudo docker compose -f docker-compose.server.yml up -d question-engine
+sudo docker compose -f docker-compose.server.yml ps
+```
+
+如果回滚后的 readiness 或版本检查失败，保持容器停止，保留 `vendor/mineru-venv.failed-${stamp}`，不要把损坏的 venv 作为健康环境启动。
+
 ## 健康检查
 
 服务器本机：

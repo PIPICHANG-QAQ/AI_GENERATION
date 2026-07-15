@@ -24,6 +24,20 @@ class DeliveryBoundaryTest(unittest.TestCase):
                     delivery.validate(files),
                 )
 
+    def test_mineru_rebuild_tool_and_tests_are_individually_required(self) -> None:
+        rebuild_dependencies = (
+            "scripts/rebuild_mineru_venv.py",
+            "scripts/test_rebuild_mineru_venv.py",
+        )
+        for missing in rebuild_dependencies:
+            with self.subTest(missing=missing):
+                self.assertIn(missing, delivery.REQUIRED_IN_PACKAGE)
+                files = [delivery.ROOT / relative for relative in delivery.REQUIRED_IN_PACKAGE if relative != missing]
+                self.assertIn(
+                    f"missing required delivery file: {missing}",
+                    delivery.validate(files),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/../backend/python-worker"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -n "${MINERU_VENV_TARGET:-}" ]]; then
+  python3 "${ROOT_DIR}/scripts/rebuild_mineru_venv.py" \
+    --target "${MINERU_VENV_TARGET}" \
+    --python "${MINERU_PYTHON:-python3}" \
+    --mineru-version "${MINERU_VERSION:-3.4.2}" \
+    --check-script "${ROOT_DIR}/scripts/check_mineru.py" \
+    --keep-backups "${MINERU_KEEP_BACKUPS:-2}"
+  exit 0
+fi
 
-source ../../scripts/ensure_python_worker_venv.sh
+cd "${ROOT_DIR}/backend/python-worker"
 
-ROOT_DIR="$(cd ../.. && pwd)"
+source "${ROOT_DIR}/scripts/ensure_python_worker_venv.sh"
+
 MINERU_WHEELHOUSE="${MINERU_WHEELHOUSE:-${ROOT_DIR}/vendor/mineru-wheelhouse}"
 if [[ "${MINERU_WHEELHOUSE}" != /* ]]; then
   MINERU_WHEELHOUSE="${ROOT_DIR}/${MINERU_WHEELHOUSE}"
