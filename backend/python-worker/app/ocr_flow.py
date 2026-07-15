@@ -11,6 +11,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
@@ -20,6 +21,14 @@ from app.ocr.contracts import CanonicalOcrBundle
 
 
 DEFAULT_OCR_PROVIDER = "mineru"
+RUNTIME_IMPORT_PROBE = (
+    "from markupsafe import Markup\n"
+    "from jinja2 import Environment\n"
+    "import transformers\n"
+    "from mineru.cli.common import read_fn"
+)
+RUNTIME_PROBE_CACHE_TTL_SECONDS = 60.0
+RUNTIME_PROBE_MAX_TIMEOUT_SECONDS = 15
 
 
 @dataclass(frozen=True)
@@ -74,11 +83,13 @@ class OcrProvider:
 class MineruOcrProvider(OcrProvider):
     """MinerU OCR provider 实现。"""
     name = "mineru"
+    _runtime_probe_cache: dict[tuple[object, ...], tuple[float, dict[str, Any]]] = {}
 
     def __init__(self, app_root: Path, version_timeout_seconds: int) -> None:
         """执行   init   逻辑。"""
         self.app_root = app_root
         self.version_timeout_seconds = version_timeout_seconds
+        self._monotonic = time.monotonic
 
     def _script_command_candidates(self) -> list[ProviderCommand]:
         """执行  script command candidates 逻辑。"""
@@ -243,26 +254,152 @@ class MineruOcrProvider(OcrProvider):
                 "error": str(exc),
             }
 
+    def _command_executable_path(self, command: ProviderCommand) -> Path | None:
+        if not command.args:
+            return None
+        executable = os.path.expanduser(command.args[0])
+        if os.path.isabs(executable) or os.sep in executable:
+            return Path(executable).absolute()
+        resolved = shutil.which(executable)
+        return Path(resolved).absolute() if resolved else None
+
+    def _runtime_python_candidate(self, command: ProviderCommand) -> Path | None:
+        executable = self._command_executable_path(command)
+        if command.source == "python-entrypoint":
+            current_python = Path(sys.executable).absolute()
+            if executable is None or executable.resolve() != current_python.resolve():
+                return None
+            return current_python
+        if executable is None:
+            return None
+        return (executable.parent / "python").absolute()
+
+    def _runtime_python(self, command: ProviderCommand) -> Path | None:
+        python = self._runtime_python_candidate(command)
+        if python is None or not python.is_file() or not os.access(python, os.X_OK):
+            return None
+        return python
+
+    @staticmethod
+    def _mtime_ns(path: Path | None) -> int | None:
+        if path is None:
+            return None
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def _runtime_probe_cache_key(self, command: ProviderCommand) -> tuple[object, ...]:
+        executable = self._command_executable_path(command)
+        runtime_python = self._runtime_python_candidate(command)
+        return (
+            command.source,
+            tuple(command.args),
+            str(executable) if executable else None,
+            self._mtime_ns(executable),
+            str(runtime_python) if runtime_python else None,
+            self._mtime_ns(runtime_python),
+        )
+
+    def _runtime_python_error(self, command: ProviderCommand) -> str:
+        executable = self._command_executable_path(command)
+        if command.source == "python-entrypoint":
+            return (
+                "MinerU Python entrypoint does not use the current worker interpreter "
+                f"{Path(sys.executable).absolute()}."
+            )
+        if executable is None:
+            return f"Unable to resolve the MinerU executable: {command.args[0] if command.args else '<empty>'}."
+        return f"MinerU runtime interpreter is missing or not runnable: {executable.parent / 'python'}."
+
+    def _probe_runtime(self, command: ProviderCommand) -> dict[str, Any]:
+        cache_key = self._runtime_probe_cache_key(command)
+        now = self._monotonic()
+        cached = self._runtime_probe_cache.get(cache_key)
+        if cached is not None and 0 <= now - cached[0] < RUNTIME_PROBE_CACHE_TTL_SECONDS:
+            return dict(cached[1])
+
+        python = self._runtime_python(command)
+        if python is None:
+            result: dict[str, Any] = {
+                "runtimeProbeOk": False,
+                "runtimePython": None,
+                "runtimeError": self._runtime_python_error(command),
+            }
+        else:
+            try:
+                completed = subprocess.run(
+                    [str(python), "-c", RUNTIME_IMPORT_PROBE],
+                    capture_output=True,
+                    text=True,
+                    timeout=min(self.version_timeout_seconds, RUNTIME_PROBE_MAX_TIMEOUT_SECONDS),
+                    check=False,
+                )
+                error = (completed.stderr or completed.stdout).strip()
+                result = {
+                    "runtimeProbeOk": completed.returncode == 0,
+                    "runtimePython": str(python),
+                    "runtimeError": (
+                        None
+                        if completed.returncode == 0
+                        else (error[-2000:] or f"Runtime import probe exited with code {completed.returncode}.")
+                    ),
+                }
+            except subprocess.TimeoutExpired as exc:
+                result = {
+                    "runtimeProbeOk": False,
+                    "runtimePython": str(python),
+                    "runtimeError": f"Runtime import probe timed out after {exc.timeout} seconds.",
+                }
+            except OSError as exc:
+                result = {
+                    "runtimeProbeOk": False,
+                    "runtimePython": str(python),
+                    "runtimeError": f"Runtime import probe could not start: {exc}",
+                }
+
+        self._runtime_probe_cache[cache_key] = (now, dict(result))
+        return result
+
     def resolve_command(self) -> tuple[ProviderCommand | None, dict[str, Any]]:
         """执行 resolve command 逻辑。"""
         probes = []
         for candidate in self._command_candidates():
             probe = self._probe_command(candidate)
-            probes.append(probe)
             if probe["valid"]:
+                runtime_probe = self._probe_runtime(candidate)
+                probe.update(runtime_probe)
+                if not runtime_probe["runtimeProbeOk"]:
+                    probe["error"] = runtime_probe["runtimeError"]
+            probes.append(probe)
+            if probe["valid"] and probe.get("runtimeProbeOk"):
                 return candidate, {
                     "selectedSource": candidate.source,
                     "selectedCommand": candidate.display,
                     "version": probe["version"],
+                    "versionProbeOk": probe["versionProbeOk"],
+                    "runtimeProbeOk": probe["runtimeProbeOk"],
+                    "runtimePython": probe["runtimePython"],
                     "candidates": probes,
                 }
 
+        runtime_errors = [probe["runtimeError"] for probe in probes if probe.get("runtimeError")]
+        if runtime_errors:
+            error = "No healthy MinerU runtime found. " + " | ".join(runtime_errors)
+        else:
+            error = "No valid MinerU command found. Install MinerU in the Python worker venv or configure MINERU_COMMAND."
+            if probes and probes[-1].get("error"):
+                error = f"{error} Last candidate error: {probes[-1]['error']}"
+        diagnostic = probes[-1] if probes else {}
         return None, {
             "selectedSource": None,
             "selectedCommand": None,
             "version": None,
+            "versionProbeOk": bool(diagnostic.get("versionProbeOk", False)),
+            "runtimeProbeOk": bool(diagnostic.get("runtimeProbeOk", False)),
+            "runtimePython": diagnostic.get("runtimePython"),
             "candidates": probes,
-            "error": "No valid MinerU command found. Install MinerU in the Python worker venv or configure MINERU_COMMAND.",
+            "error": error,
         }
 
     def command(self) -> str | None:
@@ -276,9 +413,14 @@ class MineruOcrProvider(OcrProvider):
         status: dict[str, Any] = {
             "provider": self.name,
             "installed": command is not None,
-            "command": command.display if command else None,
+            "command": list(command.args) if command else None,
+            "source": command.source if command else None,
+            "commandDisplay": command.display if command else None,
             "commandSource": command.source if command else None,
             "version": resolution.get("version"),
+            "versionProbeOk": bool(resolution.get("versionProbeOk", False)),
+            "runtimeProbeOk": bool(resolution.get("runtimeProbeOk", False)),
+            "runtimePython": resolution.get("runtimePython"),
             "error": resolution.get("error"),
             "candidates": resolution.get("candidates", []),
         }
