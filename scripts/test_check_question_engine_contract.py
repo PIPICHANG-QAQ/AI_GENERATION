@@ -11,6 +11,13 @@ import check_question_engine_contract as contract_check
 
 
 class MermaidStructureCheckTest(unittest.TestCase):
+    def write_pair(self, root: Path, mmd_text: str, svg_text: str) -> tuple[Path, Path]:
+        mmd = root / "flow.mmd"
+        svg = root / "flow.svg"
+        mmd.write_text(mmd_text, encoding="utf-8")
+        svg.write_text(svg_text, encoding="utf-8")
+        return mmd, svg
+
     def test_reports_declared_mmd_node_missing_from_svg(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -21,7 +28,7 @@ class MermaidStructureCheckTest(unittest.TestCase):
                 encoding="utf-8",
             )
             svg.write_text(
-                '<svg xmlns="http://www.w3.org/2000/svg"><g id="flowchart-Present-0"/></svg>',
+                '<svg xmlns="http://www.w3.org/2000/svg"><g id="flowchart-Present-0"><text>Present</text></g></svg>',
                 encoding="utf-8",
             )
 
@@ -30,6 +37,42 @@ class MermaidStructureCheckTest(unittest.TestCase):
             failures = validator(mmd, svg)
 
         self.assertEqual(["flow.svg: missing rendered node id for Missing"], failures)
+
+    def test_reports_stale_rendered_node_label_with_same_node_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n  A["Current<br/>Label"]\n',
+                '<svg xmlns="http://www.w3.org/2000/svg"><g id="flowchart-A-0"><text>Stale Label</text></g></svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual(["flow.svg: stale rendered label for A: expected 'Current Label'"], failures)
+
+    def test_reports_missing_rendered_directed_edge_with_same_nodes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n  A["A"]\n  B["B"]\n  A --> B\n',
+                '<svg xmlns="http://www.w3.org/2000/svg"><g id="flowchart-A-0"><text>A</text></g><g id="flowchart-B-1"><text>B</text></g></svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual(["flow.svg: missing rendered directed edge A -> B"], failures)
+
+    def test_reports_missing_rendered_class_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mmd, svg = self.write_pair(
+                Path(tmp),
+                'flowchart LR\n  A["A"]\n  class A important;\n',
+                '<svg xmlns="http://www.w3.org/2000/svg"><g id="flowchart-A-0" class="node default"><text>A</text></g></svg>',
+            )
+
+            failures = contract_check.validate_mermaid_svg_pair(mmd, svg)
+
+        self.assertEqual(["flow.svg: missing rendered class important for A"], failures)
 
     def test_worker_bundle_schema_requires_compatibility_artifact_root(self) -> None:
         worker_contract = (

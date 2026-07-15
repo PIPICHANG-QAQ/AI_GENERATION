@@ -5,6 +5,7 @@ This script is intentionally dependency-free so it can run in local development,
 CI, or a delivery packaging step before a full OpenAPI generator is introduced.
 """
 
+import html
 import re
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
@@ -21,11 +22,56 @@ MERMAID_SVG_PAIRS = (
 )
 
 MERMAID_NODE_DECLARATION = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*(?:\[|\(|\{)", re.MULTILINE)
+MERMAID_NODE_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*(?:\[|\(|\{)")
+MERMAID_CLASS_STATEMENT = re.compile(
+    r"^\s*class\s+([A-Za-z_][A-Za-z0-9_,-]*)\s+([A-Za-z_][A-Za-z0-9_-]*)\s*;?\s*$"
+)
+
+
+def normalize_mermaid_label(value: str) -> str:
+    value = re.sub(r"<br\s*/?>", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"\s+", " ", html.unescape(value)).strip()
+
+
+def declared_mermaid_semantics(mmd: str) -> tuple[dict[str, str], set[tuple[str, str]], dict[str, set[str]]]:
+    labels: dict[str, str] = {}
+    classes: dict[str, set[str]] = {}
+    lines = mmd.splitlines()
+    for line in lines:
+        declaration = MERMAID_NODE_LINE.match(line)
+        if declaration:
+            node_id = declaration.group(1)
+            quoted_label = re.search(r'["\'](.*?)["\']', line)
+            if quoted_label:
+                labels[node_id] = normalize_mermaid_label(quoted_label.group(1))
+            inline_class = re.search(r":::\s*([A-Za-z_][A-Za-z0-9_-]*)", line)
+            if inline_class:
+                classes.setdefault(node_id, set()).add(inline_class.group(1))
+        class_statement = MERMAID_CLASS_STATEMENT.match(line)
+        if class_statement:
+            for node_id in class_statement.group(1).split(","):
+                classes.setdefault(node_id, set()).add(class_statement.group(2))
+
+    declared_ids = set(labels)
+    id_pattern = re.compile(
+        r"(?<![A-Za-z0-9_-])(" + "|".join(sorted((re.escape(item) for item in declared_ids), key=len, reverse=True)) + r")(?![A-Za-z0-9_-])"
+    ) if declared_ids else None
+    edges: set[tuple[str, str]] = set()
+    if id_pattern:
+        for line in lines:
+            if "->" not in line:
+                continue
+            without_labels = re.sub(r'".*?"|\|.*?\|', " ", line)
+            connected_ids = id_pattern.findall(without_labels)
+            edges.update(zip(connected_ids, connected_ids[1:]))
+    return labels, edges, classes
 
 
 def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
-    """Check that a rendered flowchart contains every node declared by its MMD source."""
+    """Check XML plus rendered flowchart nodes, labels, edges, and classes."""
     mmd = mmd_path.read_text(encoding="utf-8")
+    declared_labels, declared_edges, declared_classes = declared_mermaid_semantics(mmd)
     declared_nodes = sorted(set(MERMAID_NODE_DECLARATION.findall(mmd)))
     if not declared_nodes:
         return [f"{mmd_path.name}: no declared flowchart nodes found"]
@@ -34,11 +80,35 @@ def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
     except ElementTree.ParseError as exc:
         return [f"{svg_path.name}: invalid XML: {exc}"]
     rendered_ids = {element.get("id", "") for element in svg_root.iter() if element.get("id")}
+    rendered_edges = {element.get("data-id", "") for element in svg_root.iter() if element.get("data-id")}
     failures: list[str] = []
+    missing_nodes: set[str] = set()
     for node_id in declared_nodes:
         rendered_node = re.compile(rf"(?:^|-)flowchart-{re.escape(node_id)}-[0-9]+$")
-        if not any(rendered_node.search(rendered_id) for rendered_id in rendered_ids):
+        node_elements = [
+            element
+            for element in svg_root.iter()
+            if element.get("id") and rendered_node.search(element.get("id", ""))
+        ]
+        if not node_elements:
             failures.append(f"{svg_path.name}: missing rendered node id for {node_id}")
+            missing_nodes.add(node_id)
+            continue
+        expected_label = declared_labels.get(node_id)
+        if expected_label:
+            rendered_label = normalize_mermaid_label(" ".join(node_elements[0].itertext()))
+            if rendered_label != expected_label:
+                failures.append(f"{svg_path.name}: stale rendered label for {node_id}: expected '{expected_label}'")
+        rendered_classes = set((node_elements[0].get("class") or "").split())
+        for class_name in sorted(declared_classes.get(node_id) or set()):
+            if class_name not in rendered_classes:
+                failures.append(f"{svg_path.name}: missing rendered class {class_name} for {node_id}")
+    for source, target in sorted(declared_edges):
+        if source in missing_nodes or target in missing_nodes:
+            continue
+        edge_id = re.compile(rf"^L_{re.escape(source)}_{re.escape(target)}_[0-9]+$")
+        if not any(edge_id.match(rendered_edge) for rendered_edge in rendered_edges):
+            failures.append(f"{svg_path.name}: missing rendered directed edge {source} -> {target}")
     return failures
 
 
