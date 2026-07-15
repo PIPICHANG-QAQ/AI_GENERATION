@@ -48,20 +48,41 @@ python3 scripts/rebuild_mineru_venv.py \
   --python /usr/bin/python3 \
   --mineru-version 3.4.2 \
   --check-script /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py \
-  --keep-backups 2
+  --keep-backups 2 \
+  --keep-failed-staging 2
 
-MINERU_COMMAND=/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru \
-MINERU_API_ENABLED=false \
-CHECK_MINERU_IN_WORKER_VENV=1 \
-  /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/python \
-  /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py --json --skip-api
-/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru --version
+python3 /home/user/AI_GENERATION_DOCKER/scripts/rebuild_mineru_venv.py \
+  --verify-only \
+  --target /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv \
+  --mineru-version 3.4.2 \
+  --check-script /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py
 
 sudo docker compose -f docker-compose.server.yml up -d question-engine
 sudo docker compose -f docker-compose.server.yml ps
 ```
 
-安装、staging 验证或 active 复验失败时，不要启动容器。脚本会保留 staging 供诊断；若切换后复验失败，会把新环境移回原 staging 路径并恢复旧 active（如果旧 active 存在）。
+安装、staging 验证、active 复验或严格版本检查失败时，`set -e` 会阻止容器启动。脚本保留本次失败 staging 供诊断；若切换后复验失败，会把新环境移回原 staging 路径并恢复旧 active（如果旧 active 存在）。一次重建成功后，`--keep-failed-staging 2` 默认保留最近 2 个严格匹配的旧失败 staging；可将参数设为 `0`，在成功验收后清理全部旧失败 staging。
+
+安全查看失败 staging：
+
+```bash
+find /home/user/AI_GENERATION_DOCKER/vendor -maxdepth 1 -type d \
+  -name 'mineru-venv.new-*' -print
+```
+
+显式删除前必须填写并复核一个绝对路径，同时确认它是严格匹配名称的常规目录而不是 symlink：
+
+```bash
+failed="/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv.new-REPLACE_WITH_EXACT_SUFFIX"
+test "$(dirname -- "$failed")" = "/home/user/AI_GENERATION_DOCKER/vendor"
+case "$(basename -- "$failed")" in
+  mineru-venv.new-?*) ;;
+  *) echo "拒绝删除非 MinerU staging 路径: $failed" >&2; exit 1 ;;
+esac
+test ! -L "$failed"
+test -d "$failed"
+rm -rf -- "$failed"
+```
 
 ## 回滚 MinerU venv
 
@@ -78,25 +99,21 @@ test ! -L "$backup"
 sudo docker compose -f docker-compose.server.yml stop question-engine
 sudo docker compose -f docker-compose.server.yml ps
 
-stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-mv vendor/mineru-venv "vendor/mineru-venv.failed-${stamp}"
-if ! mv "$backup" vendor/mineru-venv; then
-  mv "vendor/mineru-venv.failed-${stamp}" vendor/mineru-venv
+if /home/user/AI_GENERATION_DOCKER/scripts/rollback_mineru_venv.sh \
+  --target /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv \
+  --backup "$backup" \
+  --check-script /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py \
+  --rebuild-script /home/user/AI_GENERATION_DOCKER/scripts/rebuild_mineru_venv.py \
+  --mineru-version 3.4.2; then
+  sudo docker compose -f docker-compose.server.yml up -d question-engine
+  sudo docker compose -f docker-compose.server.yml ps
+else
+  echo "回滚失败；保持 question-engine 停止，并按 helper 输出的 prior/rejected 路径人工检查。" >&2
   exit 1
 fi
-
-MINERU_COMMAND=/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru \
-MINERU_API_ENABLED=false \
-CHECK_MINERU_IN_WORKER_VENV=1 \
-  /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/python \
-  /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py --json --skip-api
-/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru --version
-
-sudo docker compose -f docker-compose.server.yml up -d question-engine
-sudo docker compose -f docker-compose.server.yml ps
 ```
 
-如果回滚后的 readiness 或版本检查失败，保持容器停止，保留 `vendor/mineru-venv.failed-${stamp}`，不要把损坏的 venv 作为健康环境启动。
+helper 内部调用 `rebuild_mineru_venv.py --verify-only`，同时执行 readiness 和严格的 MinerU `3.4.2` 版本校验。只有 helper 返回 `0` 才启动容器；候选校验失败时，helper 会将坏候选移到唯一的 rejected 路径并恢复 prior active。任何失败都保持容器停止，并按输出的 prior/rejected 路径处理，不得启动未验证候选。
 
 ## 健康检查
 

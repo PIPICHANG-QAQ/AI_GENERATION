@@ -1846,28 +1846,45 @@ class ServerRunbookTest(unittest.TestCase):
   --mineru-version 3.4.2 \\
   --check-script /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py \\
   --keep-backups 2"""
-        readiness_command = """MINERU_COMMAND=/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/mineru \\
-MINERU_API_ENABLED=false \\
-CHECK_MINERU_IN_WORKER_VENV=1 \\
-  /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/python \\
-  /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py --json --skip-api"""
+        verify_command = """python3 /home/user/AI_GENERATION_DOCKER/scripts/rebuild_mineru_venv.py \\
+  --verify-only \\
+  --target /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv \\
+  --mineru-version 3.4.2 \\
+  --check-script /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py"""
         stop_command = "sudo docker compose -f docker-compose.server.yml stop question-engine"
         start_command = "sudo docker compose -f docker-compose.server.yml up -d question-engine"
 
         self.assertIn(rebuild_command, rebuild_section)
-        self.assertIn(readiness_command, rebuild_section)
+        self.assertIn("--keep-failed-staging 2", rebuild_section)
+        self.assertIn(verify_command, rebuild_section)
         self.assertLess(rebuild_section.index(stop_command), rebuild_section.index(rebuild_command))
-        self.assertLess(rebuild_section.index(rebuild_command), rebuild_section.index(readiness_command))
-        self.assertLess(rebuild_section.index(readiness_command), rebuild_section.index(start_command))
-        self.assertIn("vendor/mineru-venv/bin/mineru --version", rebuild_section)
+        self.assertLess(rebuild_section.index(rebuild_command), rebuild_section.index(verify_command))
+        self.assertLess(rebuild_section.index(verify_command), rebuild_section.index(start_command))
+        self.assertNotIn("vendor/mineru-venv/bin/mineru --version", rebuild_section)
 
         self.assertIn('backup="/home/user/AI_GENERATION_DOCKER/vendor/mineru-venv.bak-', rollback_section)
-        self.assertIn('mv vendor/mineru-venv "vendor/mineru-venv.failed-${stamp}"', rollback_section)
-        self.assertIn('mv "$backup" vendor/mineru-venv', rollback_section)
-        self.assertIn(readiness_command, rollback_section)
-        self.assertLess(rollback_section.index(stop_command), rollback_section.index("mv vendor/mineru-venv"))
-        self.assertLess(rollback_section.index(readiness_command), rollback_section.index(start_command))
-        self.assertIn("vendor/mineru-venv/bin/mineru --version", rollback_section)
+        helper_command = """if /home/user/AI_GENERATION_DOCKER/scripts/rollback_mineru_venv.sh \\
+  --target /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv \\
+  --backup "$backup" \\
+  --check-script /home/user/AI_GENERATION_DOCKER/scripts/check_mineru.py \\
+  --rebuild-script /home/user/AI_GENERATION_DOCKER/scripts/rebuild_mineru_venv.py \\
+  --mineru-version 3.4.2; then"""
+        self.assertIn(helper_command, rollback_section)
+        self.assertLess(rollback_section.index(stop_command), rollback_section.index(helper_command))
+        self.assertLess(rollback_section.index(helper_command), rollback_section.index(start_command))
+        self.assertIn("else", rollback_section)
+        self.assertIn("保持 question-engine 停止", rollback_section)
+        self.assertNotIn("vendor/mineru-venv/bin/mineru --version", rollback_section)
+
+    def test_failed_staging_retention_and_explicit_safe_deletion_are_documented(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        runbook = (root / "docs" / "server" / "RUNBOOK.md").read_text(encoding="utf-8")
+
+        self.assertIn("--keep-failed-staging", runbook)
+        self.assertIn("默认保留最近 2 个", runbook)
+        self.assertIn("mineru-venv.new-*", runbook)
+        self.assertIn("test ! -L", runbook)
+        self.assertIn("rm -rf --", runbook)
 
 
 if __name__ == "__main__":

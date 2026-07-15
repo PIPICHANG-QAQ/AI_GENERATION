@@ -28,6 +28,8 @@ class DeliveryBoundaryTest(unittest.TestCase):
         rebuild_dependencies = (
             "scripts/rebuild_mineru_venv.py",
             "scripts/test_rebuild_mineru_venv.py",
+            "scripts/rollback_mineru_venv.sh",
+            "scripts/test_rollback_mineru_venv.py",
         )
         for missing in rebuild_dependencies:
             with self.subTest(missing=missing):
