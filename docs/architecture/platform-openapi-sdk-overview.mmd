@@ -21,7 +21,7 @@ flowchart LR
   ExportFlow["export-flow<br/>Markdown / DOCX / PDF 导出"]:::capability
   FileFlow["file-flow<br/>原文件 / 题图 / OCR 产物 / 导出文件"]:::capability
   CallbackFlow["callback-flow<br/>状态回调 / 签名 / 重试 / 幂等键"]:::capability
-  RescanSdk["getOcrFlowCapability / rescanImportTask<br/>OpenAPI 1.2.0<br/>能力描述强类型；重扫不覆盖已编辑题目"]:::sdk
+  RescanSdk["getOcrFlowCapability / rescanImportTask<br/>OpenAPI 1.2.0<br/>顶层 descriptor 类型化；嵌套契约为可扩展 Map<br/>重扫不覆盖已编辑题目"]:::sdk
 
   EngineDb[("engine 元数据<br/>任务 / job / 文件 / callback 事件<br/>本地 H2 或企业 MySQL")]:::store
   ObjectStorage[("对象存储协议<br/>本地文件或 MinIO<br/>平台可替换为文件中心")]:::store

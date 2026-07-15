@@ -5,10 +5,41 @@ This script is intentionally dependency-free so it can run in local development,
 CI, or a delivery packaging step before a full OpenAPI generator is introduced.
 """
 
+import re
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+MERMAID_SVG_PAIRS = (
+    ("docs/architecture/engine-boundary.mmd", "docs/architecture/engine-boundary.svg"),
+    ("docs/architecture/import-ocr-workbench-flow.mmd", "docs/architecture/import-ocr-workbench-flow.svg"),
+    ("docs/architecture/ocr-flow.mmd", "docs/architecture/ocr-flow.svg"),
+    ("docs/architecture/platform-openapi-sdk-overview.mmd", "docs/architecture/platform-openapi-sdk-overview.svg"),
+    ("docs/architecture/server-ocr-flow.mmd", "docs/architecture/server-ocr-flow.svg"),
+)
+
+MERMAID_NODE_DECLARATION = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*(?:\[|\(|\{)", re.MULTILINE)
+
+
+def validate_mermaid_svg_pair(mmd_path: Path, svg_path: Path) -> list[str]:
+    """Check that a rendered flowchart contains every node declared by its MMD source."""
+    mmd = mmd_path.read_text(encoding="utf-8")
+    declared_nodes = sorted(set(MERMAID_NODE_DECLARATION.findall(mmd)))
+    if not declared_nodes:
+        return [f"{mmd_path.name}: no declared flowchart nodes found"]
+    try:
+        svg_root = ElementTree.parse(svg_path).getroot()
+    except ElementTree.ParseError as exc:
+        return [f"{svg_path.name}: invalid XML: {exc}"]
+    rendered_ids = {element.get("id", "") for element in svg_root.iter() if element.get("id")}
+    failures: list[str] = []
+    for node_id in declared_nodes:
+        rendered_node = re.compile(rf"(?:^|-)flowchart-{re.escape(node_id)}-[0-9]+$")
+        if not any(rendered_node.search(rendered_id) for rendered_id in rendered_ids):
+            failures.append(f"{svg_path.name}: missing rendered node id for {node_id}")
+    return failures
 
 
 CHECKS = {
@@ -431,6 +462,8 @@ def main() -> None:
         for item in expected_items:
             if item not in content:
                 failures.append(f"{relative_path}: missing {item}")
+    for mmd_relative, svg_relative in MERMAID_SVG_PAIRS:
+        failures.extend(validate_mermaid_svg_pair(ROOT / mmd_relative, ROOT / svg_relative))
     if failures:
         for failure in failures:
             print(failure)
