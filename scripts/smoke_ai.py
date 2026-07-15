@@ -17,7 +17,7 @@ from typing import Any
 BASE_URL = os.environ.get("AI_GENERATION_BASE_URL", "http://localhost:8018").rstrip("/")
 
 
-def request(method: str, path: str, payload: bytes | dict[str, Any] | None = None, headers: dict[str, str] | None = None, timeout: int = 90) -> Any:
+def request(method: str, path: str, payload: bytes | dict[str, Any] | None = None, headers: dict[str, str] | None = None, timeout: float = 90) -> Any:
     body: bytes | None
     merged_headers = dict(headers or {})
     if isinstance(payload, bytes):
@@ -75,31 +75,43 @@ def wait_import_ready(task_id: str) -> dict[str, Any]:
 def wait_standardization_job(
     task_id: str,
     job_id: str,
+    expected_total_items: int,
     timeout_seconds: float = 180,
     poll_interval_seconds: float = 1,
 ) -> dict[str, Any]:
+    if expected_total_items <= 0:
+        raise ValueError("expected totalItems must be greater than zero")
     active_statuses = {"queued", "running", "cancelling", "pending", "processing"}
     successful_statuses = {"completed", "partial_review"}
     deadline = time.monotonic() + timeout_seconds
     last: dict[str, Any] = {}
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"global standardization timed out; last payload: {last}")
         payload = request(
             "GET",
             f"/api/import-tasks/{task_id}/standardization-jobs/{job_id}",
-            timeout=30,
+            timeout=min(30.0, remaining),
         )
         last = payload if isinstance(payload, dict) else {"payload": payload}
+        response_time = time.monotonic()
+        if response_time >= deadline:
+            raise TimeoutError(f"global standardization timed out; last payload: {last}")
         status = str(last.get("status") or "").strip().lower()
         if status not in active_statuses:
             break
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"global standardization timed out; last payload: {last}")
-        time.sleep(poll_interval_seconds)
+        time.sleep(min(poll_interval_seconds, deadline - response_time))
 
     completed_items = int(last.get("completedItems") or 0)
     total_items = int(last.get("totalItems") or 0)
     failed_items = int(last.get("failedItems") or 0)
-    if status in successful_statuses and completed_items == total_items and failed_items == 0:
+    if (
+        status in successful_statuses
+        and total_items == expected_total_items
+        and completed_items == total_items
+        and failed_items == 0
+    ):
         return last
     raise AssertionError(f"global standardization failed; last payload: {last}")
 
@@ -169,8 +181,9 @@ def main() -> None:
     )
     global_job_id = str(global_job.get("id") or "")
     ok("global standardization starts", bool(global_job_id), global_job)
-    ok("global standardization item count", int(global_job.get("totalItems") or 0) >= 1, global_job)
-    completed_job = wait_standardization_job(task_id, global_job_id)
+    initial_total_items = int(global_job.get("totalItems") or 0)
+    ok("global standardization item count", initial_total_items >= 1, global_job)
+    completed_job = wait_standardization_job(task_id, global_job_id, initial_total_items)
     ok("global standardization completed", True, completed_job)
     print("ai smoke passed")
 
