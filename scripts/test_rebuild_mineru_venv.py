@@ -101,6 +101,174 @@ class AtomicMineruVenvTest(unittest.TestCase):
             self.assertTrue(paths.staging.is_dir())
 
 
+class CrashRecoveryJournalTest(unittest.TestCase):
+    def _paths(self, root: Path, *, with_active: bool = True) -> rebuild_mineru_venv.BuildPaths:
+        paths = rebuild_mineru_venv.build_paths(
+            root / "vendor" / "mineru-venv",
+            "20260715T120000.000000Z-fixed",
+        )
+        paths.active.parent.mkdir()
+        if with_active:
+            paths.active.mkdir()
+            (paths.active / "old-marker").write_text("old", encoding="utf-8")
+        paths.staging.mkdir()
+        (paths.staging / "new-marker").write_text("new", encoding="utf-8")
+        return paths
+
+    def _journal(
+        self,
+        paths: rebuild_mineru_venv.BuildPaths,
+        phase: str,
+        *,
+        had_active: bool,
+    ) -> Path:
+        return rebuild_mineru_venv.write_transaction_journal(
+            paths,
+            phase,
+            had_active=had_active,
+        )
+
+    def _assert_old_active_and_new_staging(self, paths: rebuild_mineru_venv.BuildPaths) -> None:
+        self.assertEqual("old", (paths.active / "old-marker").read_text(encoding="utf-8"))
+        self.assertEqual("new", (paths.staging / "new-marker").read_text(encoding="utf-8"))
+        self.assertFalse(paths.backup.exists())
+        self.assertFalse(rebuild_mineru_venv.transaction_journal_path(paths.active).exists())
+
+    def test_journal_write_is_atomic_and_fsyncs_file_and_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._paths(Path(tmp))
+
+            with mock.patch.object(os, "fsync", wraps=os.fsync) as fsync:
+                journal = self._journal(paths, "prepared", had_active=True)
+
+            payload = json.loads(journal.read_text(encoding="utf-8"))
+            self.assertEqual(str(paths.active), payload["active"])
+            self.assertEqual(str(paths.staging), payload["staging"])
+            self.assertEqual(str(paths.backup), payload["backup"])
+            self.assertEqual("prepared", payload["phase"])
+            self.assertTrue(payload["hadActive"])
+            self.assertGreaterEqual(fsync.call_count, 2)
+            self.assertEqual([], list(journal.parent.glob(f"{journal.name}.tmp-*")))
+            self.assertNotIn("env", payload)
+            self.assertNotIn("secret", journal.read_text(encoding="utf-8").lower())
+
+    def test_rename_and_sync_fsyncs_parent_after_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            target = root / "target"
+            source.mkdir()
+            synced: list[Path] = []
+
+            rebuild_mineru_venv.rename_and_sync(
+                source,
+                target,
+                sync_directory=synced.append,
+            )
+
+            self.assertTrue(target.is_dir())
+            self.assertEqual([root], synced)
+
+    def test_recovery_before_first_rename_keeps_old_active_and_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._paths(Path(tmp))
+            self._journal(paths, "prepared", had_active=True)
+
+            rebuild_mineru_venv.recover_transaction(paths.active)
+
+            self._assert_old_active_and_new_staging(paths)
+
+    def test_recovery_after_active_to_backup_restores_old_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._paths(Path(tmp))
+            self._journal(paths, "prepared", had_active=True)
+            paths.active.rename(paths.backup)
+
+            rebuild_mineru_venv.recover_transaction(paths.active)
+
+            self._assert_old_active_and_new_staging(paths)
+
+    def test_recovery_after_staging_to_active_rolls_back_unverified_new(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._paths(Path(tmp))
+            self._journal(paths, "active_moved", had_active=True)
+            paths.active.rename(paths.backup)
+            paths.staging.rename(paths.active)
+
+            rebuild_mineru_venv.recover_transaction(paths.active)
+
+            self._assert_old_active_and_new_staging(paths)
+
+    def test_recovery_without_old_active_never_leaves_unverified_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._paths(Path(tmp), with_active=False)
+            self._journal(paths, "active_moved", had_active=False)
+            paths.staging.rename(paths.active)
+
+            rebuild_mineru_venv.recover_transaction(paths.active)
+
+            self.assertFalse(paths.active.exists())
+            self.assertEqual("new", (paths.staging / "new-marker").read_text(encoding="utf-8"))
+            self.assertFalse(rebuild_mineru_venv.transaction_journal_path(paths.active).exists())
+
+    def test_recovery_resumes_either_interrupted_rollback_rename(self) -> None:
+        for interruption in ("new_saved", "old_restored"):
+            with self.subTest(interruption=interruption), tempfile.TemporaryDirectory() as tmp:
+                paths = self._paths(Path(tmp))
+                self._journal(paths, "rollback_started", had_active=True)
+                paths.active.rename(paths.backup)
+                paths.staging.rename(paths.active)
+                paths.active.rename(paths.staging)
+                if interruption == "old_restored":
+                    paths.backup.rename(paths.active)
+
+                rebuild_mineru_venv.recover_transaction(paths.active)
+
+                self._assert_old_active_and_new_staging(paths)
+
+    def test_recovery_after_active_verified_but_before_journal_clear_prefers_old_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._paths(Path(tmp))
+            self._journal(paths, "active_verified", had_active=True)
+            paths.active.rename(paths.backup)
+            paths.staging.rename(paths.active)
+
+            rebuild_mineru_venv.recover_transaction(paths.active)
+
+            self._assert_old_active_and_new_staging(paths)
+
+    def test_recovery_rejects_outside_or_symlink_journal_paths(self) -> None:
+        for attack in ("outside", "symlink"):
+            with self.subTest(attack=attack), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                paths = self._paths(root)
+                staging = paths.staging
+                if attack == "outside":
+                    staging = root / "outside" / paths.staging.name
+                else:
+                    (paths.staging / "new-marker").unlink()
+                    paths.staging.rmdir()
+                    outside = root / "outside"
+                    outside.mkdir()
+                    paths.staging.symlink_to(outside, target_is_directory=True)
+                payload = {
+                    "schemaVersion": 1,
+                    "active": str(paths.active),
+                    "staging": str(staging),
+                    "backup": str(paths.backup),
+                    "phase": "prepared",
+                    "hadActive": True,
+                }
+                journal = rebuild_mineru_venv.transaction_journal_path(paths.active)
+                journal.write_text(json.dumps(payload), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "journal"):
+                    rebuild_mineru_venv.recover_transaction(paths.active)
+
+                self.assertEqual("old", (paths.active / "old-marker").read_text(encoding="utf-8"))
+                self.assertTrue(journal.exists())
+
+
 class RebuildSafetyTest(unittest.TestCase):
     def _request_paths(self, root: Path) -> tuple[rebuild_mineru_venv.BuildPaths, Path]:
         check_script = root / "scripts" / "check_mineru.py"
@@ -742,6 +910,7 @@ class RebuildOrchestrationTest(unittest.TestCase):
             self.assertEqual("new", (paths.active / "new-marker").read_text(encoding="utf-8"))
             self.assertEqual("old", (paths.backup / "old-marker").read_text(encoding="utf-8"))
             self.assertTrue((paths.active / "mineru-venv-manifest.json").is_file())
+            self.assertFalse(rebuild_mineru_venv.transaction_journal_path(paths.active).exists())
             self.assertFalse(paths.active.with_name(f"{paths.active.name}.bak-001").exists())
             self.assertFalse(paths.active.with_name(f"{paths.active.name}.bak-002").exists())
             self.assertTrue(paths.active.with_name(f"{paths.active.name}.bak-003").is_dir())

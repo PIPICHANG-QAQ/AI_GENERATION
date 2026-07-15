@@ -55,6 +55,18 @@ class BuildPaths:
 
 
 Rename = Callable[[Path, Path], None]
+JOURNAL_PHASES = {
+    "prepared",
+    "active_moved",
+    "new_active",
+    "active_verified",
+    "rollback_started",
+    "rollback_new_saved",
+}
+
+
+def _rename(source: Path, target: Path) -> None:
+    source.rename(target)
 
 
 def build_paths(target: Path, timestamp: str) -> BuildPaths:
@@ -143,6 +155,161 @@ def rebuild_lock(target: Path):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
+
+
+def transaction_journal_path(target: Path) -> Path:
+    return target.with_name(f".{target.name}.rebuild-journal.json")
+
+
+def _fsync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def rename_and_sync(
+    source: Path,
+    target: Path,
+    *,
+    rename: Rename = _rename,
+    sync_directory: Callable[[Path], None] = _fsync_directory,
+) -> None:
+    rename(source, target)
+    sync_directory(source.parent)
+    if target.parent != source.parent:
+        sync_directory(target.parent)
+
+
+def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    if path.is_symlink():
+        raise ValueError(f"journal must not be a symlink: {path}")
+    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}")
+    try:
+        with temporary.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+
+
+def write_transaction_journal(paths: BuildPaths, phase: str, *, had_active: bool) -> Path:
+    if phase not in JOURNAL_PHASES:
+        raise ValueError(f"invalid transaction journal phase: {phase}")
+    journal = transaction_journal_path(paths.active)
+    payload = {
+        "schemaVersion": 1,
+        "active": str(paths.active),
+        "staging": str(paths.staging),
+        "backup": str(paths.backup),
+        "phase": phase,
+        "hadActive": had_active,
+    }
+    _atomic_write_json(journal, payload)
+    return journal
+
+
+def _clear_transaction_journal(target: Path) -> None:
+    journal = transaction_journal_path(target)
+    if journal.is_symlink():
+        raise ValueError(f"journal must not be a symlink: {journal}")
+    if journal.exists():
+        journal.unlink()
+        _fsync_directory(journal.parent)
+
+
+def _journal_paths(target: Path, payload: object) -> tuple[BuildPaths, str, bool]:
+    if not isinstance(payload, dict):
+        raise ValueError("journal must contain a JSON object")
+    expected_keys = {"schemaVersion", "active", "staging", "backup", "phase", "hadActive"}
+    if set(payload) != expected_keys or payload.get("schemaVersion") != 1:
+        raise ValueError("journal has an unsupported schema")
+    if not all(isinstance(payload.get(key), str) for key in ("active", "staging", "backup", "phase")):
+        raise ValueError("journal paths and phase must be strings")
+    if not isinstance(payload.get("hadActive"), bool):
+        raise ValueError("journal hadActive must be a boolean")
+
+    paths = BuildPaths(
+        active=Path(payload["active"]),
+        staging=Path(payload["staging"]),
+        backup=Path(payload["backup"]),
+    )
+    phase = payload["phase"]
+    if phase not in JOURNAL_PHASES:
+        raise ValueError(f"journal has invalid phase: {phase}")
+    if paths.active != target or not target.is_absolute():
+        raise ValueError("journal active path does not match target")
+    if paths.staging.parent != target.parent or paths.backup.parent != target.parent:
+        raise ValueError("journal paths must be target siblings")
+    staging_prefix = f"{target.name}.new-"
+    backup_prefix = f"{target.name}.bak-"
+    if not paths.staging.name.startswith(staging_prefix) or not paths.backup.name.startswith(backup_prefix):
+        raise ValueError("journal paths do not match target naming")
+    staging_suffix = paths.staging.name[len(staging_prefix) :]
+    backup_suffix = paths.backup.name[len(backup_prefix) :]
+    if not staging_suffix or staging_suffix != backup_suffix:
+        raise ValueError("journal staging and backup timestamps do not match")
+    for path in (paths.active, paths.staging, paths.backup):
+        if ".." in path.parts or path.is_symlink():
+            raise ValueError(f"journal path is unsafe: {path}")
+    return paths, phase, payload["hadActive"]
+
+
+def _load_transaction_journal(target: Path) -> tuple[BuildPaths, str, bool] | None:
+    journal = transaction_journal_path(target)
+    if journal.is_symlink():
+        raise ValueError(f"journal must not be a symlink: {journal}")
+    if not journal.exists():
+        return None
+    try:
+        payload = json.loads(journal.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"journal is not valid UTF-8 JSON: {journal}") from exc
+    return _journal_paths(target, payload)
+
+
+def recover_transaction(target: Path, *, rename: Rename = _rename) -> BuildPaths | None:
+    loaded = _load_transaction_journal(target)
+    if loaded is None:
+        return None
+    paths, _phase, had_active = loaded
+    active_exists = paths.active.exists()
+    staging_exists = paths.staging.exists()
+    backup_exists = paths.backup.exists()
+
+    if had_active:
+        if backup_exists:
+            if active_exists and staging_exists:
+                raise RuntimeError("journal recovery found ambiguous active, staging, and backup paths")
+            if active_exists:
+                write_transaction_journal(paths, "rollback_started", had_active=True)
+                rename_and_sync(paths.active, paths.staging, rename=rename)
+                active_exists = False
+                staging_exists = True
+            if not staging_exists:
+                raise RuntimeError("journal recovery cannot preserve the failed new environment")
+            write_transaction_journal(paths, "rollback_new_saved", had_active=True)
+            rename_and_sync(paths.backup, paths.active, rename=rename)
+        elif not (active_exists and staging_exists):
+            raise RuntimeError("journal recovery cannot prove the old active environment is present")
+    else:
+        if backup_exists:
+            raise RuntimeError("journal recovery found an unexpected backup")
+        if active_exists and not staging_exists:
+            write_transaction_journal(paths, "rollback_started", had_active=False)
+            rename_and_sync(paths.active, paths.staging, rename=rename)
+        elif active_exists or not staging_exists:
+            raise RuntimeError("journal recovery found an ambiguous no-active transaction state")
+
+    _clear_transaction_journal(target)
+    return paths
 
 
 def prune_backups(target: Path, keep_backups: int) -> list[Path]:
@@ -374,30 +541,32 @@ def validate_active(
     _require_version(version, expected_version)
 
 
-def _rename(source: Path, target: Path) -> None:
-    source.rename(target)
-
-
 def activate(paths: BuildPaths, rename: Rename = _rename) -> None:
-    moved_active = False
+    had_active = paths.active.exists()
+    write_transaction_journal(paths, "prepared", had_active=had_active)
     try:
-        if paths.active.exists():
-            rename(paths.active, paths.backup)
-            moved_active = True
-        rename(paths.staging, paths.active)
+        if had_active:
+            rename_and_sync(paths.active, paths.backup, rename=rename)
+        write_transaction_journal(paths, "active_moved", had_active=had_active)
+        rename_and_sync(paths.staging, paths.active, rename=rename)
+        write_transaction_journal(paths, "new_active", had_active=had_active)
     except BaseException:
-        if moved_active and not paths.active.exists() and paths.backup.exists():
-            rename(paths.backup, paths.active)
+        recover_transaction(paths.active, rename=rename)
         raise
 
 
 def _rollback_failed_active(paths: BuildPaths, rename: Rename) -> None:
+    loaded = _load_transaction_journal(paths.active)
+    had_active = loaded[2] if loaded is not None else paths.backup.exists()
+    write_transaction_journal(paths, "rollback_started", had_active=had_active)
     if paths.active.exists() or paths.active.is_symlink():
         if paths.staging.exists() or paths.staging.is_symlink():
             raise FileExistsError(f"cannot preserve failed active venv; staging path exists: {paths.staging}")
-        rename(paths.active, paths.staging)
+        rename_and_sync(paths.active, paths.staging, rename=rename)
+        write_transaction_journal(paths, "rollback_new_saved", had_active=had_active)
     if paths.backup.exists() or paths.backup.is_symlink():
-        rename(paths.backup, paths.active)
+        rename_and_sync(paths.backup, paths.active, rename=rename)
+    _clear_transaction_journal(paths.active)
 
 
 def rebuild_venv(
@@ -419,6 +588,7 @@ def rebuild_venv(
     _validate_static_request(paths, check_script, keep_backups)
     env = dict(os.environ if base_env is None else base_env)
     with rebuild_lock(target):
+        recover_transaction(target, rename=rename)
         validate_request(paths, check_script, keep_backups)
         ensure_disk_space(paths, directory_size=directory_size, disk_usage=disk_usage)
         for command in build_install_commands(source_python, paths.staging, mineru_version):
@@ -444,6 +614,11 @@ def rebuild_venv(
         except BaseException:
             _rollback_failed_active(paths, rename)
             raise
+        loaded = _load_transaction_journal(paths.active)
+        if loaded is None:
+            raise RuntimeError("activation transaction journal disappeared before commit")
+        write_transaction_journal(paths, "active_verified", had_active=loaded[2])
+        _clear_transaction_journal(paths.active)
         prune(paths.active, keep_backups)
     return paths
 
