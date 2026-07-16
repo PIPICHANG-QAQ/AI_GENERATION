@@ -44,10 +44,17 @@ class MineruOcrBundleAdapter:
         if not markdown_files:
             raise ValueError("MinerU output does not contain Markdown")
 
-        native_markdown_files = [path for path in markdown_files if not path.stem.endswith("_canonical")]
-        markdown_path = (native_markdown_files or markdown_files)[0]
-        markdown = markdown_path.read_text(encoding="utf-8", errors="replace")
-        if not markdown.strip():
+        native_markdown_files = [path for path in markdown_files if not self._is_generated_canonical(path)]
+        markdown_candidates = native_markdown_files or markdown_files
+        markdown_path = markdown_candidates[0]
+        markdown = ""
+        for candidate in markdown_candidates:
+            candidate_markdown = candidate.read_text(encoding="utf-8", errors="replace")
+            if candidate_markdown.strip():
+                markdown_path = candidate
+                markdown = candidate_markdown
+                break
+        if not markdown:
             markdown_path, markdown = self._materialize_content_list_markdown(markdown_path, output_dir)
         json_path = json_files[0] if json_files else None
         json_content = self._read_json(json_path) if json_path else None
@@ -88,10 +95,12 @@ class MineruOcrBundleAdapter:
 
     @classmethod
     def _materialize_content_list_markdown(cls, markdown_path: Path, output_dir: Path) -> tuple[Path, str]:
-        source_stem = markdown_path.stem.removesuffix("_canonical")
+        source_stem = cls._source_stem(markdown_path)
         content_list_path = markdown_path.with_name(f"{source_stem}_content_list.json")
         if not content_list_path.exists():
             return markdown_path, ""
+        if content_list_path.is_symlink():
+            raise ValueError(f"MinerU content list must not be a symbolic link: {content_list_path}")
         content_list_path = cls._resolved_artifact_path(content_list_path, output_dir)
 
         fragments: list[str] = []
@@ -107,9 +116,33 @@ class MineruOcrBundleAdapter:
         canonical_markdown = "\n\n".join(fragments).strip()
         if not canonical_markdown:
             return markdown_path, ""
-        canonical_path = markdown_path.with_name(f"{source_stem}_canonical.md")
+        digest = hashlib.sha256(canonical_markdown.encode("utf-8")).hexdigest()
+        canonical_path = markdown_path.with_name(f"{source_stem}_canonical_{digest}.md")
         cls._atomic_write_text(canonical_path, canonical_markdown, output_dir)
         return canonical_path, canonical_markdown
+
+    @staticmethod
+    def _is_generated_canonical(path: Path) -> bool:
+        stem = path.stem
+        if stem.endswith("_canonical"):
+            return True
+        marker = "_canonical_"
+        if marker not in stem:
+            return False
+        digest = stem.rsplit(marker, 1)[1]
+        return len(digest) == 64 and all(character in "0123456789abcdef" for character in digest)
+
+    @classmethod
+    def _source_stem(cls, path: Path) -> str:
+        stem = path.stem
+        if stem.endswith("_canonical"):
+            return stem.removesuffix("_canonical")
+        marker = "_canonical_"
+        if marker in stem:
+            prefix, digest = stem.rsplit(marker, 1)
+            if len(digest) == 64 and all(character in "0123456789abcdef" for character in digest):
+                return prefix
+        return stem
 
     @classmethod
     def _content_item_markdown(cls, item: dict[str, Any]) -> str:
@@ -191,6 +224,11 @@ class MineruOcrBundleAdapter:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary_path, path)
+            directory_descriptor = os.open(parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
         finally:
             temporary_path.unlink(missing_ok=True)
 

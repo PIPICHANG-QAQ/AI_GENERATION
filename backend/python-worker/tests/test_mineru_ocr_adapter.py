@@ -1,3 +1,4 @@
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -85,9 +86,12 @@ def test_adapter_recovers_blank_markdown_from_content_list(tmp_path: Path) -> No
     )
     restored = type(bundle).from_persisted_manifest(bundle.to_persisted_manifest())
 
-    assert bundle.canonical_markdown == "1. x + 1 = 2, find x.\n\nA. 0\n\nB. 1"
-    assert bundle.markdown_artifact_path == "paper/auto/paper_canonical.md"
-    assert (output_dir / "paper_canonical.md").read_text(encoding="utf-8") == bundle.canonical_markdown
+    expected_markdown = "1. x + 1 = 2, find x.\n\nA. 0\n\nB. 1"
+    expected_digest = hashlib.sha256(expected_markdown.encode("utf-8")).hexdigest()
+    expected_path = output_dir / f"paper_canonical_{expected_digest}.md"
+    assert bundle.canonical_markdown == expected_markdown
+    assert bundle.markdown_artifact_path == f"paper/auto/{expected_path.name}"
+    assert expected_path.read_text(encoding="utf-8") == bundle.canonical_markdown
     assert native_markdown.read_text(encoding="utf-8") == ""
     assert restored.canonical_markdown == bundle.canonical_markdown
 
@@ -175,9 +179,11 @@ def test_adapter_replaces_canonical_symlink_without_writing_outside_root(tmp_pat
         json.dumps([{"type": "text", "text": "1. safe recovered text"}]),
         encoding="utf-8",
     )
+    recovered_markdown = "1. safe recovered text"
+    digest = hashlib.sha256(recovered_markdown.encode("utf-8")).hexdigest()
     outside = tmp_path / "outside.txt"
     outside.write_text("outside sentinel", encoding="utf-8")
-    canonical_path = output_dir / "paper_canonical.md"
+    canonical_path = output_dir / f"paper_canonical_{digest}.md"
     canonical_path.symlink_to(outside)
 
     bundle = MineruOcrBundleAdapter().from_output(
@@ -187,8 +193,8 @@ def test_adapter_replaces_canonical_symlink_without_writing_outside_root(tmp_pat
 
     assert outside.read_text(encoding="utf-8") == "outside sentinel"
     assert not canonical_path.is_symlink()
-    assert canonical_path.read_text(encoding="utf-8") == "1. safe recovered text"
-    assert bundle.canonical_markdown == "1. safe recovered text"
+    assert canonical_path.read_text(encoding="utf-8") == recovered_markdown
+    assert bundle.canonical_markdown == recovered_markdown
 
 
 def test_adapter_materializes_fallback_atomically_for_concurrent_calls(tmp_path: Path) -> None:
@@ -211,6 +217,80 @@ def test_adapter_materializes_fallback_atomically_for_concurrent_calls(tmp_path:
     with ThreadPoolExecutor(max_workers=8) as executor:
         markdown_results = list(executor.map(lambda _index: adapt(), range(16)))
 
-    assert markdown_results == ["1. concurrent recovered text"] * 16
-    assert (output_dir / "paper_canonical.md").read_text(encoding="utf-8") == "1. concurrent recovered text"
-    assert list(output_dir.glob(".paper_canonical.md.*.tmp")) == []
+    recovered_markdown = "1. concurrent recovered text"
+    digest = hashlib.sha256(recovered_markdown.encode("utf-8")).hexdigest()
+    canonical_path = output_dir / f"paper_canonical_{digest}.md"
+    assert markdown_results == [recovered_markdown] * 16
+    assert canonical_path.read_text(encoding="utf-8") == recovered_markdown
+    assert list(output_dir.glob(f".{canonical_path.name}.*.tmp")) == []
+
+
+def test_adapter_rejects_content_list_symlink_to_another_document(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-source-symlink"
+    selected_dir = output_root / "selected" / "auto"
+    selected_dir.mkdir(parents=True)
+    (selected_dir / "paper.md").write_text("", encoding="utf-8")
+    other_dir = output_root / "other" / "auto"
+    other_dir.mkdir(parents=True)
+    foreign_content_list = other_dir / "paper_content_list.json"
+    foreign_content_list.write_text(
+        json.dumps([{"type": "text", "text": "1. foreign document"}]),
+        encoding="utf-8",
+    )
+    (selected_dir / "paper_content_list.json").symlink_to(foreign_content_list)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        MineruOcrBundleAdapter().from_output(
+            {"jobId": "job-source-symlink", "ocrProvider": "mineru"},
+            output_root,
+        )
+
+
+def test_adapter_persists_each_fallback_version_at_an_immutable_path(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-versioned"
+    output_dir = output_root / "paper" / "auto"
+    output_dir.mkdir(parents=True)
+    (output_dir / "paper.md").write_text("", encoding="utf-8")
+    content_list_path = output_dir / "paper_content_list.json"
+
+    content_list_path.write_text(
+        json.dumps([{"type": "text", "text": "VERSION A"}]),
+        encoding="utf-8",
+    )
+    bundle_a = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-versioned", "ocrProvider": "mineru"},
+        output_root,
+    )
+    manifest_a = bundle_a.to_persisted_manifest()
+
+    content_list_path.write_text(
+        json.dumps([{"type": "text", "text": "VERSION B"}]),
+        encoding="utf-8",
+    )
+    bundle_b = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-versioned", "ocrProvider": "mineru"},
+        output_root,
+    )
+    manifest_b = bundle_b.to_persisted_manifest()
+
+    restored_a = type(bundle_a).from_persisted_manifest(manifest_a)
+    restored_b = type(bundle_b).from_persisted_manifest(manifest_b)
+
+    assert restored_a.canonical_markdown == "VERSION A"
+    assert restored_b.canonical_markdown == "VERSION B"
+    assert bundle_a.markdown_artifact_path != bundle_b.markdown_artifact_path
+
+
+def test_adapter_skips_larger_whitespace_only_native_markdown(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-whitespace"
+    output_root.mkdir(parents=True)
+    (output_root / "paper.md").write_text("1. valid question", encoding="utf-8")
+    (output_root / "noise.md").write_text(" " * 100, encoding="utf-8")
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-whitespace", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    assert bundle.canonical_markdown == "1. valid question"
+    assert bundle.markdown_artifact_path == "paper.md"
