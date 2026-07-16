@@ -1039,12 +1039,6 @@ def is_math_position(spans: list[tuple[int, int]], position: int) -> bool:
     return any(start <= position < end for start, end in spans)
 
 
-def has_unclosed_math_delimiter(content: str) -> bool:
-    """判断内容是否包含未闭合的数学开始定界符。"""
-    _spans, has_unclosed_delimiter = math_spans(content)
-    return has_unclosed_delimiter
-
-
 def skip_bounded_glued_tasks_image_whitespace(content: str, start: int) -> int:
     """跳过图片标记中的有限前导空白。"""
     position = start
@@ -1054,20 +1048,21 @@ def skip_bounded_glued_tasks_image_whitespace(content: str, start: int) -> int:
     return position
 
 
-def has_bounded_glued_tasks_image_marker(content: str, start: int) -> bool:
-    """保守识别有限长度的 tasks 图片标记。"""
+def bounded_glued_tasks_image_span(content: str, start: int) -> tuple[int, int] | None:
+    """保守识别有限长度的 tasks 图片标记并返回完整区间。"""
     position = skip_bounded_glued_tasks_image_whitespace(content, start)
     if not content.startswith("![", position):
-        return False
+        return None
 
+    image_start = position
     alt_start = position + 2
     alt_end = content.find("]", alt_start, alt_start + GLUED_TASKS_IMAGE_ALT_MAX_LENGTH + 1)
     if alt_end < 0:
-        return False
+        return None
 
     position = skip_bounded_glued_tasks_image_whitespace(content, alt_end + 1)
     if position >= len(content) or content[position] != "(":
-        return False
+        return None
 
     destination_start = skip_bounded_glued_tasks_image_whitespace(content, position + 1)
     destination_limit = min(len(content), destination_start + GLUED_TASKS_IMAGE_DESTINATION_MAX_LENGTH + 1)
@@ -1075,14 +1070,30 @@ def has_bounded_glued_tasks_image_marker(content: str, start: int) -> bool:
     for position in range(destination_start, destination_limit):
         char = content[position]
         if char in "\r\n":
-            return False
+            return None
         if char == "(":
             nested_parentheses += 1
         elif char == ")":
             if not nested_parentheses:
-                return position > destination_start
+                return (image_start, position + 1) if position > destination_start else None
             nested_parentheses -= 1
-    return False
+    return None
+
+
+def bounded_glued_tasks_image_spans(content: str) -> list[tuple[int, int]]:
+    """返回 task 内所有完整且有界的图片区间。"""
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        image_start = content.find("![", cursor)
+        if image_start < 0:
+            return spans
+        span = bounded_glued_tasks_image_span(content, image_start)
+        if span is not None:
+            spans.append(span)
+            cursor = span[1]
+        else:
+            cursor = image_start + 2
 
 
 def is_point_label_prefix(content: str, position: int) -> bool:
@@ -1092,11 +1103,17 @@ def is_point_label_prefix(content: str, position: int) -> bool:
     return position > 0 and content[position - 1] == "点"
 
 
+def is_image_position(spans: list[tuple[int, int]], position: int) -> bool:
+    """判断位置是否落在完整图片区间中。"""
+    return any(start <= position < end for start, end in spans)
+
+
 def next_glued_tasks_label_marker(
     content: str,
     start: int,
     expected_label: str,
     spans: list[tuple[int, int]],
+    image_spans: list[tuple[int, int]],
 ) -> tuple[str, int, int] | None:
     """查找预期或更高的 tasks 尾部粘连强标签。"""
     matches = sorted(
@@ -1109,10 +1126,16 @@ def next_glued_tasks_label_marker(
     )
     for match, requires_image_check in matches:
         marker_start = match.start()
-        if is_math_position(spans, marker_start) or is_point_label_prefix(content, marker_start):
+        if (
+            is_math_position(spans, marker_start)
+            or is_image_position(image_spans, marker_start)
+            or is_point_label_prefix(content, marker_start)
+        ):
             continue
-        if requires_image_check and not has_bounded_glued_tasks_image_marker(content, match.end()):
-            continue
+        if requires_image_check:
+            image_start = skip_bounded_glued_tasks_image_whitespace(content, match.end())
+            if not any(image_start == image_span[0] for image_span in image_spans):
+                continue
         label = match.group("label")
         if label < expected_label:
             continue
@@ -1129,11 +1152,12 @@ def recover_glued_tasks_options(task_parts: list[str]) -> list[str]:
         return task_parts
 
     task_math_spans = [math_spans(part) for part in task_parts]
+    task_image_spans = [bounded_glued_tasks_image_spans(part) for part in task_parts]
     if any(has_unclosed_delimiter for _spans, has_unclosed_delimiter in task_math_spans):
         return task_parts
 
     recovered: list[str] = []
-    for content, (spans, _has_unclosed_delimiter) in zip(task_parts, task_math_spans):
+    for content, (spans, _has_unclosed_delimiter), image_spans in zip(task_parts, task_math_spans, task_image_spans):
         expected_label = chr(ord("A") + len(recovered) + 1)
         if not content.strip() or expected_label > "H":
             recovered.append(content)
@@ -1142,7 +1166,7 @@ def recover_glued_tasks_options(task_parts: list[str]) -> list[str]:
         markers: list[tuple[int, int]] = []
         cursor = 0
         while expected_label <= "H":
-            marker = next_glued_tasks_label_marker(content, cursor, expected_label, spans)
+            marker = next_glued_tasks_label_marker(content, cursor, expected_label, spans, image_spans)
             if not marker or marker[0] != expected_label:
                 break
             markers.append((marker[1], marker[2]))

@@ -76,6 +76,42 @@ class QuestionMarkdownTest(unittest.TestCase):
             options,
         )
 
+    def test_preserves_labels_inside_complete_image_alt_text(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 ![ C. alt D. alt](images/x.png)
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项 ![ C. alt D. alt](images/x.png)"},
+            ],
+            options,
+        )
+
+    def test_recovers_external_labels_after_image_alt_text(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 ![ C. alt D. alt](images/x.png) C. 外部 D. 外部
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项 ![ C. alt D. alt](images/x.png)"},
+                {"label": "C", "content": "外部"},
+                {"label": "D", "content": "外部"},
+            ],
+            options,
+        )
+
     def test_does_not_recover_tasks_with_many_malformed_image_prefixes(self):
         content = "B项 " + "C ![" * 4096
         markdown = "\n".join((r"\begin{tasks}(2)", r"\task A项", rf"\task {content}", r"\end{tasks}"))
