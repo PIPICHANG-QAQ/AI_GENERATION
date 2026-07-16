@@ -4,6 +4,62 @@ from app.question_markdown import detect_choice_option_markers, split_choice_opt
 
 
 class QuestionMarkdownTest(unittest.TestCase):
+    def test_recovers_explicit_text_tasks_label_chain(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 C. 这是文本选项 D．另一文本选项
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项"},
+                {"label": "C", "content": "这是文本选项"},
+                {"label": "D", "content": "另一文本选项"},
+            ],
+            options,
+        )
+
+    def test_does_not_recover_tasks_with_unclosed_dollar(self):
+        for name, content in {
+            "inline": "B项 $5 C. x D. y",
+            "display": "B项 $$5 C. x D. y",
+        }.items():
+            with self.subTest(name=name):
+                markdown = "\n".join((r"\begin{tasks}(2)", r"\task A项", rf"\task {content}", r"\end{tasks}"))
+
+                stem, options = split_choice_options(markdown, "choice")
+
+                self.assertEqual("", stem)
+                self.assertEqual(
+                    [
+                        {"label": "A", "content": "A项"},
+                        {"label": "B", "content": content},
+                    ],
+                    options,
+                )
+
+    def test_does_not_recover_tasks_with_empty_task(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task
+\task 前缀 D $4$ E．$5$
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "前缀 D $4$ E．$5$"},
+            ],
+            options,
+        )
+
     def test_does_not_recover_nonconsecutive_tasks_labels(self):
         markdown = r"""\begin{tasks}(2)
 \task A项

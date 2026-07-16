@@ -947,11 +947,17 @@ MATH_SPAN_RE = re.compile(
     r"\\\[.*?\\\]",
     flags=re.S,
 )
+UNESCAPED_DOLLAR_RE = re.compile(r"(?<!\\)\$")
 
 
 def is_math_position(content: str, position: int) -> bool:
     """判断位置是否落在受保护的数学公式中。"""
     return any(match.start() <= position < match.end() for match in MATH_SPAN_RE.finditer(content))
+
+
+def has_unpaired_unescaped_dollar(content: str) -> bool:
+    """判断内容是否包含无法确定公式边界的美元符号。"""
+    return bool(UNESCAPED_DOLLAR_RE.search(MATH_SPAN_RE.sub("", content)))
 
 
 def next_glued_tasks_label_marker(content: str, start: int) -> tuple[str, int, int] | None:
@@ -976,7 +982,11 @@ def next_glued_tasks_label_marker(content: str, start: int) -> tuple[str, int, i
 
 def recover_glued_tasks_options(task_parts: list[str]) -> list[str]:
     """保守拆分 tasks 各选项中连续粘连的后续标签。"""
-    if len(task_parts) < 2 or len([part for part in task_parts if part.strip()]) < 2:
+    if (
+        len(task_parts) < 2
+        or any(not part.strip() for part in task_parts)
+        or any(has_unpaired_unescaped_dollar(part) for part in task_parts)
+    ):
         return task_parts
 
     recovered: list[str] = []
@@ -1030,9 +1040,8 @@ def split_tasks_options(markdown: str) -> tuple[str, list[dict[str, str]]]:
     if match:
         task_parts = recover_glued_tasks_options(task_parts)
     options = [
-        {"label": chr(65 + index), "content": content.strip()}
-        for index, content in enumerate(task_parts)
-        if content.strip()
+        {"label": chr(65 + index), "content": content}
+        for index, content in enumerate(content.strip() for content in task_parts if content.strip())
     ]
     return stem, options
 
