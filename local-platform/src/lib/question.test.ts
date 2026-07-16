@@ -251,6 +251,19 @@ describe("choice task recovery", () => {
     return splitChoiceOptionsFromMarkdown(markdown, "choice").options.map(({ label, content }) => ({ label, content }));
   }
 
+  it("preserves sparse labels for an incomplete tasks sequence", () => {
+    const markdown = String.raw`题干
+\task 甲
+\task
+\task 丙`;
+
+    expect(splitChoiceOptionsFromMarkdown(markdown, "choice").stemMarkdown).toBe("题干");
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "甲" },
+      { label: "C", content: "丙" },
+    ]);
+  });
+
   it("recovers the screenshot-shaped C/D chain after B", () => {
     const markdown = String.raw`题干
 \begin{tasks}(2)
@@ -335,7 +348,7 @@ describe("choice task recovery", () => {
 
     expect(taskOptions(markdown)).toEqual([
       { label: "A", content: "A项" },
-      { label: "B", content: "前缀 D $4$ E．$5$" },
+      { label: "C", content: "前缀 D $4$ E．$5$" },
     ]);
   });
 
