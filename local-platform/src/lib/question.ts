@@ -899,6 +899,276 @@ function atomicTaskOptionContent(value: string) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+type TextSpan = [start: number, end: number];
+
+type GluedTasksLabelMarker = {
+  label: string;
+  markerStart: number;
+  markerEnd: number;
+};
+
+const GLUED_TASKS_IMAGE_ALT_MAX_LENGTH = 256;
+const GLUED_TASKS_IMAGE_DESTINATION_MAX_LENGTH = 2048;
+const GLUED_TASKS_IMAGE_WHITESPACE_MAX_LENGTH = 256;
+const GLUED_TASKS_LABEL_MARKER_PATTERNS: Array<{ pattern: RegExp; requiresImageCheck: boolean }> = [
+  { pattern: /(^|\s)([A-H])[.．、:：](?=\s*\S)/g, requiresImageCheck: false },
+  { pattern: /(^|\s)([A-H])(?=\s+\$(?=[^$\r\n]*\$))/g, requiresImageCheck: false },
+  {
+    pattern: new RegExp(`(^|\\s)([A-H])(?=\\s{1,${GLUED_TASKS_IMAGE_WHITESPACE_MAX_LENGTH}}!\\[)`, "g"),
+    requiresImageCheck: true,
+  },
+];
+
+function isEscapedMathDelimiter(content: string, position: number) {
+  let backslashes = 0;
+  while (position > 0 && content[position - 1] === "\\") {
+    backslashes += 1;
+    position -= 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function isSingleDollarDelimiter(content: string, position: number) {
+  return (
+    content[position] === "$"
+    && !isEscapedMathDelimiter(content, position)
+    && (position === 0 || content[position - 1] !== "$")
+    && (position + 1 === content.length || content[position + 1] !== "$")
+  );
+}
+
+function nextUnescapedDelimiter(content: string, delimiter: string, position: number) {
+  let delimiterPosition = content.indexOf(delimiter, position);
+  while (delimiterPosition >= 0) {
+    if (!isEscapedMathDelimiter(content, delimiterPosition)) return delimiterPosition;
+    delimiterPosition = content.indexOf(delimiter, delimiterPosition + 1);
+  }
+  return -1;
+}
+
+function nextSingleDollarDelimiter(content: string, position: number) {
+  for (let delimiterPosition = position; delimiterPosition < content.length; delimiterPosition += 1) {
+    if (isSingleDollarDelimiter(content, delimiterPosition)) return delimiterPosition;
+  }
+  return -1;
+}
+
+function mathSpans(content: string): { spans: TextSpan[]; hasUnclosedDelimiter: boolean } {
+  const spans: TextSpan[] = [];
+  let position = 0;
+  while (position < content.length) {
+    if (content.startsWith("$$", position) && !isEscapedMathDelimiter(content, position)) {
+      const end = nextUnescapedDelimiter(content, "$$", position + 2);
+      if (end < 0) return { spans, hasUnclosedDelimiter: true };
+      spans.push([position, end + 2]);
+      position = end + 2;
+      continue;
+    }
+    if (isSingleDollarDelimiter(content, position)) {
+      const end = nextSingleDollarDelimiter(content, position + 1);
+      if (end < 0) return { spans, hasUnclosedDelimiter: true };
+      spans.push([position, end + 1]);
+      position = end + 1;
+      continue;
+    }
+    if (content.startsWith("\\(", position) && !isEscapedMathDelimiter(content, position)) {
+      const end = nextUnescapedDelimiter(content, "\\)", position + 2);
+      if (end < 0) return { spans, hasUnclosedDelimiter: true };
+      spans.push([position, end + 2]);
+      position = end + 2;
+      continue;
+    }
+    if (content.startsWith("\\[", position) && !isEscapedMathDelimiter(content, position)) {
+      const end = nextUnescapedDelimiter(content, "\\]", position + 2);
+      if (end < 0) return { spans, hasUnclosedDelimiter: true };
+      spans.push([position, end + 2]);
+      position = end + 2;
+      continue;
+    }
+    position += 1;
+  }
+  return { spans, hasUnclosedDelimiter: false };
+}
+
+function skipBoundedGluedTasksImageWhitespace(content: string, start: number) {
+  let position = start;
+  const limit = Math.min(start + GLUED_TASKS_IMAGE_WHITESPACE_MAX_LENGTH, content.length);
+  while (position < limit && /\s/.test(content[position])) position += 1;
+  return position;
+}
+
+function boundedGluedTasksImageSpan(content: string, start: number): TextSpan | null {
+  let position = skipBoundedGluedTasksImageWhitespace(content, start);
+  if (!content.startsWith("![", position)) return null;
+
+  const imageStart = position;
+  const altStart = position + 2;
+  const altLimit = Math.min(content.length, altStart + GLUED_TASKS_IMAGE_ALT_MAX_LENGTH + 1);
+  let altEnd = -1;
+  for (position = altStart; position < altLimit; position += 1) {
+    if (content[position] === "]" && !isEscapedMathDelimiter(content, position)) {
+      altEnd = position;
+      break;
+    }
+  }
+  if (altEnd < 0) return null;
+
+  position = skipBoundedGluedTasksImageWhitespace(content, altEnd + 1);
+  if (content[position] !== "(") return null;
+
+  const destinationStart = skipBoundedGluedTasksImageWhitespace(content, position + 1);
+  const destinationLimit = Math.min(content.length, destinationStart + GLUED_TASKS_IMAGE_DESTINATION_MAX_LENGTH + 1);
+  let nestedParentheses = 0;
+  for (position = destinationStart; position < destinationLimit; position += 1) {
+    const char = content[position];
+    if (char === "\r" || char === "\n") return null;
+    if (char === "(" && !isEscapedMathDelimiter(content, position)) {
+      nestedParentheses += 1;
+    } else if (char === ")" && !isEscapedMathDelimiter(content, position)) {
+      if (nestedParentheses === 0) return position > destinationStart ? [imageStart, position + 1] : null;
+      nestedParentheses -= 1;
+    }
+  }
+  return null;
+}
+
+function boundedGluedTasksImageSpans(content: string): TextSpan[] {
+  const spans: TextSpan[] = [];
+  let cursor = 0;
+  while (true) {
+    const imageStart = content.indexOf("![", cursor);
+    if (imageStart < 0) return spans;
+    const span = boundedGluedTasksImageSpan(content, imageStart);
+    if (span) {
+      spans.push(span);
+      cursor = span[1];
+    } else {
+      cursor = imageStart + 2;
+    }
+  }
+}
+
+function isMathPosition(spans: TextSpan[], position: number) {
+  return spans.some(([start, end]) => start <= position && position < end);
+}
+
+function lowerBound(values: number[], value: number) {
+  let start = 0;
+  let end = values.length;
+  while (start < end) {
+    const middle = Math.floor((start + end) / 2);
+    if (values[middle] < value) start = middle + 1;
+    else end = middle;
+  }
+  return start;
+}
+
+function isImagePosition(spans: TextSpan[], spanStarts: number[], position: number) {
+  const spanIndex = lowerBound(spanStarts, position + 1) - 1;
+  return spanIndex >= 0 && position < spans[spanIndex][1];
+}
+
+function isPointLabelPrefix(content: string, position: number) {
+  while (position > 0 && /\s/.test(content[position - 1])) position -= 1;
+  return position > 0 && content[position - 1] === "点";
+}
+
+function nextGluedTasksLabelMarker(
+  content: string,
+  start: number,
+  expectedLabel: string,
+  spans: TextSpan[],
+  imageSpans: TextSpan[],
+  imageSpanStarts: number[],
+): GluedTasksLabelMarker | null {
+  const markers: Array<GluedTasksLabelMarker & { requiresImageCheck: boolean }> = [];
+  for (const { pattern, requiresImageCheck } of GLUED_TASKS_LABEL_MARKER_PATTERNS) {
+    pattern.lastIndex = start;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content)) !== null) {
+      const prefixLength = String(match[1] || "").length;
+      markers.push({
+        label: String(match[2] || ""),
+        markerStart: match.index + prefixLength,
+        markerEnd: match.index + match[0].length,
+        requiresImageCheck,
+      });
+    }
+  }
+  markers.sort((left, right) => left.markerStart - right.markerStart || left.markerEnd - right.markerEnd);
+
+  for (const marker of markers) {
+    if (
+      isMathPosition(spans, marker.markerStart)
+      || isImagePosition(imageSpans, imageSpanStarts, marker.markerStart)
+      || isPointLabelPrefix(content, marker.markerStart)
+    ) {
+      continue;
+    }
+    if (marker.requiresImageCheck) {
+      const imageStart = skipBoundedGluedTasksImageWhitespace(content, marker.markerEnd);
+      const imageIndex = lowerBound(imageSpanStarts, imageStart);
+      if (imageSpanStarts[imageIndex] !== imageStart) continue;
+    }
+    if (marker.label < expectedLabel) continue;
+    return marker;
+  }
+  return null;
+}
+
+function recoverGluedTaskParts(taskParts: string[]) {
+  if (taskParts.length < 2 || taskParts.some((part) => !part.trim())) return taskParts;
+
+  const taskMathSpans = taskParts.map(mathSpans);
+  const taskImageSpans = taskParts.map(boundedGluedTasksImageSpans);
+  const taskImageSpanStarts = taskImageSpans.map((spans) => spans.map(([start]) => start));
+  if (taskMathSpans.some(({ hasUnclosedDelimiter }) => hasUnclosedDelimiter)) return taskParts;
+
+  const recovered: string[] = [];
+  taskParts.forEach((content, index) => {
+    const expectedLabel = String.fromCharCode("A".charCodeAt(0) + recovered.length + 1);
+    if (!content.trim() || expectedLabel > "H") {
+      recovered.push(content);
+      return;
+    }
+
+    const markers: TextSpan[] = [];
+    let cursor = 0;
+    let nextExpectedLabel = expectedLabel;
+    while (nextExpectedLabel <= "H") {
+      const marker = nextGluedTasksLabelMarker(
+        content,
+        cursor,
+        nextExpectedLabel,
+        taskMathSpans[index].spans,
+        taskImageSpans[index],
+        taskImageSpanStarts[index],
+      );
+      if (!marker || marker.label !== nextExpectedLabel) break;
+      markers.push([marker.markerStart, marker.markerEnd]);
+      cursor = marker.markerEnd;
+      nextExpectedLabel = nextChoiceLabel(nextExpectedLabel);
+    }
+
+    if (markers.length < 2) {
+      recovered.push(content);
+      return;
+    }
+
+    const splitParts = [content.slice(0, markers[0][0])];
+    for (let markerIndex = 0; markerIndex < markers.length - 1; markerIndex += 1) {
+      splitParts.push(content.slice(markers[markerIndex][1], markers[markerIndex + 1][0]));
+    }
+    splitParts.push(content.slice(markers[markers.length - 1][1]));
+    if (splitParts.some((part) => !part.trim())) {
+      recovered.push(content);
+      return;
+    }
+    recovered.push(...splitParts);
+  });
+  return recovered;
+}
+
 export function withEditableChoiceOptions(markdown: string, rawOptions: unknown, images: QuestionImage[] = []): string {
   const normalizedMarkdown = normalizeTasksEnvironment(normalizeQuestionImageRefsInMarkdown(markdown, images)).trim();
   const options = normalizeQuestionOptions(rawOptions, images);
@@ -930,15 +1200,18 @@ function splitTasksOptions(markdown: string): { stemMarkdown: string; options: Q
   const stemMarkdown = match
     ? `${normalized.slice(0, match.index)}\n${normalized.slice(match.index + match[0].length)}`.trim()
     : normalized.slice(0, taskMatches[0].index || 0).trim();
-  const options = body
+  const taskParts = body
     .split(/\\task\b/)
-    .slice(1)
+    .slice(1);
+  const recoveredTaskParts = match ? recoverGluedTaskParts(taskParts) : taskParts;
+  const options = recoveredTaskParts
+    .map((content) => cleanOptionText(content))
+    .filter(Boolean)
     .map((content, index) => ({
       label: String.fromCharCode(65 + index),
-      content: cleanOptionText(content),
-      contentMarkdown: cleanOptionText(content),
-    }))
-    .filter((option) => option.content);
+      content,
+      contentMarkdown: content,
+    }));
   return { stemMarkdown, options };
 }
 

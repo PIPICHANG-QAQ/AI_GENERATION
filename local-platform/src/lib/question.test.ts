@@ -7,6 +7,7 @@ import {
   getQuestionMarkdownParts,
   imagePlacementIssues,
   moveQuestionImageReference,
+  splitChoiceOptionsFromMarkdown,
   type QuestionImage,
 } from "./question";
 
@@ -242,5 +243,167 @@ describe("question image ownership", () => {
 
     expect(result.match(/!\[\]\(图1\)/g)).toHaveLength(1);
     expect(result).toContain("\\task ![](图1) 丙");
+  });
+});
+
+describe("choice task recovery", () => {
+  function taskOptions(markdown: string) {
+    return splitChoiceOptionsFromMarkdown(markdown, "choice").options.map(({ label, content }) => ({ label, content }));
+  }
+
+  it("recovers the screenshot-shaped C/D chain after B", () => {
+    const markdown = String.raw`题干
+\begin{tasks}(2)
+\task A项
+\task B项 C $3$ D．$4$
+\end{tasks}`;
+
+    expect(splitChoiceOptionsFromMarkdown(markdown, "choice").stemMarkdown).toBe("题干");
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: "B项" },
+      { label: "C", content: "$3$" },
+      { label: "D", content: "$4$" },
+    ]);
+  });
+
+  it("recovers a glued chain before a later original task", () => {
+    const markdown = String.raw`题干
+\begin{tasks}(2)
+\task A项
+\task B项 C $3$ D．$4$
+\task E项
+\end{tasks}`;
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: "B项" },
+      { label: "C", content: "$3$" },
+      { label: "D", content: "$4$" },
+      { label: "E", content: "E项" },
+    ]);
+  });
+
+  it.each([
+    ["inline dollar", String.raw`$ C. x D. y $`],
+    ["display dollar", String.raw`$$ C. x D. y $$`],
+    ["inline parentheses", String.raw`\( C. x D. y \)`],
+    ["display brackets", String.raw`\[ C. x D. y \]`],
+  ])("does not recover labels inside %s math", (_name, formula) => {
+    const markdown = [String.raw`\begin{tasks}(2)`, String.raw`\task A项`, String.raw`\task ${formula}`, String.raw`\end{tasks}`].join("\n");
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: formula },
+    ]);
+  });
+
+  it.each([
+    ["math variable", String.raw`B项 $C$ $5.5$ D．$6.5$`],
+    ["point name", String.raw`B项 C $5.5$ 点 D．$6.5$`],
+    ["nonconsecutive labels", String.raw`B项 C $5.5$ E．$6.5$`],
+    ["single label", String.raw`B项 C. 文字`],
+  ])("does not recover ambiguous %s chains", (_name, content) => {
+    const markdown = [String.raw`\begin{tasks}(2)`, String.raw`\task A项`, String.raw`\task ${content}`, String.raw`\end{tasks}`].join("\n");
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content },
+    ]);
+  });
+
+  it.each([
+    ["inline dollar", "B项 $5 C. x D. y"],
+    ["display dollar", "B项 $$5 C. x D. y"],
+    ["inline parentheses", String.raw`B项 \(5 C. x D. y`],
+    ["display brackets", String.raw`B项 \[5 C. x D. y`],
+  ])("does not recover a block with an unclosed %s delimiter", (_name, content) => {
+    const markdown = [String.raw`\begin{tasks}(2)`, String.raw`\task A项`, String.raw`\task ${content}`, String.raw`\end{tasks}`].join("\n");
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content },
+    ]);
+  });
+
+  it("does not recover a complete block containing an empty task", () => {
+    const markdown = String.raw`\begin{tasks}(2)
+\task A项
+\task
+\task 前缀 D $4$ E．$5$
+\end{tasks}`;
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: "前缀 D $4$ E．$5$" },
+    ]);
+  });
+
+  it("recovers an external text chain after a formula decoy", () => {
+    const markdown = String.raw`\begin{tasks}(2)
+\task A项
+\task B项 \[ C. x=1 \] C. 外部文本 D．另一文本
+\end{tasks}`;
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: String.raw`B项 \[ C. x=1 \]` },
+      { label: "C", content: "外部文本" },
+      { label: "D", content: "另一文本" },
+    ]);
+  });
+
+  it("recovers a bare label only when it precedes a complete image", () => {
+    const markdown = String.raw`\begin{tasks}(2)
+\task A项
+\task B项 C. 文字 D ![](images/(d).png)
+\end{tasks}`;
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: "B项" },
+      { label: "C", content: "文字" },
+      { label: "D", content: "![](images/(d).png)" },
+    ]);
+  });
+
+  it.each([
+    [
+      "alt text",
+      String.raw`B项 ![a \] C. decoy D. decoy](images/(x).png) C. real D．real`,
+      String.raw`B项 ![a \] C. decoy D. decoy](images/(x).png)`,
+    ],
+    [
+      "destination",
+      String.raw`B项 ![alt](foo\) C. decoy D. decoy(thing).png) C. real D. real`,
+      String.raw`B项 ![alt](foo\) C. decoy D. decoy(thing).png)`,
+    ],
+  ])("ignores %s label decoys inside a complete image", (_name, content, originalB) => {
+    const markdown = [String.raw`\begin{tasks}(2)`, String.raw`\task A项`, String.raw`\task ${content}`, String.raw`\end{tasks}`].join("\n");
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: originalB },
+      { label: "C", content: "real" },
+      { label: "D", content: "real" },
+    ]);
+  });
+
+  it("uses backslash parity when recognizing math delimiters", () => {
+    const evenBackslashes = String.raw`B项 \\$5 C. x D. y\\$`;
+    const oddBackslashes = String.raw`B项 \$5 C. x D. y\$`;
+    const evenMarkdown = [String.raw`\begin{tasks}(2)`, String.raw`\task A项`, String.raw`\task ${evenBackslashes}`, String.raw`\end{tasks}`].join("\n");
+    const oddMarkdown = [String.raw`\begin{tasks}(2)`, String.raw`\task A项`, String.raw`\task ${oddBackslashes}`, String.raw`\end{tasks}`].join("\n");
+
+    expect(taskOptions(evenMarkdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: evenBackslashes },
+    ]);
+    expect(taskOptions(oddMarkdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: String.raw`B项 \$5` },
+      { label: "C", content: "x" },
+      { label: "D", content: String.raw`y\$` },
+    ]);
   });
 });
