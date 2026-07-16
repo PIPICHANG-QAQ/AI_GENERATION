@@ -4,6 +4,40 @@ from app.question_markdown import detect_choice_option_markers, split_choice_opt
 
 
 class QuestionMarkdownTest(unittest.TestCase):
+    def test_does_not_recover_tasks_with_even_backslashes_before_dollar(self):
+        content = r"B项 \\$5 C. x D. y\\$"
+        markdown = "\n".join((r"\begin{tasks}(2)", r"\task A项", rf"\task {content}", r"\end{tasks}"))
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": content},
+            ],
+            options,
+        )
+
+    def test_recovers_tasks_with_odd_backslashes_before_dollar(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 \$5 C. x D. y\$
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": r"B项 \$5"},
+                {"label": "C", "content": "x"},
+                {"label": "D", "content": r"y\$"},
+            ],
+            options,
+        )
+
     def test_recovers_bare_tasks_label_before_image(self):
         markdown = r"""\begin{tasks}(2)
 \task A项

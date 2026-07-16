@@ -940,25 +940,90 @@ def normalize_tasks_environment(markdown: str) -> str:
     )
 
 
-MATH_SPAN_RE = re.compile(
-    r"(?<!\\)\$\$.*?(?<!\\)\$\$|"
-    r"(?<![$\\])\$(?!\$).*?(?<![$\\])\$(?!\$)|"
-    r"\\\(.*?\\\)|"
-    r"\\\[.*?\\\]",
-    flags=re.S,
-)
-UNESCAPED_DOLLAR_RE = re.compile(r"(?<!\\)\$")
+def is_escaped_math_delimiter(content: str, position: int) -> bool:
+    """按紧邻前导反斜杠数量判断数学定界符是否被转义。"""
+    backslashes = 0
+    while position > 0 and content[position - 1] == "\\":
+        backslashes += 1
+        position -= 1
+    return backslashes % 2 == 1
+
+
+def is_single_dollar_delimiter(content: str, position: int) -> bool:
+    """判断位置是否为未转义的单美元数学定界符。"""
+    return (
+        content[position] == "$"
+        and not is_escaped_math_delimiter(content, position)
+        and (position == 0 or content[position - 1] != "$")
+        and (position + 1 == len(content) or content[position + 1] != "$")
+    )
+
+
+def next_unescaped_delimiter(content: str, delimiter: str, position: int) -> int:
+    """查找下一个未转义的多字符数学定界符。"""
+    match_position = content.find(delimiter, position)
+    while match_position >= 0:
+        if not is_escaped_math_delimiter(content, match_position):
+            return match_position
+        match_position = content.find(delimiter, match_position + 1)
+    return -1
+
+
+def next_single_dollar_delimiter(content: str, position: int) -> int:
+    """查找下一个未转义的单美元数学定界符。"""
+    for match_position in range(position, len(content)):
+        if is_single_dollar_delimiter(content, match_position):
+            return match_position
+    return -1
+
+
+def math_spans(content: str) -> tuple[list[tuple[int, int]], bool]:
+    """返回完整数学区间，以及是否存在未闭合的数学开始定界符。"""
+    spans: list[tuple[int, int]] = []
+    position = 0
+    while position < len(content):
+        if content.startswith("$$", position) and not is_escaped_math_delimiter(content, position):
+            end = next_unescaped_delimiter(content, "$$", position + 2)
+            if end < 0:
+                return spans, True
+            spans.append((position, end + 2))
+            position = end + 2
+            continue
+        if is_single_dollar_delimiter(content, position):
+            end = next_single_dollar_delimiter(content, position + 1)
+            if end < 0:
+                return spans, True
+            spans.append((position, end + 1))
+            position = end + 1
+            continue
+        if content.startswith(r"\(", position) and not is_escaped_math_delimiter(content, position):
+            end = next_unescaped_delimiter(content, r"\)", position + 2)
+            if end < 0:
+                return spans, True
+            spans.append((position, end + 2))
+            position = end + 2
+            continue
+        if content.startswith(r"\[", position) and not is_escaped_math_delimiter(content, position):
+            end = next_unescaped_delimiter(content, r"\]", position + 2)
+            if end < 0:
+                return spans, True
+            spans.append((position, end + 2))
+            position = end + 2
+            continue
+        position += 1
+    return spans, False
 
 
 def is_math_position(content: str, position: int) -> bool:
     """判断位置是否落在受保护的数学公式中。"""
-    return any(match.start() <= position < match.end() for match in MATH_SPAN_RE.finditer(content))
+    spans, _has_unclosed_delimiter = math_spans(content)
+    return any(start <= position < end for start, end in spans)
 
 
 def has_unclosed_math_delimiter(content: str) -> bool:
-    """判断内容是否包含未被完整数学公式消耗的开始分隔符。"""
-    remaining = MATH_SPAN_RE.sub("", content)
-    return bool(UNESCAPED_DOLLAR_RE.search(remaining) or r"\(" in remaining or r"\[" in remaining)
+    """判断内容是否包含未闭合的数学开始定界符。"""
+    _spans, has_unclosed_delimiter = math_spans(content)
+    return has_unclosed_delimiter
 
 
 def next_glued_tasks_label_marker(content: str, start: int) -> tuple[str, int, int] | None:
