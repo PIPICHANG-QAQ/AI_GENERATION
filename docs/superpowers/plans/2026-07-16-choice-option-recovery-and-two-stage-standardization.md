@@ -434,7 +434,7 @@ git commit -m "fix: add two-stage choice standardization"
 - Modify: `local-platform/src/components/question-bank/StandardizeCandidatePanel.tsx:13-110`
 - Create: `local-platform/src/components/question-bank/StandardizeCandidatePanel.test.ts`
 
-- [ ] **Step 1: 写纯状态和失败呈现的失败测试**
+- [x] **Step 1: 写纯状态和失败呈现的失败测试**
 
 ```ts
 import { afterLocalStandardization, shouldForceAi } from "./interactive-standardization";
@@ -457,7 +457,7 @@ it("does not expose a force-AI failure as an applicable candidate", () => {
 });
 ```
 
-- [ ] **Step 2: 运行前端目标测试，确认 RED**
+- [x] **Step 2: 运行前端目标测试，确认 RED**
 
 Run:
 
@@ -467,7 +467,7 @@ npm --prefix local-platform test -- --run src/lib/interactive-standardization.te
 
 Expected: 新模块不存在，且 `forceAiFailed` 尚未被候选面板识别。
 
-- [ ] **Step 3: 实现纯状态、API 参数和失败消息**
+- [x] **Step 3: 实现纯状态、API 参数和失败消息**
 
 ```ts
 export type InteractiveStandardizationStage = { markdown: string } | null;
@@ -493,7 +493,7 @@ standardizeImportQuestionAi: (taskId: string, qid: string, markdown: string, for
 
 Add `forceAiFailed?: boolean` and `error?: string` to `StandardizerResult`; make `standardizeNotice` return `强制 AI 标准化失败：...` before any success branch.
 
-- [ ] **Step 4: 在 `QuestionCard` 接入两阶段状态**
+- [x] **Step 4: 在 `QuestionCard` 接入两阶段状态**
 
 ```ts
 const [interactiveStandardizationStage, setInteractiveStandardizationStage] =
@@ -539,7 +539,7 @@ Then render:
 
 with `localStdMutation.mutate({ markdown: formData.markdown, forceAi })`.
 
-- [ ] **Step 5: 运行前端目标测试和构建，确认 GREEN**
+- [x] **Step 5: 运行前端目标测试和构建，确认 GREEN**
 
 Run:
 
@@ -550,7 +550,7 @@ npm --prefix local-platform run build
 
 Expected: 所有目标测试通过，TypeScript 检查和 Vite 构建成功。
 
-- [ ] **Step 6: 提交前端两阶段交互**
+- [x] **Step 6: 提交前端两阶段交互**
 
 ```bash
 git add local-platform/src/lib/api.ts local-platform/src/lib/question.ts local-platform/src/lib/question.test.ts local-platform/src/lib/interactive-standardization.ts local-platform/src/lib/interactive-standardization.test.ts local-platform/src/components/question-bank/QuestionCard.tsx local-platform/src/components/question-bank/StandardizeCandidatePanel.tsx local-platform/src/components/question-bank/StandardizeCandidatePanel.test.ts
