@@ -25,7 +25,7 @@ class MineruOcrBundleAdapter:
         return self.from_output(read_job(job_id), OUTPUT_ROOT / job_id)
 
     def from_output(self, job: dict[str, Any], output_dir: Path) -> CanonicalOcrBundle:
-        """Adapt one completed MinerU output directory without changing its files."""
+        """Adapt one completed MinerU output directory to canonical evidence."""
         job_id = str(job.get("jobId") or job.get("id") or "").strip()
         if not job_id:
             raise ValueError("MinerU jobId is required")
@@ -44,6 +44,8 @@ class MineruOcrBundleAdapter:
 
         markdown_path = markdown_files[0]
         markdown = markdown_path.read_text(encoding="utf-8", errors="replace")
+        if not markdown.strip():
+            markdown_path, markdown = self._materialize_content_list_markdown(markdown_path, output_dir)
         json_path = json_files[0] if json_files else None
         json_content = self._read_json(json_path) if json_path else None
         assets = tuple(self._asset(job_id, output_dir, path) for path in image_files)
@@ -80,6 +82,31 @@ class MineruOcrBundleAdapter:
             capabilities=frozenset(capabilities),
             json_content=json_content,
         )
+
+    @classmethod
+    def _materialize_content_list_markdown(cls, markdown_path: Path, output_dir: Path) -> tuple[Path, str]:
+        content_list_paths = sorted(markdown_path.parent.glob("*_content_list.json"))
+        if not content_list_paths:
+            content_list_paths = sorted(output_dir.rglob("*_content_list.json"))
+
+        fragments: list[str] = []
+        for path in content_list_paths:
+            payload = cls._read_json(path)
+            if not isinstance(payload, list):
+                continue
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text") or "").strip()
+                if text:
+                    fragments.append(text)
+
+        canonical_markdown = "\n\n".join(fragments).strip()
+        if not canonical_markdown:
+            return markdown_path, ""
+        canonical_path = markdown_path.with_name(f"{markdown_path.stem}_canonical.md")
+        canonical_path.write_text(canonical_markdown, encoding="utf-8")
+        return canonical_path, canonical_markdown
 
     def _asset(self, job_id: str, output_dir: Path, path: Path) -> OcrAsset:
         relative = path.relative_to(output_dir).as_posix()

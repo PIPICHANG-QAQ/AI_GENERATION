@@ -56,3 +56,33 @@ def test_adapter_builds_l2_bundle_from_mineru_artifacts(tmp_path: Path) -> None:
     assert bundle.pages[0].height == 1400
     assert bundle.source_document_ref is not None
     assert bundle.source_document_ref.path == str(source)
+
+
+def test_adapter_recovers_blank_markdown_from_content_list(tmp_path: Path) -> None:
+    output_dir = tmp_path / "outputs" / "job-blank" / "paper" / "auto"
+    output_dir.mkdir(parents=True)
+    native_markdown = output_dir / "paper.md"
+    native_markdown.write_text("", encoding="utf-8")
+    (output_dir / "paper_content_list.json").write_text(
+        json.dumps(
+            [
+                {"type": "header", "text": "1. x + 1 = 2, find x.", "page_idx": 0},
+                {"type": "aside_text", "text": "A. 0", "page_idx": 0},
+                {"type": "aside_text", "text": "B. 1", "page_idx": 0},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-blank", "ocrProvider": "mineru"},
+        tmp_path / "outputs" / "job-blank",
+    )
+    restored = type(bundle).from_persisted_manifest(bundle.to_persisted_manifest())
+
+    assert bundle.canonical_markdown == "1. x + 1 = 2, find x.\n\nA. 0\n\nB. 1"
+    assert bundle.markdown_artifact_path == "paper/auto/paper_canonical.md"
+    assert (output_dir / "paper_canonical.md").read_text(encoding="utf-8") == bundle.canonical_markdown
+    assert native_markdown.read_text(encoding="utf-8") == ""
+    assert restored.canonical_markdown == bundle.canonical_markdown
