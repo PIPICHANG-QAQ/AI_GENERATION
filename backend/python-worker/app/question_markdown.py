@@ -1026,8 +1026,8 @@ def has_unclosed_math_delimiter(content: str) -> bool:
     return has_unclosed_delimiter
 
 
-def next_glued_tasks_label_marker(content: str, start: int) -> tuple[str, int, int] | None:
-    """查找 tasks 尾部粘连选项的下一个强标签。"""
+def next_glued_tasks_label_marker(content: str, start: int, expected_label: str) -> tuple[str, int, int] | None:
+    """查找预期或更高的 tasks 尾部粘连强标签。"""
     label_pattern = r"[A-H]"
     patterns = (
         re.compile(rf"(?<!\S)(?P<label>{label_pattern})[.．、:：](?=\s*\S)"),
@@ -1043,7 +1043,10 @@ def next_glued_tasks_label_marker(content: str, start: int) -> tuple[str, int, i
         prefix = content[:marker_start].rstrip()
         if is_math_position(content, marker_start) or prefix.endswith("点"):
             continue
-        return match.group("label"), marker_start, match.end()
+        label = match.group("label")
+        if label < expected_label:
+            continue
+        return label, marker_start, match.end()
     return None
 
 
@@ -1066,7 +1069,7 @@ def recover_glued_tasks_options(task_parts: list[str]) -> list[str]:
         markers: list[tuple[int, int]] = []
         cursor = 0
         while expected_label <= "H":
-            marker = next_glued_tasks_label_marker(content, cursor)
+            marker = next_glued_tasks_label_marker(content, cursor, expected_label)
             if not marker or marker[0] != expected_label:
                 break
             markers.append((marker[1], marker[2]))

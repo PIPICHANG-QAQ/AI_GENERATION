@@ -76,6 +76,44 @@ class QuestionMarkdownTest(unittest.TestCase):
             options,
         )
 
+    def test_recovers_external_tasks_chain_after_inline_math_label(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 $C. x$ C. text D. more
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项 $C. x$"},
+                {"label": "C", "content": "text"},
+                {"label": "D", "content": "more"},
+            ],
+            options,
+        )
+
+    def test_recovers_tasks_chain_after_lower_label_prefix(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 B $0$ C. text D. more
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项 B $0$"},
+                {"label": "C", "content": "text"},
+                {"label": "D", "content": "more"},
+            ],
+            options,
+        )
+
     def test_recovers_explicit_text_tasks_label_chain(self):
         markdown = r"""\begin{tasks}(2)
 \task A项
