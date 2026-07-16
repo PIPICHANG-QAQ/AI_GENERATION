@@ -86,3 +86,20 @@ def test_adapter_recovers_blank_markdown_from_content_list(tmp_path: Path) -> No
     assert (output_dir / "paper_canonical.md").read_text(encoding="utf-8") == bundle.canonical_markdown
     assert native_markdown.read_text(encoding="utf-8") == ""
     assert restored.canonical_markdown == bundle.canonical_markdown
+
+
+def test_adapter_prefers_nonblank_native_markdown_over_stale_fallback(tmp_path: Path) -> None:
+    output_dir = tmp_path / "outputs" / "job-retry" / "paper" / "auto"
+    output_dir.mkdir(parents=True)
+    (output_dir / "paper.md").write_text("1. fresh native result", encoding="utf-8")
+    stale_fallback = output_dir / "paper_canonical.md"
+    stale_fallback.write_text("1. stale fallback result that is deliberately longer", encoding="utf-8")
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-retry", "ocrProvider": "mineru"},
+        tmp_path / "outputs" / "job-retry",
+    )
+
+    assert bundle.canonical_markdown == "1. fresh native result"
+    assert bundle.markdown_artifact_path == "paper/auto/paper.md"
+    assert stale_fallback.read_text(encoding="utf-8") == "1. stale fallback result that is deliberately longer"

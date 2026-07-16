@@ -42,7 +42,8 @@ class MineruOcrBundleAdapter:
         if not markdown_files:
             raise ValueError("MinerU output does not contain Markdown")
 
-        markdown_path = markdown_files[0]
+        native_markdown_files = [path for path in markdown_files if not path.stem.endswith("_canonical")]
+        markdown_path = (native_markdown_files or markdown_files)[0]
         markdown = markdown_path.read_text(encoding="utf-8", errors="replace")
         if not markdown.strip():
             markdown_path, markdown = self._materialize_content_list_markdown(markdown_path, output_dir)
