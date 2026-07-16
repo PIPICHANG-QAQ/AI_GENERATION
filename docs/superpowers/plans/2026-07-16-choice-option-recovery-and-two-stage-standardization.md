@@ -4,7 +4,7 @@
 
 **Goal:** 让明确粘连在 `tasks` 内的 C/D 选项被无损拆分，并让导入题的首次标准化仅走本地候选、第二次同轮点击强制真实调用 AI。
 
-**Architecture:** Python 和 TypeScript 各自实现同一份保守的 `tasks` 内联标签链恢复规则；Python 标准化 API 为导入题增加 `local` 与 `force-ai` 两个执行模式。前端仅在导入题编辑卡片中维护本轮编辑的阶段状态，并将第二次请求显式标记为 `forceAi=true`。
+**Architecture:** Python 和 TypeScript 各自实现同一份保守的 `tasks` 内联标签链恢复规则。导入题公开接口由 Java 编排层拥有：它将前端的 `forceAi` 转换为 Python Worker 内部 `local` 或 `force-ai` 执行模式；普通标准化继续是 `ai`。前端仅在导入题编辑卡片中维护本轮编辑的阶段状态，并将第二次请求显式标记为 `forceAi=true`。
 
 **Tech Stack:** Python 3.11、FastAPI/Pydantic、pytest、TypeScript、React、TanStack Query、Vitest、Docker Compose。
 
@@ -16,6 +16,9 @@
 - `backend/python-worker/app/import_services.py`：构造本地候选、阶段缓存、强制 AI 失败信封。
 - `backend/python-worker/app/llm_splitter.py`：允许标准化调用显式跳过路由缓存。
 - `backend/python-worker/app/worker_base.py`、`backend/python-worker/app/contracts/worker_v1.py`、`backend/python-worker/app/worker_routes.py`：传递兼容的 `forceAi` 字段和执行模式。
+- `backend/src/main/java/com/aigeneration/questionbank/domain/service/AiFlowOrchestrationService.java`：在导入题 Java 入口将 `forceAi` 派生为受控 worker 执行模式。
+- `backend/src/test/java/com/aigeneration/questionbank/DomainControllerTest.java`：验证 Java 导入题入口把 `forceAi` 传至 worker。
+- `question-engine/openapi/question-engine.v1.yaml`：声明公开请求的兼容 `forceAi` 字段。
 - `local-platform/src/lib/question.ts`：与 Python 一致地解析粘连 `tasks` 选项。
 - `local-platform/src/lib/interactive-standardization.ts`：纯函数管理“下一次是否强制 AI”的编辑会话状态。
 - `local-platform/src/components/question-bank/QuestionCard.tsx`：仅导入题编辑界面发送 `forceAi` 并切换按钮文案。
@@ -28,7 +31,7 @@
 - Modify: `backend/python-worker/app/question_markdown.py:202-260,941-971`
 - Modify: `backend/python-worker/tests/test_question_markdown.py:1-58`
 
-- [ ] **Step 1: 写失败测试，固定截图同构题和反例**
+- [x] **Step 1: 写失败测试，固定截图同构题和反例**
 
 ```python
 def test_recovers_glued_tasks_chain_outside_inline_math(self):
@@ -59,7 +62,9 @@ def test_does_not_split_math_variable_or_incomplete_glued_tasks_chain(self):
     self.assertIn("$C$", options[1]["content"])
 ```
 
-- [ ] **Step 2: 运行测试，确认当前实现无法恢复 C/D**
+Add nine further regressions before implementation: a chain in a non-final `\\task` followed by a valid later task must still recover every label in order; labels inside `$$...$$`, `\\(...\\)` or `\\[...\\]` math must never be split; a non-contiguous `C ... E．...` sequence must remain whole; `点 D．...` must remain whole even with option punctuation; an unclosed unescaped `$`, `\\(`, or `\\[` must block recovery; and any empty `\\task` must block recovery for the whole block. Preserve the intended positive case for an explicit punctuated text chain `C. ... D．...`—the rule is not formula-only—an independent external C/D chain after an earlier formula contains a decoy `C.` label, and a bare expected label directly before a Markdown image. Labels inside a complete image alt/path must not split it, while an independent external chain after that image may recover.
+
+- [x] **Step 2: 运行测试，确认当前实现无法恢复 C/D**
 
 Run:
 
@@ -69,7 +74,7 @@ PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/py
 
 Expected: 新增的同构题断言失败，当前结果只有 A/B。
 
-- [ ] **Step 3: 在 `question_markdown.py` 加入保守恢复器，并让 `split_tasks_options` 使用它**
+- [x] **Step 3: 在 `question_markdown.py` 加入保守恢复器，并让 `split_tasks_options` 使用它**
 
 ```python
 TASK_INLINE_OPTION_RE = re.compile(
@@ -77,9 +82,9 @@ TASK_INLINE_OPTION_RE = re.compile(
     r"(?=\s*(?:\$|!\[|[（(\[]|[\u4e00-\u9fff0-9]))"
 )
 
-def is_outside_inline_math(value: str, offset: int) -> bool:
-    delimiters = [match.start() for match in re.finditer(r"(?<!\\)\$(?!\$)", value)]
-    return sum(index < offset for index in delimiters) % 2 == 0
+def is_outside_math(value: str, offset: int) -> bool:
+    # Treat $...$, $$...$$, \(...\), and \[...\] as protected math ranges.
+    ...
 
 def recover_glued_task_parts(parts: list[str]) -> list[str]:
     recovered: list[str] = []
@@ -90,7 +95,7 @@ def recover_glued_task_parts(parts: list[str]) -> list[str]:
         for match in TASK_INLINE_OPTION_RE.finditer(part):
             label = normalize_choice_label(match.group("label"))
             previous = part[:match.start()].rstrip()[-1:]
-            if label != expected or not is_outside_inline_math(part, match.start()):
+            if label != expected or not is_outside_math(part, match.start()):
                 continue
             if not match.group("punct") and previous not in {"$", ")", "]", "）", "】"}:
                 continue
@@ -120,7 +125,7 @@ to:
 task_parts = recover_glued_task_parts(re.split(r"\\task\b", body)[1:])
 ```
 
-- [ ] **Step 4: 运行 Python 解析测试，确认 GREEN**
+- [x] **Step 4: 运行 Python 解析测试，确认 GREEN**
 
 Run:
 
@@ -130,7 +135,7 @@ PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/py
 
 Expected: 所有 `QuestionMarkdownTest` 用例通过，包含截图同构题和数学变量反例。
 
-- [ ] **Step 5: 提交解析恢复的独立提交**
+- [x] **Step 5: 提交解析恢复的独立提交**
 
 ```bash
 git add backend/python-worker/app/question_markdown.py backend/python-worker/tests/test_question_markdown.py
@@ -162,6 +167,8 @@ it("recovers a consecutive C/D chain glued into a tasks item", () => {
 });
 ```
 
+Mirror the Python parser fixtures as well: a recovered chain in a non-final task must keep later labels aligned; `$...$`, `$$...$$`, `\\(...\\)` and `\\[...\\]` must not split; `$C$`, `点 D．...`, incomplete chains, and `C ... E．...` must remain a single existing task item.
+
 - [ ] **Step 2: 运行目标测试，确认 RED**
 
 Run:
@@ -177,9 +184,9 @@ Expected: 新增断言返回两个选项而失败。
 ```ts
 const taskInlineOption = /(?<![A-Za-z0-9])([A-HＡ-Ｈａ-ｈ])([.．、:：])?(?=\s*(?:\$|!\[|[（(\[]|[\u4e00-\u9fff0-9]))/g;
 
-function outsideInlineMath(value: string, offset: number) {
-  const delimiters = [...value.matchAll(/(?<!\\)\$(?!\$)/g)].map((match) => match.index ?? -1);
-  return delimiters.filter((index) => index < offset).length % 2 === 0;
+function isMathPosition(value: string, offset: number) {
+  // Mirror Python: $...$, $$...$$, \\(...\\), and \\[...\\] protect inline labels.
+  ...
 }
 
 function recoverGluedTaskParts(parts: string[]) {
@@ -232,6 +239,9 @@ git commit -m "fix: mirror glued choice recovery in editor"
 - Modify: `backend/python-worker/app/worker_routes.py:350-364,820-827`
 - Modify: `backend/python-worker/app/import_services.py:26-94,1001-1012,1310-1564`
 - Modify: `backend/python-worker/app/llm_splitter.py:405-436,814-940`
+- Modify: `backend/src/main/java/com/aigeneration/questionbank/domain/service/AiFlowOrchestrationService.java:122-140`
+- Modify: `backend/src/test/java/com/aigeneration/questionbank/DomainControllerTest.java:1215-1351`
+- Modify: `question-engine/openapi/question-engine.v1.yaml:1173-1195`
 - Modify: `backend/python-worker/tests/test_import_services.py`
 - Modify: `backend/python-worker/tests/test_llm_splitter.py`
 - Modify: `backend/python-worker/tests/test_worker_v1_contract.py`
@@ -288,7 +298,7 @@ def test_force_ai_failure_is_blocked_and_never_returns_local_fallback(self):
     self.assertEqual("题干", result["markdown"])
 ```
 
-Add a route test that posts `{ "markdown": "题干", "forceAi": true }` to `/worker/v1/standardize` and asserts the delegate receives `payload.forceAi is True`.
+Add a Python compatibility route test that posts `{ "markdown": "题干", "forceAi": true, "executionMode": "force-ai" }` to `/worker/v1/standardize` and asserts the delegate receives both fields. Add a Java `DomainControllerTest` that posts `{ "markdown": "题干", "forceAi": true }` to the public import-question endpoint and asserts the captured `/worker/ai/standardize` JSON contains `forceAi=true` and `executionMode=force-ai`; a false request must yield `executionMode=local`.
 
 - [ ] **Step 2: 运行目标测试，确认 RED**
 
@@ -311,15 +321,18 @@ class MarkdownPayload(BaseModel):
     inputHash: str = Field(default="", max_length=128)
     requestSource: str = Field(default="single", max_length=40)
     forceAi: bool = False
+    executionMode: str = Field(default="ai", max_length=20)
 ```
 
-Apply the same additive field to `StandardizationRequest`. Route import-question requests with:
+Apply both additive fields to `StandardizationRequest`. In Java `AiFlowOrchestrationService.standardizeImportQuestion`, derive a trusted worker request only for this import route:
 
-```python
-execution_mode="force-ai" if payload.forceAi else "local"
+```java
+boolean forceAi = booleanValue(payload.get("forceAi"));
+request.put("forceAi", forceAi);
+request.put("executionMode", forceAi ? "force-ai" : "local");
 ```
 
-and keep generic `/api/markdown/standardize/ai` and existing worker callers on `"ai"` unless they explicitly set `forceAi=true`.
+Have the Python worker accept only `ai` / `local` / `force-ai`, map the imported worker request to its execution mode, and keep generic `/api/markdown/standardize/ai` and existing worker callers on `ai`. Add `forceAi: boolean` to the public `AiStandardizeRequest` OpenAPI schema; `executionMode` remains an internal Java-to-worker field.
 
 Include a stable question scope in direct-Python structured hints so the local cache cannot cross questions:
 
@@ -407,7 +420,7 @@ Expected: 解析、两阶段、缓存绕过、失败信封与 v1 兼容测试全
 - [ ] **Step 7: 提交后端两阶段实现**
 
 ```bash
-git add backend/python-worker/app/question_markdown.py backend/python-worker/app/import_services.py backend/python-worker/app/llm_splitter.py backend/python-worker/app/worker_base.py backend/python-worker/app/contracts/worker_v1.py backend/python-worker/app/worker_routes.py backend/python-worker/tests/test_question_markdown.py backend/python-worker/tests/test_import_services.py backend/python-worker/tests/test_llm_splitter.py backend/python-worker/tests/test_worker_v1_contract.py
+git add backend/python-worker/app/question_markdown.py backend/python-worker/app/import_services.py backend/python-worker/app/llm_splitter.py backend/python-worker/app/worker_base.py backend/python-worker/app/contracts/worker_v1.py backend/python-worker/app/worker_routes.py backend/python-worker/tests/test_question_markdown.py backend/python-worker/tests/test_import_services.py backend/python-worker/tests/test_llm_splitter.py backend/python-worker/tests/test_worker_v1_contract.py backend/src/main/java/com/aigeneration/questionbank/domain/service/AiFlowOrchestrationService.java backend/src/test/java/com/aigeneration/questionbank/DomainControllerTest.java question-engine/openapi/question-engine.v1.yaml
 git commit -m "fix: add two-stage choice standardization"
 ```
 
