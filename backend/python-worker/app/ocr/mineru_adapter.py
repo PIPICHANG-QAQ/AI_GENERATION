@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -86,28 +88,111 @@ class MineruOcrBundleAdapter:
 
     @classmethod
     def _materialize_content_list_markdown(cls, markdown_path: Path, output_dir: Path) -> tuple[Path, str]:
-        content_list_paths = sorted(markdown_path.parent.glob("*_content_list.json"))
-        if not content_list_paths:
-            content_list_paths = sorted(output_dir.rglob("*_content_list.json"))
+        source_stem = markdown_path.stem.removesuffix("_canonical")
+        content_list_path = markdown_path.with_name(f"{source_stem}_content_list.json")
+        if not content_list_path.exists():
+            return markdown_path, ""
+        content_list_path = cls._resolved_artifact_path(content_list_path, output_dir)
 
         fragments: list[str] = []
-        for path in content_list_paths:
-            payload = cls._read_json(path)
-            if not isinstance(payload, list):
-                continue
+        payload = cls._read_json(content_list_path)
+        if isinstance(payload, list):
             for item in payload:
                 if not isinstance(item, dict):
                     continue
-                text = str(item.get("text") or "").strip()
-                if text:
-                    fragments.append(text)
+                fragment = cls._content_item_markdown(item)
+                if fragment:
+                    fragments.append(fragment)
 
         canonical_markdown = "\n\n".join(fragments).strip()
         if not canonical_markdown:
             return markdown_path, ""
-        canonical_path = markdown_path.with_name(f"{markdown_path.stem}_canonical.md")
-        canonical_path.write_text(canonical_markdown, encoding="utf-8")
+        canonical_path = markdown_path.with_name(f"{source_stem}_canonical.md")
+        cls._atomic_write_text(canonical_path, canonical_markdown, output_dir)
         return canonical_path, canonical_markdown
+
+    @classmethod
+    def _content_item_markdown(cls, item: dict[str, Any]) -> str:
+        item_type = str(item.get("type") or "").strip().lower()
+        fragments: list[str] = []
+
+        if item_type == "list":
+            list_items = cls._text_values(item.get("list_items"))
+            fragments.extend(f"- {value}" for value in list_items)
+        elif item_type == "table":
+            fragments.extend(cls._text_values(item.get("table_caption")))
+            fragments.extend(cls._text_values(item.get("table_body")))
+            fragments.extend(cls._text_values(item.get("table_footnote")))
+        elif item_type in {"code", "algorithm"}:
+            prefix = "code" if item_type == "code" else "algorithm"
+            fragments.extend(cls._text_values(item.get(f"{prefix}_caption")))
+            code_body = "\n".join(cls._text_values(item.get(f"{prefix}_body")))
+            if code_body:
+                fragments.append(f"```\n{code_body}\n```")
+            fragments.extend(cls._text_values(item.get(f"{prefix}_footnote")))
+        elif item_type in {"image", "chart"}:
+            image_ref = str(item.get("img_path") or item.get("image_path") or "").strip()
+            if image_ref:
+                fragments.append(f"![]({image_ref})")
+            fragments.extend(cls._text_values(item.get(f"{item_type}_caption")))
+            fragments.extend(cls._text_values(item.get(f"{item_type}_footnote")))
+        else:
+            fragments.extend(cls._text_values(item.get("text")))
+
+        if not fragments:
+            fragments.extend(cls._text_values(item.get("text")))
+        return "\n".join(fragments).strip()
+
+    @classmethod
+    def _text_values(cls, value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if isinstance(value, list):
+            values: list[str] = []
+            for item in value:
+                values.extend(cls._text_values(item))
+            return values
+        if isinstance(value, dict):
+            direct = value.get("text") or value.get("content")
+            if isinstance(direct, str):
+                return cls._text_values(direct)
+            for key in ("children", "list_items"):
+                nested = cls._text_values(value.get(key))
+                if nested:
+                    return nested
+        return []
+
+    @staticmethod
+    def _resolved_artifact_path(path: Path, output_dir: Path) -> Path:
+        root = output_dir.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"MinerU artifact resolves outside output directory: {path}") from exc
+        if not resolved.is_file():
+            raise ValueError(f"MinerU artifact is not a file: {path}")
+        return resolved
+
+    @classmethod
+    def _atomic_write_text(cls, path: Path, content: str, output_dir: Path) -> None:
+        root = output_dir.resolve(strict=True)
+        parent = path.parent.resolve(strict=True)
+        try:
+            parent.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"Canonical Markdown parent resolves outside output directory: {path.parent}") from exc
+
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=parent)
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     def _asset(self, job_id: str, output_dir: Path, path: Path) -> OcrAsset:
         relative = path.relative_to(output_dir).as_posix()

@@ -1,6 +1,10 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
+from app.ocr.contracts import CanonicalOcrBundleError
 from app.ocr.mineru_adapter import MineruOcrBundleAdapter
 
 
@@ -103,3 +107,110 @@ def test_adapter_prefers_nonblank_native_markdown_over_stale_fallback(tmp_path: 
     assert bundle.canonical_markdown == "1. fresh native result"
     assert bundle.markdown_artifact_path == "paper/auto/paper.md"
     assert stale_fallback.read_text(encoding="utf-8") == "1. stale fallback result that is deliberately longer"
+
+
+def test_adapter_recovers_structured_content_list_items(tmp_path: Path) -> None:
+    output_dir = tmp_path / "outputs" / "job-structured" / "paper" / "auto"
+    output_dir.mkdir(parents=True)
+    (output_dir / "paper.md").write_text("", encoding="utf-8")
+    (output_dir / "paper_content_list.json").write_text(
+        json.dumps(
+            [
+                {"type": "list", "list_items": ["1. choose an answer", "A. zero", "B. one"]},
+                {
+                    "type": "table",
+                    "table_caption": ["Values"],
+                    "table_body": "<table><tr><td>1</td></tr></table>",
+                    "table_footnote": ["Source note"],
+                },
+                {"type": "code", "code_caption": ["Algorithm"], "code_body": "answer = 1"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-structured", "ocrProvider": "mineru"},
+        tmp_path / "outputs" / "job-structured",
+    )
+
+    assert "- 1. choose an answer" in bundle.canonical_markdown
+    assert "<table><tr><td>1</td></tr></table>" in bundle.canonical_markdown
+    assert "Source note" in bundle.canonical_markdown
+    assert "```\nanswer = 1\n```" in bundle.canonical_markdown
+
+
+def test_adapter_does_not_read_content_list_from_another_output_directory(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-isolation"
+    selected_dir = output_root / "selected" / "auto"
+    selected_dir.mkdir(parents=True)
+    (selected_dir / "paper.md").write_text("", encoding="utf-8")
+    (selected_dir / "other_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "1. same directory, different document"}]),
+        encoding="utf-8",
+    )
+    other_dir = output_root / "other" / "auto"
+    other_dir.mkdir(parents=True)
+    (other_dir / "other_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "1. belongs to another document"}]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CanonicalOcrBundleError, match="canonicalMarkdown is required"):
+        MineruOcrBundleAdapter().from_output(
+            {"jobId": "job-isolation", "ocrProvider": "mineru"},
+            output_root,
+        )
+
+    assert not (selected_dir / "paper_canonical.md").exists()
+
+
+def test_adapter_replaces_canonical_symlink_without_writing_outside_root(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-symlink"
+    output_dir = output_root / "paper" / "auto"
+    output_dir.mkdir(parents=True)
+    (output_dir / "paper.md").write_text("", encoding="utf-8")
+    (output_dir / "paper_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "1. safe recovered text"}]),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside sentinel", encoding="utf-8")
+    canonical_path = output_dir / "paper_canonical.md"
+    canonical_path.symlink_to(outside)
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-symlink", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    assert outside.read_text(encoding="utf-8") == "outside sentinel"
+    assert not canonical_path.is_symlink()
+    assert canonical_path.read_text(encoding="utf-8") == "1. safe recovered text"
+    assert bundle.canonical_markdown == "1. safe recovered text"
+
+
+def test_adapter_materializes_fallback_atomically_for_concurrent_calls(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-concurrent"
+    output_dir = output_root / "paper" / "auto"
+    output_dir.mkdir(parents=True)
+    (output_dir / "paper.md").write_text("", encoding="utf-8")
+    (output_dir / "paper_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "1. concurrent recovered text"}]),
+        encoding="utf-8",
+    )
+
+    def adapt() -> str:
+        bundle = MineruOcrBundleAdapter().from_output(
+            {"jobId": "job-concurrent", "ocrProvider": "mineru"},
+            output_root,
+        )
+        return bundle.canonical_markdown
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        markdown_results = list(executor.map(lambda _index: adapt(), range(16)))
+
+    assert markdown_results == ["1. concurrent recovered text"] * 16
+    assert (output_dir / "paper_canonical.md").read_text(encoding="utf-8") == "1. concurrent recovered text"
+    assert list(output_dir.glob(".paper_canonical.md.*.tmp")) == []
