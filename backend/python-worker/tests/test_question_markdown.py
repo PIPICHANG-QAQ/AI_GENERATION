@@ -4,6 +4,51 @@ from app.question_markdown import detect_choice_option_markers, split_choice_opt
 
 
 class QuestionMarkdownTest(unittest.TestCase):
+    def test_recovers_glued_tasks_options_before_later_task(self):
+        markdown = r"""题干
+\begin{tasks}(2)
+\task A项
+\task B项 C $3$ D．$4$
+\task E项
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("题干", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项"},
+                {"label": "C", "content": "$3$"},
+                {"label": "D", "content": "$4$"},
+                {"label": "E", "content": "E项"},
+            ],
+            options,
+        )
+
+    def test_does_not_recover_tasks_labels_inside_math_delimiters(self):
+        formulas = {
+            "inline_dollar": r"$ C. \ x=1 \qquad D. \ x=2 $",
+            "display_dollar": r"$$ C. \ x=1 \qquad D. \ x=2 $$",
+            "inline_parens": r"\( C. \ x=1 \qquad D. \ x=2 \)",
+            "display_brackets": r"\[ C. \ x=1 \qquad D. \ x=2 \]",
+        }
+
+        for name, formula in formulas.items():
+            with self.subTest(name=name):
+                markdown = "\n".join((r"\begin{tasks}(2)", r"\task A项", rf"\task {formula}", r"\end{tasks}"))
+
+                stem, options = split_choice_options(markdown, "choice")
+
+                self.assertEqual("", stem)
+                self.assertEqual(
+                    [
+                        {"label": "A", "content": "A项"},
+                        {"label": "B", "content": formula},
+                    ],
+                    options,
+                )
+
     def test_recovers_glued_trailing_tasks_options(self):
         markdown = r"""\begin{tasks}(2)
 \task $5500 \times 10^{4}$
