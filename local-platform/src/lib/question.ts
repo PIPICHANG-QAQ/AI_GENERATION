@@ -1116,15 +1116,16 @@ function nextGluedTasksLabelMarker(
   return null;
 }
 
-function recoverGluedTaskParts(taskParts: string[]) {
-  if (taskParts.length < 2 || taskParts.some((part) => !part.trim())) return taskParts;
+function recoverGluedTaskParts(taskParts: string[]): { taskParts: string[]; didRecover: boolean } {
+  if (taskParts.length < 2 || taskParts.some((part) => !part.trim())) return { taskParts, didRecover: false };
 
   const taskMathSpans = taskParts.map(mathSpans);
   const taskImageSpans = taskParts.map(boundedGluedTasksImageSpans);
   const taskImageSpanStarts = taskImageSpans.map((spans) => spans.map(([start]) => start));
-  if (taskMathSpans.some(({ hasUnclosedDelimiter }) => hasUnclosedDelimiter)) return taskParts;
+  if (taskMathSpans.some(({ hasUnclosedDelimiter }) => hasUnclosedDelimiter)) return { taskParts, didRecover: false };
 
   const recovered: string[] = [];
+  let didRecover = false;
   taskParts.forEach((content, index) => {
     const expectedLabel = String.fromCharCode("A".charCodeAt(0) + recovered.length + 1);
     if (!content.trim() || expectedLabel > "H") {
@@ -1165,8 +1166,9 @@ function recoverGluedTaskParts(taskParts: string[]) {
       return;
     }
     recovered.push(...splitParts);
+    didRecover = true;
   });
-  return recovered;
+  return { taskParts: recovered, didRecover };
 }
 
 export function withEditableChoiceOptions(markdown: string, rawOptions: unknown, images: QuestionImage[] = []): string {
@@ -1203,9 +1205,9 @@ function splitTasksOptions(markdown: string): { stemMarkdown: string; options: Q
   const taskParts = body
     .split(/\\task\b/)
     .slice(1);
-  const recoveredTaskParts = match ? recoverGluedTaskParts(taskParts) : taskParts;
-  const options = recoveredTaskParts
-    .map((content) => cleanOptionText(content))
+  const recovery = match ? recoverGluedTaskParts(taskParts) : { taskParts, didRecover: false };
+  const options = recovery.taskParts
+    .map((content) => (recovery.didRecover ? content.trim() : cleanOptionText(content)))
     .filter(Boolean)
     .map((content, index) => ({
       label: String.fromCharCode(65 + index),

@@ -280,6 +280,20 @@ describe("choice task recovery", () => {
     ]);
   });
 
+  it("preserves leading marker-like text in recovered task parts", () => {
+    const markdown = String.raw`\begin{tasks}(2)
+\task A项
+\task B项 C. -保留 D. +保留
+\end{tasks}`;
+
+    expect(taskOptions(markdown)).toEqual([
+      { label: "A", content: "A项" },
+      { label: "B", content: "B项" },
+      { label: "C", content: "-保留" },
+      { label: "D", content: "+保留" },
+    ]);
+  });
+
   it("recovers a glued chain before a later original task", () => {
     const markdown = String.raw`题干
 \begin{tasks}(2)
