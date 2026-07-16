@@ -88,9 +88,9 @@ def test_adapter_recovers_blank_markdown_from_content_list(tmp_path: Path) -> No
 
     expected_markdown = "1. x + 1 = 2, find x.\n\nA. 0\n\nB. 1"
     expected_digest = hashlib.sha256(expected_markdown.encode("utf-8")).hexdigest()
-    expected_path = output_dir / f"paper_canonical_{expected_digest}.md"
+    expected_path = output_dir / ".canonical" / f"{expected_digest}.md"
     assert bundle.canonical_markdown == expected_markdown
-    assert bundle.markdown_artifact_path == f"paper/auto/{expected_path.name}"
+    assert bundle.markdown_artifact_path == f"paper/auto/.canonical/{expected_path.name}"
     assert expected_path.read_text(encoding="utf-8") == bundle.canonical_markdown
     assert native_markdown.read_text(encoding="utf-8") == ""
     assert restored.canonical_markdown == bundle.canonical_markdown
@@ -183,7 +183,9 @@ def test_adapter_replaces_canonical_symlink_without_writing_outside_root(tmp_pat
     digest = hashlib.sha256(recovered_markdown.encode("utf-8")).hexdigest()
     outside = tmp_path / "outside.txt"
     outside.write_text("outside sentinel", encoding="utf-8")
-    canonical_path = output_dir / f"paper_canonical_{digest}.md"
+    canonical_dir = output_dir / ".canonical"
+    canonical_dir.mkdir()
+    canonical_path = canonical_dir / f"{digest}.md"
     canonical_path.symlink_to(outside)
 
     bundle = MineruOcrBundleAdapter().from_output(
@@ -219,10 +221,10 @@ def test_adapter_materializes_fallback_atomically_for_concurrent_calls(tmp_path:
 
     recovered_markdown = "1. concurrent recovered text"
     digest = hashlib.sha256(recovered_markdown.encode("utf-8")).hexdigest()
-    canonical_path = output_dir / f"paper_canonical_{digest}.md"
+    canonical_path = output_dir / ".canonical" / f"{digest}.md"
     assert markdown_results == [recovered_markdown] * 16
     assert canonical_path.read_text(encoding="utf-8") == recovered_markdown
-    assert list(output_dir.glob(f".{canonical_path.name}.*.tmp")) == []
+    assert list(canonical_path.parent.glob(f".{canonical_path.name}.*.tmp")) == []
 
 
 def test_adapter_rejects_content_list_symlink_to_another_document(tmp_path: Path) -> None:
@@ -294,3 +296,90 @@ def test_adapter_skips_larger_whitespace_only_native_markdown(tmp_path: Path) ->
 
     assert bundle.canonical_markdown == "1. valid question"
     assert bundle.markdown_artifact_path == "paper.md"
+
+
+def test_adapter_uses_legacy_fallback_when_native_markdown_is_empty(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-legacy-fallback"
+    output_root.mkdir(parents=True)
+    (output_root / "paper.md").write_text("", encoding="utf-8")
+    (output_root / "paper_canonical.md").write_text("1. legacy fallback", encoding="utf-8")
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-legacy-fallback", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    assert bundle.canonical_markdown == "1. legacy fallback"
+    assert bundle.markdown_artifact_path == "paper_canonical.md"
+
+
+def test_adapter_preserves_native_stem_ending_in_canonical(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-canonical-stem"
+    output_root.mkdir(parents=True)
+    (output_root / "exam_canonical.md").write_text("", encoding="utf-8")
+    (output_root / "exam_canonical_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "1. valid canonical-stem document"}]),
+        encoding="utf-8",
+    )
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-canonical-stem", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    assert bundle.canonical_markdown == "1. valid canonical-stem document"
+
+
+def test_adapter_handles_long_native_stem_without_long_generated_filename(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-long-stem"
+    output_root.mkdir(parents=True)
+    long_stem = "x" * 180
+    (output_root / f"{long_stem}.md").write_text("", encoding="utf-8")
+    (output_root / f"{long_stem}_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "1. long filename question"}]),
+        encoding="utf-8",
+    )
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-long-stem", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    assert bundle.canonical_markdown == "1. long filename question"
+    assert Path(bundle.markdown_artifact_path).parent.name == ".canonical"
+    assert len(Path(bundle.markdown_artifact_path).name) < 100
+
+
+def test_adapter_rejects_native_markdown_symlink_outside_root(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-markdown-symlink"
+    output_root.mkdir(parents=True)
+    outside = tmp_path / "outside-secret.md"
+    outside.write_text("secret outside content", encoding="utf-8")
+    (output_root / "paper.md").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="Markdown must not be a symbolic link"):
+        MineruOcrBundleAdapter().from_output(
+            {"jobId": "job-markdown-symlink", "ocrProvider": "mineru"},
+            output_root,
+        )
+
+
+def test_adapter_rebases_fallback_image_references_from_canonical_directory(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-image-fallback"
+    output_root.mkdir(parents=True)
+    (output_root / "paper.md").write_text("", encoding="utf-8")
+    image_path = output_root / "images" / "figure.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"png")
+    (output_root / "paper_content_list.json").write_text(
+        json.dumps([{"type": "image", "img_path": "images/figure.png", "image_caption": ["Figure"]}]),
+        encoding="utf-8",
+    )
+
+    bundle = MineruOcrBundleAdapter(file_url=lambda _job_id, path: f"/files/{path.name}").from_output(
+        {"jobId": "job-image-fallback", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    assert bundle.canonical_markdown == "![](../images/figure.png)\nFigure"
+    assert Path(bundle.markdown_artifact_path).parent.name == ".canonical"
