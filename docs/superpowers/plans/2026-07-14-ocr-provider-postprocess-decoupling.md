@@ -10,7 +10,7 @@
 
 ---
 
-> **Evidence update — 2026-07-16 (Asia/Shanghai):** 13/18 checklist items below have direct source, commit, and fresh test/operational evidence. RED execution checkpoints remain unchecked because their historical failing output was not retained. Controlled-corpus and benchmark compare gates remain unchecked because the baseline is still `pending-controlled-baseline`; unit tests and successful smoke runs are not substitutes for those gates.
+> **Evidence update — 2026-07-16 (Asia/Shanghai):** 14/18 implementation checklist items below have direct source, commit, and fresh test/operational evidence. RED execution checkpoints remain unchecked because their historical failing output was not retained and must not be reconstructed after implementation. Task 4 full verification passed on 2026-07-16 with Python full test suite, OCR golden replay, OCR boundary checks, and benchmark comparison tool output `status=equal`.
 
 ### Task 1: 定义 Canonical OCR Bundle
 
@@ -56,7 +56,7 @@
 - [x] 写失败测试：provider runtime 只负责生成 OCR 工件；执行编排层在工件成功后调用统一 pipeline；显式 bundle 不需要 provider 名称或目录扫描。
 - [ ] 运行失败测试。
 - [x] 只作调用边界改动，移除 `OcrFlowRuntime.collect_outputs`，保留最终 job 状态和 `outputs` 外观。
-- [ ] 运行 Python 全量、golden replay 和 benchmark compare；提交。Partial: 2026-07-16 Python 全量 332 passed；正式 benchmark compare 继续受 `pending-controlled-baseline` 阻塞。
+- [x] 运行 Python 全量、golden replay 和 benchmark compare；提交。2026-07-16 验证结果：`pytest backend/python-worker/tests` 366 passed + 51 subtests；`test_ocrflow_golden.py` 32 tests OK；`test_check_ocrflow_boundaries.py` 46 tests OK；`test_benchmark_ocrflow.py` 8 tests OK，工具输出 `status=equal`。
 
 ### Task 5: 文档与交接
 
