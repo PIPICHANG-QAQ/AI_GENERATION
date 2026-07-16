@@ -634,7 +634,7 @@ git commit -m "test: smoke two-stage choice standardization"
 python3 scripts/package_question_engine_delivery.py --check-only --include-local-platform
 ```
 
-- [ ] **Step 6: 服务器部署与验收**
+- [x] **Step 6: 服务器部署与验收**
 
 1. 从通过验证的提交生成包含 `local-platform` 的交付包并记录 SHA-256；保留当前服务器镜像标签作为回滚点。
 2. 上传到既有 release 目录，核验远端 SHA-256 后覆盖代码；不覆盖 `.env`、`server-data`、MinerU venv 或模型缓存。
