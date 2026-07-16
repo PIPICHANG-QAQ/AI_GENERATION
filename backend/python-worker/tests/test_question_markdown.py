@@ -57,6 +57,56 @@ class QuestionMarkdownTest(unittest.TestCase):
             options,
         )
 
+    def test_recovers_bare_tasks_label_before_image_with_parentheses_in_path(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 C. 文字 D ![](images/(d).png)
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项"},
+                {"label": "C", "content": "文字"},
+                {"label": "D", "content": "![](images/(d).png)"},
+            ],
+            options,
+        )
+
+    def test_does_not_recover_tasks_with_many_malformed_image_prefixes(self):
+        content = "B项 " + "C ![" * 4096
+        markdown = "\n".join((r"\begin{tasks}(2)", r"\task A项", rf"\task {content}", r"\end{tasks}"))
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": content},
+            ],
+            options,
+        )
+
+    def test_does_not_recover_tasks_with_overlong_image_destination(self):
+        destination = "x" * 2049
+        content = f"B项 C. 文字 D ![]({destination})"
+        markdown = "\n".join((r"\begin{tasks}(2)", r"\task A项", rf"\task {content}", r"\end{tasks}"))
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": content},
+            ],
+            options,
+        )
+
     def test_recovers_external_text_tasks_chain_after_math_decoy(self):
         markdown = r"""\begin{tasks}(2)
 \task A项
