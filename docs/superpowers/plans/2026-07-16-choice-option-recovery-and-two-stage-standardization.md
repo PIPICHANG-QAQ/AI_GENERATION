@@ -246,7 +246,7 @@ git commit -m "fix: mirror glued choice recovery in editor"
 - Modify: `backend/python-worker/tests/test_llm_splitter.py`
 - Modify: `backend/python-worker/tests/test_worker_v1_contract.py`
 
-- [ ] **Step 1: 写阶段和失败信封的失败测试**
+- [x] **Step 1: 写阶段和失败信封的失败测试**
 
 ```python
 GLUED_TASKS_MARKDOWN = r"""题干
@@ -300,7 +300,7 @@ def test_force_ai_failure_is_blocked_and_never_returns_local_fallback(self):
 
 Add a Python compatibility route test that posts `{ "markdown": "题干", "forceAi": true, "executionMode": "force-ai" }` to `/worker/v1/standardize` and asserts the delegate receives both fields. Add a Java `DomainControllerTest` that posts `{ "markdown": "题干", "forceAi": true }` to the public import-question endpoint and asserts the captured `/worker/ai/standardize` JSON contains `forceAi=true` and `executionMode=force-ai`; a false request must yield `executionMode=local`.
 
-- [ ] **Step 2: 运行目标测试，确认 RED**
+- [x] **Step 2: 运行目标测试，确认 RED**
 
 Run:
 
@@ -310,7 +310,7 @@ PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/py
 
 Expected: 新增 `execution_mode`、`forceAi` 与强制无缓存断言失败。
 
-- [ ] **Step 3: 扩展请求模型和接口模式选择**
+- [x] **Step 3: 扩展请求模型和接口模式选择**
 
 ```python
 class MarkdownPayload(BaseModel):
@@ -349,7 +349,7 @@ def standardize_question_hints(question: dict[str, Any]) -> dict[str, Any]:
     }
 ```
 
-- [ ] **Step 4: 实现本地阶段、阶段化缓存和强制 AI 失败信封**
+- [x] **Step 4: 实现本地阶段、阶段化缓存和强制 AI 失败信封**
 
 Change the cache key to include a stage and bump its version:
 
@@ -389,7 +389,7 @@ For `"force-ai"`, never read or write `AI_STANDARDIZE_CACHE`; call the LLM with 
 }
 ```
 
-- [ ] **Step 5: 让 LLM 路由缓存可显式绕过**
+- [x] **Step 5: 让 LLM 路由缓存可显式绕过**
 
 ```python
 def post_llm_json_for_endpoint(endpoint, payload, timeout_seconds, task_type, *, bypass_cache=False):
@@ -407,7 +407,7 @@ def post_llm_json_for_endpoint(endpoint, payload, timeout_seconds, task_type, *,
 
 Add `bypass_cache: bool = False` to `standardize_markdown_with_llm` and pass it to every standardization `post_llm_json_for_endpoint` call. No other task family changes its cache behavior.
 
-- [ ] **Step 6: 运行目标 Python 测试，确认 GREEN**
+- [x] **Step 6: 运行目标 Python 测试，确认 GREEN**
 
 Run:
 
@@ -417,7 +417,7 @@ PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/py
 
 Expected: 解析、两阶段、缓存绕过、失败信封与 v1 兼容测试全部通过。
 
-- [ ] **Step 7: 提交后端两阶段实现**
+- [x] **Step 7: 提交后端两阶段实现**
 
 ```bash
 git add backend/python-worker/app/question_markdown.py backend/python-worker/app/import_services.py backend/python-worker/app/llm_splitter.py backend/python-worker/app/worker_base.py backend/python-worker/app/contracts/worker_v1.py backend/python-worker/app/worker_routes.py backend/python-worker/tests/test_question_markdown.py backend/python-worker/tests/test_import_services.py backend/python-worker/tests/test_llm_splitter.py backend/python-worker/tests/test_worker_v1_contract.py backend/src/main/java/com/aigeneration/questionbank/domain/service/AiFlowOrchestrationService.java backend/src/test/java/com/aigeneration/questionbank/DomainControllerTest.java question-engine/openapi/question-engine.v1.yaml
