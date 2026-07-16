@@ -13,12 +13,12 @@
 | 前序证据提交 | d29674e（immutable OCR evidence） |
 | 服务器镜像 | sha256:18f2ee29a87ed5c1a4809ce5c49ccae60dfa30df0e569e987778653f8fd700ef |
 | 应用镜像回滚标签 | ai-generation-question-engine:pre-edc045d → sha256:761d7e15fd459152a17107ddfa20fefb72c22c9b242a98488439bbc614b39850 |
-| 本次生产恢复服务器代码包（已部署） | /home/user/releases/AI_GENERATION_TOGO_20260715_PRODUCTION_RECOVERY/AI_GENERATION_TOGO_20260715_PRODUCTION_RECOVERY.tar.gz |
+| 本次生产恢复服务器代码包（已部署） | 服务器 release 目录中的 `AI_GENERATION_TOGO_20260715_PRODUCTION_RECOVERY/AI_GENERATION_TOGO_20260715_PRODUCTION_RECOVERY.tar.gz` |
 | 已部署代码包 SHA-256 / 文件数 | 9ff128f83f5f4267cf75433ed699db180eeadb9313e89e6d78cde0c85197bf50 / 447 |
 | manifest SHA-256 | a39d2b7906b02670882e7257d67b59ee0cf36cd7e63ab3aedcc38ce1f2f1287a |
 | 上一交付包归档 | release/archive-d29674e，tar SHA-256 为 85bdb6e576daa323cb3c960f713f0ebaec9f4c6de5fc9015e691084fd3f552f2 |
-| 应用备份 | /home/user/backups/AI_GENERATION_DOCKER_20260715T222812Z，tar SHA-256 为 47f7e2481c206c000a154dbab4ba3957cb2a639414bc6739d8a8169fae9cd01f |
-| MinerU venv 备份 | /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv.bak-20260715T234343.716530Z-f9debe27 |
+| 应用备份 | 服务器 backups 目录中的 `AI_GENERATION_DOCKER_20260715T222812Z`，tar SHA-256 为 47f7e2481c206c000a154dbab4ba3957cb2a639414bc6739d8a8169fae9cd01f |
+| MinerU venv 备份 | 服务器项目 `vendor/` 目录中的 `mineru-venv.bak-20260715T234343.716530Z-f9debe27` |
 
 持久数据、.env、上传、任务状态和模型缓存没有进入覆盖同步。禁止把已知曾失败 runtime 的 venv 直接当作 OCR 健康回滚；应用代码回滚可使用上一镜像，OCR 回滚必须先重新通过 runtime readiness。
 

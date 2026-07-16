@@ -69,7 +69,7 @@ Add nine further regressions before implementation: a chain in a non-final `\\ta
 Run:
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests/test_question_markdown.py -q
+PYTHONPATH=backend/python-worker <repo>/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests/test_question_markdown.py -q
 ```
 
 Expected: 新增的同构题断言失败，当前结果只有 A/B。
@@ -130,7 +130,7 @@ task_parts = recover_glued_task_parts(re.split(r"\\task\b", body)[1:])
 Run:
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests/test_question_markdown.py -q
+PYTHONPATH=backend/python-worker <repo>/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests/test_question_markdown.py -q
 ```
 
 Expected: 所有 `QuestionMarkdownTest` 用例通过，包含截图同构题和数学变量反例。
@@ -305,7 +305,7 @@ Add a Python compatibility route test that posts `{ "markdown": "题干", "force
 Run:
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests/test_import_services.py backend/python-worker/tests/test_llm_splitter.py backend/python-worker/tests/test_worker_v1_contract.py -q
+PYTHONPATH=backend/python-worker <repo>/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests/test_import_services.py backend/python-worker/tests/test_llm_splitter.py backend/python-worker/tests/test_worker_v1_contract.py -q
 ```
 
 Expected: 新增 `execution_mode`、`forceAi` 与强制无缓存断言失败。
@@ -412,7 +412,7 @@ Add `bypass_cache: bool = False` to `standardize_markdown_with_llm` and pass it 
 Run:
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests/test_question_markdown.py backend/python-worker/tests/test_import_services.py backend/python-worker/tests/test_llm_splitter.py backend/python-worker/tests/test_worker_v1_contract.py -q
+PYTHONPATH=backend/python-worker <repo>/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests/test_question_markdown.py backend/python-worker/tests/test_import_services.py backend/python-worker/tests/test_llm_splitter.py backend/python-worker/tests/test_worker_v1_contract.py -q
 ```
 
 Expected: 解析、两阶段、缓存绕过、失败信封与 v1 兼容测试全部通过。
@@ -609,7 +609,7 @@ Call it after the imported task and first question have been created. Keep the e
 Run:
 
 ```bash
-PYTHONPATH=backend/python-worker /Users/chang/Documents/AI_GENERATION/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests -q
+PYTHONPATH=backend/python-worker <repo>/backend/python-worker/.venv/bin/python -m pytest backend/python-worker/tests -q
 ./scripts/test_python_worker.sh
 JAVA_HOME="$(/usr/libexec/java_home -v 17)" PATH="$JAVA_HOME/bin:$PATH" mvn -f backend/pom.xml test
 npm --prefix local-platform test -- --run
