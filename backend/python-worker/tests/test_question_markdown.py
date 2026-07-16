@@ -4,6 +4,40 @@ from app.question_markdown import detect_choice_option_markers, split_choice_opt
 
 
 class QuestionMarkdownTest(unittest.TestCase):
+    def test_does_not_recover_nonconsecutive_tasks_labels(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 C $3$ E．$4$
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项 C $3$ E．$4$"},
+            ],
+            options,
+        )
+
+    def test_does_not_recover_punctuated_point_name_in_tasks(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 C $3$ 点 D．$4$
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项 C $3$ 点 D．$4$"},
+            ],
+            options,
+        )
+
     def test_recovers_glued_tasks_options_before_later_task(self):
         markdown = r"""题干
 \begin{tasks}(2)
