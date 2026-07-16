@@ -4,6 +4,54 @@ from app.question_markdown import detect_choice_option_markers, split_choice_opt
 
 
 class QuestionMarkdownTest(unittest.TestCase):
+    def test_recovers_glued_trailing_tasks_options(self):
+        markdown = r"""\begin{tasks}(2)
+\task $5500 \times 10^{4}$
+\task $55 \times 10^{6}$ C $5.5 \times 10^{7}$ D．$5.5 \times 10^{8}$
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "$5500 \\times 10^{4}$"},
+                {"label": "B", "content": "$55 \\times 10^{6}$"},
+                {"label": "C", "content": "$5.5 \\times 10^{7}$"},
+                {"label": "D", "content": "$5.5 \\times 10^{8}$"},
+            ],
+            options,
+        )
+
+    def test_does_not_recover_ambiguous_trailing_tasks_labels(self):
+        cases = {
+            "inline_variable": r"""\begin{tasks}(2)
+\task $5500 \times 10^{4}$
+\task $55 \times 10^{6}$ $C$ $5.5 \times 10^{7}$ D．$5.5 \times 10^{8}$
+\end{tasks}""",
+            "point_named_d": r"""\begin{tasks}(2)
+\task $5500 \times 10^{4}$
+\task $55 \times 10^{6}$ C $5.5 \times 10^{7}$ 点 D 在数轴上表示 $5.5 \times 10^{8}$
+\end{tasks}""",
+            "incomplete_chain": r"""\begin{tasks}(2)
+\task $5500 \times 10^{4}$
+\task $55 \times 10^{6}$ C $5.5 \times 10^{7}$
+\end{tasks}""",
+        }
+
+        for name, markdown in cases.items():
+            with self.subTest(name=name):
+                stem, options = split_choice_options(markdown, "choice")
+
+                self.assertEqual("", stem)
+                self.assertEqual(
+                    [
+                        {"label": "A", "content": "$5500 \\times 10^{4}$"},
+                        {"label": "B", "content": markdown.split(r"\task ", 2)[2].split(r"\end{tasks}")[0].strip()},
+                    ],
+                    options,
+                )
+
     def test_recovers_embedded_expected_label_before_option_image(self):
         markdown = """（2分）如图所示，为了增大摩擦的是（ ）
 A. 乘车系好安全带

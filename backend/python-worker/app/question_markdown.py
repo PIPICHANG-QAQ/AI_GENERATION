@@ -940,6 +940,66 @@ def normalize_tasks_environment(markdown: str) -> str:
     )
 
 
+def is_inline_math_position(content: str, position: int) -> bool:
+    """判断位置是否落在行内数学公式中。"""
+    before = content[:position]
+    dollar_count = sum(1 for _ in re.finditer(r"(?<!\\)\$(?!\$)", before))
+    if dollar_count % 2:
+        return True
+    return before.rfind(r"\(") > before.rfind(r"\)")
+
+
+def next_glued_tasks_label_marker(content: str, start: int) -> tuple[str, int, int] | None:
+    """查找 tasks 尾部粘连选项的下一个强标签。"""
+    label_pattern = r"[A-H]"
+    patterns = (
+        re.compile(rf"(?<!\S)(?P<label>{label_pattern})[.．、:：](?=\s*\S)"),
+        re.compile(rf"(?<!\S)(?P<label>{label_pattern})(?=\s+\$(?=[^$\r\n]*\$))"),
+    )
+    matches = sorted(
+        (match for pattern in patterns for match in pattern.finditer(content, start)),
+        key=lambda match: match.start(),
+    )
+    for match in matches:
+        marker_start = match.start()
+        prefix = content[:marker_start].rstrip()
+        if is_inline_math_position(content, marker_start) or prefix.endswith("点"):
+            continue
+        return match.group("label"), marker_start, match.end()
+    return None
+
+
+def recover_glued_tasks_options(task_parts: list[str]) -> list[str]:
+    """保守拆分 tasks 最后一个选项中连续粘连的后续标签。"""
+    if len(task_parts) < 2 or len([part for part in task_parts if part.strip()]) < 2 or not task_parts[-1].strip():
+        return task_parts
+
+    expected_label = chr(ord("A") + len(task_parts))
+    if expected_label > "H":
+        return task_parts
+
+    content = task_parts[-1]
+    markers: list[tuple[int, int]] = []
+    cursor = 0
+    while expected_label <= "H":
+        marker = next_glued_tasks_label_marker(content, cursor)
+        if not marker or marker[0] != expected_label:
+            break
+        markers.append((marker[1], marker[2]))
+        cursor = marker[2]
+        expected_label = chr(ord(expected_label) + 1)
+
+    if len(markers) < 2:
+        return task_parts
+
+    recovered = [content[: markers[0][0]]]
+    recovered.extend(content[markers[index][1] : markers[index + 1][0]] for index in range(len(markers) - 1))
+    recovered.append(content[markers[-1][1] :])
+    if any(not part.strip() for part in recovered):
+        return task_parts
+    return [*task_parts[:-1], *recovered]
+
+
 def split_tasks_options(markdown: str) -> tuple[str, list[dict[str, str]]]:
     """从 tasks 环境中拆分选项。"""
     normalized = normalize_tasks_environment(markdown)
@@ -957,6 +1017,8 @@ def split_tasks_options(markdown: str) -> tuple[str, list[dict[str, str]]]:
         body = match.group("body")
         stem = f"{stem_source[: match.start()]}\n{stem_source[match.end() :]}".strip()
     task_parts = re.split(r"\\task\b", body)[1:]
+    if match:
+        task_parts = recover_glued_tasks_options(task_parts)
     options = [
         {"label": chr(65 + index), "content": content.strip()}
         for index, content in enumerate(task_parts)
