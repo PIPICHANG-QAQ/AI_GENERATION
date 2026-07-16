@@ -1,5 +1,6 @@
 import hashlib
 import json
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -170,6 +171,69 @@ def test_adapter_does_not_read_content_list_from_another_output_directory(tmp_pa
     assert not (selected_dir / "paper_canonical.md").exists()
 
 
+def test_adapter_does_not_use_legacy_fallback_from_another_output_directory(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-legacy-directory-isolation"
+    selected_dir = output_root / "a-selected"
+    selected_dir.mkdir(parents=True)
+    (selected_dir / "paper.md").write_text("", encoding="utf-8")
+    foreign_dir = output_root / "z-foreign"
+    foreign_dir.mkdir(parents=True)
+    (foreign_dir / "other.md").write_text("", encoding="utf-8")
+    (foreign_dir / "other_canonical.md").write_text("FOREIGN LEGACY DOCUMENT", encoding="utf-8")
+
+    with pytest.raises(CanonicalOcrBundleError, match="canonicalMarkdown is required"):
+        MineruOcrBundleAdapter().from_output(
+            {"jobId": "job-legacy-directory-isolation", "ocrProvider": "mineru"},
+            output_root,
+        )
+
+
+def test_adapter_does_not_use_legacy_fallback_for_another_stem(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-legacy-stem-isolation"
+    output_root.mkdir(parents=True)
+    (output_root / "a-paper.md").write_text("", encoding="utf-8")
+    (output_root / "z-other.md").write_text("", encoding="utf-8")
+    (output_root / "z-other_canonical.md").write_text("FOREIGN LEGACY DOCUMENT", encoding="utf-8")
+
+    with pytest.raises(CanonicalOcrBundleError, match="canonicalMarkdown is required"):
+        MineruOcrBundleAdapter().from_output(
+            {"jobId": "job-legacy-stem-isolation", "ocrProvider": "mineru"},
+            output_root,
+        )
+
+
+def test_adapter_does_not_treat_md_fallback_for_markdown_source_as_native(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-legacy-extension-isolation"
+    selected_dir = output_root / "a-selected"
+    selected_dir.mkdir(parents=True)
+    (selected_dir / "paper.md").write_text("", encoding="utf-8")
+    foreign_dir = output_root / "z-foreign"
+    foreign_dir.mkdir(parents=True)
+    (foreign_dir / "other.markdown").write_text("", encoding="utf-8")
+    (foreign_dir / "other_canonical.md").write_text("FOREIGN LEGACY DOCUMENT", encoding="utf-8")
+
+    with pytest.raises(CanonicalOcrBundleError, match="canonicalMarkdown is required"):
+        MineruOcrBundleAdapter().from_output(
+            {"jobId": "job-legacy-extension-isolation", "ocrProvider": "mineru"},
+            output_root,
+        )
+
+
+def test_adapter_uses_md_legacy_fallback_for_matching_markdown_source(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-legacy-extension-compatibility"
+    output_root.mkdir(parents=True)
+    (output_root / "paper.markdown").write_text("", encoding="utf-8")
+    (output_root / "paper_canonical.md").write_text("1. matching legacy fallback", encoding="utf-8")
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-legacy-extension-compatibility", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    assert bundle.canonical_markdown == "1. matching legacy fallback"
+    assert bundle.markdown_artifact_path == "paper_canonical.md"
+
+
 def test_adapter_replaces_canonical_symlink_without_writing_outside_root(tmp_path: Path) -> None:
     output_root = tmp_path / "outputs" / "job-symlink"
     output_dir = output_root / "paper" / "auto"
@@ -248,6 +312,38 @@ def test_adapter_rejects_content_list_symlink_to_another_document(tmp_path: Path
         )
 
 
+def test_adapter_rejects_unselected_layout_json_symlink_outside_root(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-layout-json-symlink"
+    output_root.mkdir(parents=True)
+    (output_root / "paper.md").write_text("1. valid question", encoding="utf-8")
+    (output_root / "paper.json").write_text(
+        json.dumps({"padding": "x" * 2000}),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside_middle.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "pdf_info": [
+                    {
+                        "page_idx": 0,
+                        "page_size": [100, 100],
+                        "para_blocks": [{"type": "text", "bbox": [0, 0, 10, 10], "lines": []}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (output_root / "paper_middle.json").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="MinerU JSON must be a regular file without symbolic links"):
+        MineruOcrBundleAdapter().from_output(
+            {"jobId": "job-layout-json-symlink", "ocrProvider": "mineru"},
+            output_root,
+        )
+
+
 def test_adapter_persists_each_fallback_version_at_an_immutable_path(tmp_path: Path) -> None:
     output_root = tmp_path / "outputs" / "job-versioned"
     output_dir = output_root / "paper" / "auto"
@@ -279,8 +375,53 @@ def test_adapter_persists_each_fallback_version_at_an_immutable_path(tmp_path: P
     restored_b = type(bundle_b).from_persisted_manifest(manifest_b)
 
     assert restored_a.canonical_markdown == "VERSION A"
+    assert restored_a.json_content == [{"type": "text", "text": "VERSION A"}]
     assert restored_b.canonical_markdown == "VERSION B"
+    assert restored_b.json_content == [{"type": "text", "text": "VERSION B"}]
     assert bundle_a.markdown_artifact_path != bundle_b.markdown_artifact_path
+    assert bundle_a.json_artifact_path != bundle_b.json_artifact_path
+
+
+def test_adapter_does_not_reopen_selected_json_by_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output_root = tmp_path / "outputs" / "job-json-dirfd-read"
+    output_root.mkdir(parents=True)
+    (output_root / "paper.md").write_text("1. valid question", encoding="utf-8")
+    (output_root / "paper.json").write_text(json.dumps({"version": "A"}), encoding="utf-8")
+
+    def reject_path_read(_path: Path) -> bytes:
+        raise AssertionError("selected JSON was reopened by path")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_path_read)
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-json-dirfd-read", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    assert bundle.json_content == {"version": "A"}
+
+
+def test_adapter_does_not_create_json_snapshot_tempfile_by_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "outputs" / "job-json-dirfd-write"
+    output_root.mkdir(parents=True)
+    (output_root / "paper.md").write_text("1. valid question", encoding="utf-8")
+    (output_root / "paper.json").write_text(json.dumps({"version": "A"}), encoding="utf-8")
+
+    def reject_path_tempfile(*_args: object, **_kwargs: object) -> tuple[int, str]:
+        raise AssertionError("snapshot tempfile was created by path")
+
+    monkeypatch.setattr(tempfile, "mkstemp", reject_path_tempfile)
+
+    bundle = MineruOcrBundleAdapter().from_output(
+        {"jobId": "job-json-dirfd-write", "ocrProvider": "mineru"},
+        output_root,
+    )
+
+    snapshot = output_root / bundle.json_artifact_path
+    assert snapshot.read_text(encoding="utf-8") == json.dumps({"version": "A"})
 
 
 def test_adapter_skips_larger_whitespace_only_native_markdown(tmp_path: Path) -> None:
@@ -360,6 +501,21 @@ def test_adapter_rejects_native_markdown_symlink_outside_root(tmp_path: Path) ->
     with pytest.raises(ValueError, match="Markdown must not be a symbolic link"):
         MineruOcrBundleAdapter().from_output(
             {"jobId": "job-markdown-symlink", "ocrProvider": "mineru"},
+            output_root,
+        )
+
+
+def test_adapter_rejects_image_symlink_outside_root(tmp_path: Path) -> None:
+    output_root = tmp_path / "outputs" / "job-image-symlink"
+    output_root.mkdir(parents=True)
+    (output_root / "paper.md").write_text("1. valid question", encoding="utf-8")
+    outside = tmp_path / "outside-image.png"
+    outside.write_bytes(b"outside image")
+    (output_root / "figure.png").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="image must be a regular file without symbolic links"):
+        MineruOcrBundleAdapter(file_url=lambda _job_id, path: f"/files/{path.name}").from_output(
+            {"jobId": "job-image-symlink", "ocrProvider": "mineru"},
             output_root,
         )
 

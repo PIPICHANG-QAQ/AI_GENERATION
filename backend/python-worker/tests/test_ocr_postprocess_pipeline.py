@@ -915,6 +915,11 @@ def test_legacy_collect_and_adapter_bundle_have_real_artifact_level_parity(tmp_p
 
     normalized_legacy = json.loads(json.dumps(legacy_outputs, ensure_ascii=False, sort_keys=True))
     normalized_explicit = json.loads(json.dumps(explicit_outputs, ensure_ascii=False, sort_keys=True))
+    json_snapshot = artifact_root / explicit_bundle.json_artifact_path
+    assert json_snapshot.parent.name == ".canonical"
+    assert json.loads(json_snapshot.read_text(encoding="utf-8")) == explicit_outputs["json"]
+    assert normalized_explicit["jsonFile"].endswith(f"/.canonical/{json_snapshot.name}")
+    normalized_explicit["jsonFile"] = normalized_legacy["jsonFile"]
     assert normalized_explicit == normalized_legacy
     assert collect_outputs.call_count == 2
     assert collect_outputs.call_args_list[0].kwargs.get("bundle") is None
