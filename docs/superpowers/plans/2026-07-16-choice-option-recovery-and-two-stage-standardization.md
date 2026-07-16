@@ -148,7 +148,7 @@ git commit -m "fix: recover glued choice task options"
 - Modify: `local-platform/src/lib/question.ts:918-945`
 - Modify: `local-platform/src/lib/question.test.ts`
 
-- [ ] **Step 1: 写 Vitest 失败测试**
+- [x] **Step 1: 写 Vitest 失败测试**
 
 ```ts
 it("recovers a consecutive C/D chain glued into a tasks item", () => {
@@ -169,7 +169,7 @@ it("recovers a consecutive C/D chain glued into a tasks item", () => {
 
 Mirror the Python parser fixtures as well: a recovered chain in a non-final task must keep later labels aligned; `$...$`, `$$...$$`, `\\(...\\)` and `\\[...\\]` must not split; `$C$`, `点 D．...`, incomplete chains, and `C ... E．...` must remain a single existing task item.
 
-- [ ] **Step 2: 运行目标测试，确认 RED**
+- [x] **Step 2: 运行目标测试，确认 RED**
 
 Run:
 
@@ -179,7 +179,7 @@ npm --prefix local-platform test -- --run src/lib/question.test.ts
 
 Expected: 新增断言返回两个选项而失败。
 
-- [ ] **Step 3: 以与 Python 相同的保护条件扩展 `splitTasksOptions`**
+- [x] **Step 3: 以与 Python 相同的保护条件扩展 `splitTasksOptions`**
 
 ```ts
 const taskInlineOption = /(?<![A-Za-z0-9])([A-HＡ-Ｈａ-ｈ])([.．、:：])?(?=\s*(?:\$|!\[|[（(\[]|[\u4e00-\u9fff0-9]))/g;
@@ -214,7 +214,7 @@ function recoverGluedTaskParts(parts: string[]) {
 
 Use `recoverGluedTaskParts` before mapping `taskParts` to A/B/C/D options.
 
-- [ ] **Step 4: 运行目标前端测试，确认 GREEN**
+- [x] **Step 4: 运行目标前端测试，确认 GREEN**
 
 Run:
 
@@ -224,7 +224,7 @@ npm --prefix local-platform test -- --run src/lib/question.test.ts
 
 Expected: 现有 11 项与新增粘连选项测试均通过。
 
-- [ ] **Step 5: 提交前端解析一致性提交**
+- [x] **Step 5: 提交前端解析一致性提交**
 
 ```bash
 git add local-platform/src/lib/question.ts local-platform/src/lib/question.test.ts
