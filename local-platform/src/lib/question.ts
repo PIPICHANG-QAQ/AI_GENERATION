@@ -1205,12 +1205,13 @@ function splitTasksOptions(markdown: string): { stemMarkdown: string; options: Q
     .slice(1);
   const recoveredTaskParts = match ? recoverGluedTaskParts(taskParts) : taskParts;
   const options = recoveredTaskParts
+    .map((content) => cleanOptionText(content))
+    .filter(Boolean)
     .map((content, index) => ({
       label: String.fromCharCode(65 + index),
-      content: cleanOptionText(content),
-      contentMarkdown: cleanOptionText(content),
-    }))
-    .filter((option) => option.content);
+      content,
+      contentMarkdown: content,
+    }));
   return { stemMarkdown, options };
 }
 
