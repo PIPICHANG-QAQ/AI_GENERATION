@@ -310,6 +310,7 @@ class StartServerDockerTest(unittest.TestCase):
 
             self.assertTrue(stat.S_IMODE(html.stat().st_mode) & stat.S_IXOTH)
             self.assertTrue(stat.S_IMODE(index.stat().st_mode) & stat.S_IROTH)
+            self.assertEqual(0, stat.S_IMODE(index.stat().st_mode) & 0o111)
 
     def test_server_artifact_build_without_maven_uses_existing_jar(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
