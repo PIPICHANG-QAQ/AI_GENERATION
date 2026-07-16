@@ -46,6 +46,8 @@ class QuestionMarkdownTest(unittest.TestCase):
         for name, content in {
             "inline": "B项 $5 C. x D. y",
             "display": "B项 $$5 C. x D. y",
+            "inline_parens": r"B项 \(5 C. x D. y",
+            "display_brackets": r"B项 \[5 C. x D. y",
         }.items():
             with self.subTest(name=name):
                 markdown = "\n".join((r"\begin{tasks}(2)", r"\task A项", rf"\task {content}", r"\end{tasks}"))

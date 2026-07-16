@@ -955,9 +955,10 @@ def is_math_position(content: str, position: int) -> bool:
     return any(match.start() <= position < match.end() for match in MATH_SPAN_RE.finditer(content))
 
 
-def has_unpaired_unescaped_dollar(content: str) -> bool:
-    """判断内容是否包含无法确定公式边界的美元符号。"""
-    return bool(UNESCAPED_DOLLAR_RE.search(MATH_SPAN_RE.sub("", content)))
+def has_unclosed_math_delimiter(content: str) -> bool:
+    """判断内容是否包含未被完整数学公式消耗的开始分隔符。"""
+    remaining = MATH_SPAN_RE.sub("", content)
+    return bool(UNESCAPED_DOLLAR_RE.search(remaining) or r"\(" in remaining or r"\[" in remaining)
 
 
 def next_glued_tasks_label_marker(content: str, start: int) -> tuple[str, int, int] | None:
@@ -985,7 +986,7 @@ def recover_glued_tasks_options(task_parts: list[str]) -> list[str]:
     if (
         len(task_parts) < 2
         or any(not part.strip() for part in task_parts)
-        or any(has_unpaired_unescaped_dollar(part) for part in task_parts)
+        or any(has_unclosed_math_delimiter(part) for part in task_parts)
     ):
         return task_parts
 
