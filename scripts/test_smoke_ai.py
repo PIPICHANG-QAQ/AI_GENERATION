@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import call, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import smoke_ai
 
@@ -91,6 +95,22 @@ class WaitStandardizationJobTest(unittest.TestCase):
                 self.wait_function()("task-1", "job-1", expected_total_items=2, timeout_seconds=2)
 
         self.assertEqual(2.0, request.call_args.kwargs["timeout"])
+
+    def test_choice_standardization_smoke_sends_local_then_force_ai(self) -> None:
+        local_response = {"markdown": "本地候选", "executionPath": "local", "modelInvoked": False}
+        force_response = {
+            "markdown": "AI 候选",
+            "executionPath": "force-ai",
+            "modelInvoked": True,
+            "cacheHit": False,
+            "standardizer": {"fallbackUsed": False},
+        }
+        with patch.object(smoke_ai, "request", side_effect=[local_response, force_response]) as request:
+            smoke_ai.run_choice_standardization_smoke("task-1", "question-1", "题干")
+
+        self.assertEqual(False, request.call_args_list[0].args[2]["forceAi"])
+        self.assertEqual(True, request.call_args_list[1].args[2]["forceAi"])
+        self.assertEqual("本地候选", request.call_args_list[1].args[2]["markdown"])
 
 
 if __name__ == "__main__":

@@ -116,6 +116,27 @@ def wait_standardization_job(
     raise AssertionError(f"global standardization failed; last payload: {last}")
 
 
+def run_choice_standardization_smoke(task_id: str, question_id: str, markdown: str) -> None:
+    local = request(
+        "POST",
+        f"/api/import-tasks/{task_id}/questions/{question_id}/standardize/ai",
+        {"markdown": markdown, "forceAi": False},
+        timeout=90,
+    )
+    ok("ai standardize local", local.get("modelInvoked") is False, local)
+    ok("choice local standardize path", local.get("executionPath") in {"local", "cache"}, local)
+
+    forced = request(
+        "POST",
+        f"/api/import-tasks/{task_id}/questions/{question_id}/standardize/ai",
+        {"markdown": str(local.get("markdown") or markdown), "forceAi": True},
+        timeout=90,
+    )
+    ok("choice force ai invoked", forced.get("modelInvoked") is True, forced)
+    ok("choice force ai cache bypass", forced.get("cacheHit") is False, forced)
+    ok("choice force ai is not local fallback", not forced.get("standardizer", {}).get("fallbackUsed"), forced)
+
+
 def main() -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as file:
         file.write("# AI 冒烟试卷\n\n1. 已知 $x+1=2$，求 $x$。\n\nA. 0\nB. 1\nC. 2\nD. 3\n")
@@ -158,13 +179,7 @@ def main() -> None:
     ok("canonicalization preview", bool(canonical_preview.get("applyToken")), canonical_preview)
     ok("canonicalization has no blockers", not canonical_preview.get("blockingIssues"), canonical_preview)
 
-    standardized = request(
-        "POST",
-        f"/api/import-tasks/{task_id}/questions/{question_id}/standardize/ai",
-        {"markdown": markdown},
-        timeout=90,
-    )
-    ok("ai standardize", "markdown" in standardized, standardized)
+    run_choice_standardization_smoke(task_id, question_id, markdown)
 
     analysis = request(
         "POST",
