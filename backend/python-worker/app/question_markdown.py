@@ -967,6 +967,7 @@ def next_glued_tasks_label_marker(content: str, start: int) -> tuple[str, int, i
     patterns = (
         re.compile(rf"(?<!\S)(?P<label>{label_pattern})[.．、:：](?=\s*\S)"),
         re.compile(rf"(?<!\S)(?P<label>{label_pattern})(?=\s+\$(?=[^$\r\n]*\$))"),
+        re.compile(rf"(?<!\S)(?P<label>{label_pattern})(?=\s+!\[[^\]]*]\s*\(\s*[^)\r\n]+\))"),
     )
     matches = sorted(
         (match for pattern in patterns for match in pattern.finditer(content, start)),

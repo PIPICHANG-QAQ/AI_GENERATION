@@ -4,6 +4,25 @@ from app.question_markdown import detect_choice_option_markers, split_choice_opt
 
 
 class QuestionMarkdownTest(unittest.TestCase):
+    def test_recovers_bare_tasks_label_before_image(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 C. 文字 D ![](images/d.png)
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": "B项"},
+                {"label": "C", "content": "文字"},
+                {"label": "D", "content": "![](images/d.png)"},
+            ],
+            options,
+        )
+
     def test_recovers_external_text_tasks_chain_after_math_decoy(self):
         markdown = r"""\begin{tasks}(2)
 \task A项
