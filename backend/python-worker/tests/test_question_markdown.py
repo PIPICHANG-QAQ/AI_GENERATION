@@ -112,6 +112,44 @@ class QuestionMarkdownTest(unittest.TestCase):
             options,
         )
 
+    def test_preserves_escaped_right_bracket_inside_image_alt_text(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 ![a \] C. decoy D. decoy](path.png) C. real D. real
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": r"B项 ![a \] C. decoy D. decoy](path.png)"},
+                {"label": "C", "content": "real"},
+                {"label": "D", "content": "real"},
+            ],
+            options,
+        )
+
+    def test_preserves_escaped_right_paren_inside_image_destination(self):
+        markdown = r"""\begin{tasks}(2)
+\task A项
+\task B项 ![alt](foo\) E. decoy.png) C. real D. real
+\end{tasks}"""
+
+        stem, options = split_choice_options(markdown, "choice")
+
+        self.assertEqual("", stem)
+        self.assertEqual(
+            [
+                {"label": "A", "content": "A项"},
+                {"label": "B", "content": r"B项 ![alt](foo\) E. decoy.png)"},
+                {"label": "C", "content": "real"},
+                {"label": "D", "content": "real"},
+            ],
+            options,
+        )
+
     def test_does_not_recover_tasks_with_many_malformed_image_prefixes(self):
         content = "B项 " + "C ![" * 4096
         markdown = "\n".join((r"\begin{tasks}(2)", r"\task A项", rf"\task {content}", r"\end{tasks}"))

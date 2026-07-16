@@ -3,6 +3,8 @@
 这些函数服务 OCR 拆题、人工校验和导出链路，保持纯函数形态，避免直接读写业务状态。
 """
 
+from bisect import bisect_left, bisect_right
+
 from app.worker_base import *
 
 def relative_file_url(job_id: str, path: Path) -> str:
@@ -1056,7 +1058,15 @@ def bounded_glued_tasks_image_span(content: str, start: int) -> tuple[int, int] 
 
     image_start = position
     alt_start = position + 2
-    alt_end = content.find("]", alt_start, alt_start + GLUED_TASKS_IMAGE_ALT_MAX_LENGTH + 1)
+    alt_limit = min(len(content), alt_start + GLUED_TASKS_IMAGE_ALT_MAX_LENGTH + 1)
+    alt_end = next(
+        (
+            position
+            for position in range(alt_start, alt_limit)
+            if content[position] == "]" and not is_escaped_math_delimiter(content, position)
+        ),
+        -1,
+    )
     if alt_end < 0:
         return None
 
@@ -1071,9 +1081,9 @@ def bounded_glued_tasks_image_span(content: str, start: int) -> tuple[int, int] 
         char = content[position]
         if char in "\r\n":
             return None
-        if char == "(":
+        if char == "(" and not is_escaped_math_delimiter(content, position):
             nested_parentheses += 1
-        elif char == ")":
+        elif char == ")" and not is_escaped_math_delimiter(content, position):
             if not nested_parentheses:
                 return (image_start, position + 1) if position > destination_start else None
             nested_parentheses -= 1
@@ -1103,9 +1113,14 @@ def is_point_label_prefix(content: str, position: int) -> bool:
     return position > 0 and content[position - 1] == "点"
 
 
-def is_image_position(spans: list[tuple[int, int]], position: int) -> bool:
+def is_image_position(
+    spans: list[tuple[int, int]],
+    span_starts: list[int],
+    position: int,
+) -> bool:
     """判断位置是否落在完整图片区间中。"""
-    return any(start <= position < end for start, end in spans)
+    span_index = bisect_right(span_starts, position) - 1
+    return span_index >= 0 and position < spans[span_index][1]
 
 
 def next_glued_tasks_label_marker(
@@ -1114,6 +1129,7 @@ def next_glued_tasks_label_marker(
     expected_label: str,
     spans: list[tuple[int, int]],
     image_spans: list[tuple[int, int]],
+    image_span_starts: list[int],
 ) -> tuple[str, int, int] | None:
     """查找预期或更高的 tasks 尾部粘连强标签。"""
     matches = sorted(
@@ -1128,13 +1144,14 @@ def next_glued_tasks_label_marker(
         marker_start = match.start()
         if (
             is_math_position(spans, marker_start)
-            or is_image_position(image_spans, marker_start)
+            or is_image_position(image_spans, image_span_starts, marker_start)
             or is_point_label_prefix(content, marker_start)
         ):
             continue
         if requires_image_check:
             image_start = skip_bounded_glued_tasks_image_whitespace(content, match.end())
-            if not any(image_start == image_span[0] for image_span in image_spans):
+            image_index = bisect_left(image_span_starts, image_start)
+            if image_index >= len(image_span_starts) or image_span_starts[image_index] != image_start:
                 continue
         label = match.group("label")
         if label < expected_label:
@@ -1153,11 +1170,14 @@ def recover_glued_tasks_options(task_parts: list[str]) -> list[str]:
 
     task_math_spans = [math_spans(part) for part in task_parts]
     task_image_spans = [bounded_glued_tasks_image_spans(part) for part in task_parts]
+    task_image_span_starts = [[start for start, _end in spans] for spans in task_image_spans]
     if any(has_unclosed_delimiter for _spans, has_unclosed_delimiter in task_math_spans):
         return task_parts
 
     recovered: list[str] = []
-    for content, (spans, _has_unclosed_delimiter), image_spans in zip(task_parts, task_math_spans, task_image_spans):
+    for content, (spans, _has_unclosed_delimiter), image_spans, image_span_starts in zip(
+        task_parts, task_math_spans, task_image_spans, task_image_span_starts
+    ):
         expected_label = chr(ord("A") + len(recovered) + 1)
         if not content.strip() or expected_label > "H":
             recovered.append(content)
@@ -1166,7 +1186,9 @@ def recover_glued_tasks_options(task_parts: list[str]) -> list[str]:
         markers: list[tuple[int, int]] = []
         cursor = 0
         while expected_label <= "H":
-            marker = next_glued_tasks_label_marker(content, cursor, expected_label, spans, image_spans)
+            marker = next_glued_tasks_label_marker(
+                content, cursor, expected_label, spans, image_spans, image_span_starts
+            )
             if not marker or marker[0] != expected_label:
                 break
             markers.append((marker[1], marker[2]))
