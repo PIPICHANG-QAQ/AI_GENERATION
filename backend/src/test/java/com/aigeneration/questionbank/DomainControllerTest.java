@@ -1312,6 +1312,52 @@ class DomainControllerTest {
         }
     }
 
+    @Test
+    void aiStandardizeMapsPublicForceAiToWorkerExecutionMode() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        List<String> requestBodies = new ArrayList<>();
+        server.createContext("/worker/ai/standardize", exchange -> {
+            requestBodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            writeJson(exchange, Map.of(
+                    "markdown", "候选修复题干",
+                    "standardizer", Map.of("source", "test", "confidence", "high")
+            ));
+        });
+        server.start();
+        String oldBaseUrl = pythonWorkerProperties.getBaseUrl();
+        boolean oldProxyEnabled = pythonWorkerProperties.isApiProxyEnabled();
+        try {
+            pythonWorkerProperties.setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
+            pythonWorkerProperties.setApiProxyEnabled(true);
+            importTaskMetadataService.syncMap(importTaskPayload("ai_force_mode_task_true", "待校验", 1, "强制 AI 标准化任务"));
+            importTaskMetadataService.syncMap(importTaskPayload("ai_force_mode_task_false", "待校验", 1, "本地标准化任务"));
+
+            mockMvc.perform(postJson(
+                            "/api/import-tasks/ai_force_mode_task_true/questions/ai_force_mode_task_true_question_1/standardize/ai",
+                            Map.of("markdown", "当前编辑题干", "forceAi", true)
+                    ))
+                    .andExpect(status().isOk());
+
+            mockMvc.perform(postJson(
+                            "/api/import-tasks/ai_force_mode_task_false/questions/ai_force_mode_task_false_question_1/standardize/ai",
+                            Map.of("markdown", "当前编辑题干", "forceAi", false)
+                    ))
+                    .andExpect(status().isOk());
+
+            JsonNode forcedRequest = objectMapper.readTree(requestBodies.get(0));
+            org.assertj.core.api.Assertions.assertThat(forcedRequest.path("forceAi").asBoolean()).isTrue();
+            org.assertj.core.api.Assertions.assertThat(forcedRequest.path("executionMode").asText()).isEqualTo("force-ai");
+
+            JsonNode localRequest = objectMapper.readTree(requestBodies.get(1));
+            org.assertj.core.api.Assertions.assertThat(localRequest.path("forceAi").asBoolean()).isFalse();
+            org.assertj.core.api.Assertions.assertThat(localRequest.path("executionMode").asText()).isEqualTo("local");
+        } finally {
+            pythonWorkerProperties.setBaseUrl(oldBaseUrl);
+            pythonWorkerProperties.setApiProxyEnabled(oldProxyEnabled);
+            server.stop(0);
+        }
+    }
+
     /**
      * 验证 Java 接管 AI 标准化后仍会把同题原始 OCR 片段传给 worker，供严重 LaTeX 损坏时兜底。
      *

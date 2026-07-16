@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.llm_splitter import (
     enrich_questions_metadata_with_llm,
@@ -126,9 +126,19 @@ class MarkdownPayload(BaseModel):
     markdown: str = Field(default="", max_length=100000)
     rawOcrContext: str = Field(default="", max_length=100000)
     structuredHints: dict[str, Any] | None = None
+    forceAi: bool = False
+    executionMode: str = Field(default="ai", max_length=20)
     pipelineVersion: str = Field(default="standardization.v1", max_length=80)
     inputHash: str = Field(default="", max_length=128)
     requestSource: str = Field(default="single", max_length=40)
+
+    @field_validator("executionMode")
+    @classmethod
+    def normalize_execution_mode(cls, value: str) -> str:
+        mode = str(value or "ai").strip().lower().replace("_", "-")
+        if mode not in {"ai", "local", "force-ai"}:
+            raise ValueError("executionMode must be one of ai, local, force-ai")
+        return mode
 
 
 class QuestionManualMarkdownPayload(BaseModel):

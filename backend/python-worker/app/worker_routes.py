@@ -358,6 +358,8 @@ def standardize_import_question_ai(task_id: str, question_id: str, payload: Mark
         payload.markdown,
         raw_ocr_context=raw_ocr_context_for_import_question(task, question),
         structured_hints=standardize_question_hints(question),
+        execution_mode=payload.executionMode,
+        force_ai=payload.forceAi,
     )
 
 
@@ -1005,7 +1007,16 @@ def worker_retry_ocr_job(background_tasks: BackgroundTasks, job_id: str) -> dict
 @app.post("/worker/ai/standardize")
 def worker_standardize_markdown_ai(payload: MarkdownPayload) -> dict[str, Any]:
     """worker 命名空间执行 AI 标准化。"""
-    return standardize_markdown_ai(payload)
+    return standardize_markdown_ai_response(
+        payload.markdown,
+        raw_ocr_context=payload.rawOcrContext,
+        structured_hints=payload.structuredHints,
+        pipeline_version=payload.pipelineVersion,
+        input_hash=payload.inputHash,
+        request_source=payload.requestSource,
+        execution_mode=payload.executionMode,
+        force_ai=payload.forceAi,
+    )
 
 
 @app.post("/worker/ai/analysis")

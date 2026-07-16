@@ -226,6 +226,29 @@ class LlmSplitterTest(unittest.TestCase):
         self.assertEqual(1, len(gate.successes))
         self.assertEqual(4, metadata["adaptiveConcurrency"]["limit"])
 
+    def test_standardize_force_ai_passes_bypass_cache_to_router(self):
+        response = {
+            "choices": [{"message": {"content": json.dumps({
+                "markdown": "题干 $x+1=2$",
+                "answer": "",
+                "analysis": "",
+                "subQuestions": [],
+                "corrections": [],
+                "warnings": [],
+                "confidence": "high",
+            }, ensure_ascii=False)}}]
+        }
+        with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test-key", "ENABLE_LLM_SPLIT": "true"}):
+            with patch("app.llm_splitter.post_llm_json_for_endpoint", return_value=(response, False)) as post:
+                standardized, metadata = standardize_markdown_with_llm(
+                    "题干 $x+1=2$",
+                    bypass_cache=True,
+                )
+
+        self.assertEqual("题干 $x+1=2$", standardized)
+        self.assertFalse(metadata["llmCall"]["cacheHit"])
+        self.assertTrue(post.call_args.kwargs["bypass_cache"])
+
     def test_analysis_failure_returns_retryable_fallback_metadata(self):
         with patch.dict(os.environ, {"DASHSCOPE_API_KEY": "test-key", "ENABLE_LLM_SPLIT": "true"}):
             with patch("app.llm_splitter.post_llm_json_for_endpoint", side_effect=RuntimeError("read operation timed out")):

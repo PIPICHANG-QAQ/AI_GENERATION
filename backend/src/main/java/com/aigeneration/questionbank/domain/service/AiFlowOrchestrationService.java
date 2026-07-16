@@ -135,6 +135,9 @@ public class AiFlowOrchestrationService {
                 rawOcrContext,
                 requestSource
         );
+        boolean forceAi = booleanValue(payload.get("forceAi"));
+        request.put("forceAi", forceAi);
+        request.put("executionMode", forceAi ? "force-ai" : "local");
         boolean writeRequested = standardizeWriteRequested(payload);
         Map<String, Object> response = executeAiJob("import-question", questionId, "standardize", "/worker/ai/standardize", request, false);
         String recommendation = value(response.get("applyRecommendation"));
@@ -390,6 +393,8 @@ public class AiFlowOrchestrationService {
         request.put("markdown", text(payload.get("markdown")));
         request.put("rawOcrContext", rawOcrContext);
         request.put("structuredHints", hints);
+        request.put("forceAi", false);
+        request.put("executionMode", "ai");
         return request;
     }
 

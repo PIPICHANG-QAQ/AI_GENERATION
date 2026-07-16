@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -85,3 +87,109 @@ def test_v1_standardize_delegates_to_existing_ai_path(monkeypatch: pytest.Monkey
     assert response.status_code == 200
     assert response.json()["markdown"] == "normalized"
     assert called["payload"].markdown == "raw"
+
+
+def test_v1_standardize_delegates_force_ai_execution_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
+
+    def fake_standardize(payload):
+        called["payload"] = payload
+        return {"markdown": "normalized", "standardizer": {"source": "ai"}}
+
+    monkeypatch.setattr("app.routes.worker_v1.worker_standardize_markdown_ai", fake_standardize)
+    client = TestClient(app)
+    response = client.post(
+        "/worker/v1/standardize",
+        json={"markdown": "raw", "forceAi": True, "executionMode": "force-ai"},
+    )
+
+    assert response.status_code == 200
+    assert called["payload"].markdown == "raw"
+    assert called["payload"].forceAi is True
+    assert called["payload"].executionMode == "force-ai"
+
+
+def test_v1_standardize_real_route_accepts_input_sha256_as_legacy_input_hash() -> None:
+    client = TestClient(app)
+    response = client.post(
+        "/worker/v1/standardize",
+        json={
+            "markdown": "选择正确答案（ ）A. 甲 B. 乙 C. 丙 D. 丁",
+            "structuredHints": {"questionId": "v1-q1", "type": "choice", "options": []},
+            "executionMode": "local",
+            "inputSha256": "abc123",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["executionPath"] == "local"
+    assert body["modelInvoked"] is False
+    assert body["inputHash"] == "abc123"
+
+
+def test_v1_standardize_real_route_accepts_legacy_input_hash() -> None:
+    client = TestClient(app)
+    response = client.post(
+        "/worker/v1/standardize",
+        json={
+            "markdown": "选择正确答案（ ）A. 甲 B. 乙 C. 丙 D. 丁",
+            "structuredHints": {"questionId": "v1-q2", "type": "choice", "options": []},
+            "executionMode": "local",
+            "inputHash": "legacy123",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["executionPath"] == "local"
+    assert body["inputHash"] == "legacy123"
+
+
+def test_openapi_standardization_batch_execution_path_includes_two_stage_values() -> None:
+    openapi = Path(__file__).resolve().parents[3] / "question-engine/openapi/question-engine.v1.yaml"
+    content = openapi.read_text(encoding="utf-8")
+
+    assert "executionPath: { type: string, enum: [rules, ocr-fallback, cache, llm, local, force-ai] }" in content
+
+
+def test_generic_standardize_route_ignores_public_force_ai_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
+
+    def fake_standardize(markdown: str, **kwargs):
+        called["markdown"] = markdown
+        called["kwargs"] = kwargs
+        return {"markdown": "normalized", "standardizer": {"source": "ai"}}
+
+    monkeypatch.setattr("app.worker_routes.standardize_markdown_ai_response", fake_standardize)
+    client = TestClient(app)
+    response = client.post(
+        "/api/markdown/standardize/ai",
+        json={"markdown": "raw", "forceAi": True, "executionMode": "force-ai"},
+    )
+
+    assert response.status_code == 200
+    assert called["markdown"] == "raw"
+    assert "force_ai" not in called["kwargs"]
+    assert "execution_mode" not in called["kwargs"]
+
+
+def test_worker_standardize_route_honors_internal_force_ai_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: dict[str, object] = {}
+
+    def fake_standardize(markdown: str, **kwargs):
+        called["markdown"] = markdown
+        called["kwargs"] = kwargs
+        return {"markdown": "normalized", "standardizer": {"source": "ai"}}
+
+    monkeypatch.setattr("app.worker_routes.standardize_markdown_ai_response", fake_standardize)
+    client = TestClient(app)
+    response = client.post(
+        "/worker/ai/standardize",
+        json={"markdown": "raw", "forceAi": True, "executionMode": "force-ai"},
+    )
+
+    assert response.status_code == 200
+    assert called["markdown"] == "raw"
+    assert called["kwargs"]["force_ai"] is True
+    assert called["kwargs"]["execution_mode"] == "force-ai"

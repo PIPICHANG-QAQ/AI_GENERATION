@@ -407,6 +407,8 @@ def post_llm_json_for_endpoint(
     payload: dict[str, Any],
     timeout_seconds: float,
     task_type: str,
+    *,
+    bypass_cache: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     """Post one routed OpenAI-compatible call and return decoded response JSON."""
     api_key = str(endpoint.get("apiKey") or "EMPTY")
@@ -416,9 +418,10 @@ def post_llm_json_for_endpoint(
         chat_template_kwargs.setdefault("enable_thinking", False)
         routed_payload["chat_template_kwargs"] = chat_template_kwargs
     cache_key = llm_cache_key(endpoint, task_type, routed_payload)
-    cached = cached_llm_response(cache_key)
-    if cached is not None:
-        return cached, True
+    if not bypass_cache:
+        cached = cached_llm_response(cache_key)
+        if cached is not None:
+            return cached, True
 
     url = f"{str(endpoint.get('baseUrl') or '').rstrip('/')}/chat/completions"
     if not url.startswith(("http://", "https://")):
@@ -432,7 +435,8 @@ def post_llm_json_for_endpoint(
         )
     response.raise_for_status()
     data = response.json()
-    store_llm_response(cache_key, data)
+    if not bypass_cache:
+        store_llm_response(cache_key, data)
     return data, False
 
 
@@ -815,6 +819,8 @@ def standardize_markdown_with_llm(
     markdown: str,
     raw_ocr_context: str = "",
     structured_hints: dict[str, Any] | None = None,
+    *,
+    bypass_cache: bool = False,
 ) -> tuple[str | None, dict[str, Any]]:
     """调用大模型标准化题目 Markdown。"""
     status = llm_status()
@@ -927,7 +933,13 @@ def standardize_markdown_with_llm(
             started = time.perf_counter()
             try:
                 with gate.slot(priority):
-                    data, cache_hit = post_llm_json_for_endpoint(endpoint, attempt_payload, timeout_seconds, "standardize")
+                    data, cache_hit = post_llm_json_for_endpoint(
+                        endpoint,
+                        attempt_payload,
+                        timeout_seconds,
+                        "standardize",
+                        bypass_cache=bypass_cache,
+                    )
                     content = data["choices"][0]["message"]["content"]
                     parsed = extract_json_object(content)
                     standardized = str(parsed.get("markdown") or "").strip()

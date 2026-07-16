@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class WorkerContractModel(BaseModel):
@@ -111,9 +111,28 @@ class StandardizationRequest(WorkerContractModel):
     markdown: str = ""
     rawOcrContext: str = ""
     structuredHints: dict[str, Any] | None = None
+    forceAi: bool = False
+    executionMode: str = "ai"
     pipelineVersion: str = "standardization.v1"
     inputSha256: str = ""
+    inputHash: str = ""
     requestSource: str = "worker-v1"
+
+    @field_validator("executionMode")
+    @classmethod
+    def normalize_execution_mode(cls, value: str) -> str:
+        mode = str(value or "ai").strip().lower().replace("_", "-")
+        if mode not in {"ai", "local", "force-ai"}:
+            raise ValueError("executionMode must be one of ai, local, force-ai")
+        return mode
+
+    @model_validator(mode="after")
+    def sync_input_hash_fields(self) -> "StandardizationRequest":
+        if not self.inputHash and self.inputSha256:
+            self.inputHash = self.inputSha256
+        if not self.inputSha256 and self.inputHash:
+            self.inputSha256 = self.inputHash
+        return self
 
 
 class StandardizationResponse(WorkerContractModel):

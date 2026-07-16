@@ -1037,6 +1037,161 @@ A．甲 B．乙 C．丙 D．丁
         self.assertFalse(second["modelInvoked"])
         self.assertEqual("safe_to_apply", second["applyRecommendation"])
 
+    def test_standardize_cache_preserves_router_cached_execution_origin(self):
+        markdown = r"计算：$x + 2$。"
+        hints = {"questionId": "router-cache-q1", "type": "choice", "options": []}
+
+        with patch("app.import_services.standardize_markdown_with_llm") as standardize:
+            standardize.return_value = (
+                r"计算：$x+2$。",
+                {
+                    "source": "ai",
+                    "provider": "mock",
+                    "model": "mock-model",
+                    "error": None,
+                    "corrections": [],
+                    "warnings": [],
+                    "confidence": "high",
+                    "answer": "",
+                    "analysis": "",
+                    "llmCall": {"status": "success", "cacheHit": True},
+                    "llmCalls": [{"status": "success", "cacheHit": True}],
+                },
+            )
+
+            first = standardize_markdown_ai_response(markdown, structured_hints=hints)
+            second = standardize_markdown_ai_response(markdown, structured_hints=hints)
+
+        self.assertEqual("cache", first["executionPath"])
+        self.assertEqual("llm", first["cachedExecutionPath"])
+        self.assertEqual("cache", second["executionPath"])
+        self.assertEqual("llm", second["cachedExecutionPath"])
+
+    def test_import_local_standardization_recovers_glued_options_without_llm(self):
+        markdown = "选择正确答案（ ）A. 甲 B. 乙 C. 丙 D. 丁"
+        hints = {
+            "questionId": "import_q_1",
+            "type": "choice",
+            "options": [{"label": "A", "content": "甲"}],
+        }
+
+        with patch("app.import_services.standardize_markdown_with_llm") as standardize:
+            result = standardize_markdown_ai_response(
+                markdown,
+                structured_hints=hints,
+                execution_mode="local",
+            )
+
+        standardize.assert_not_called()
+        self.assertEqual("local", result["executionPath"])
+        self.assertFalse(result["modelInvoked"])
+        self.assertFalse(result["cacheHit"])
+        self.assertEqual(["A", "B", "C", "D"], [option["label"] for option in result["options"]])
+        self.assertIn(r"\begin{tasks}(4)", result["markdown"])
+        self.assertIn(r"\task 丁", result["markdown"])
+
+    def test_local_stage_cache_does_not_satisfy_force_ai(self):
+        markdown = "选择正确答案（ ）A. 甲 B. 乙 C. 丙 D. 丁"
+        hints = {
+            "questionId": "import_q_1",
+            "type": "choice",
+            "options": [{"label": "A", "content": "甲"}],
+        }
+
+        first = standardize_markdown_ai_response(markdown, structured_hints=hints, execution_mode="local")
+        second = standardize_markdown_ai_response(markdown, structured_hints=hints, execution_mode="local")
+        with patch("app.import_services.standardize_markdown_with_llm") as standardize:
+            standardize.return_value = (
+                f"{markdown} force-ai",
+                {
+                    "source": "ai",
+                    "provider": "mock",
+                    "model": "mock-model",
+                    "error": None,
+                    "corrections": [],
+                    "warnings": [],
+                    "confidence": "high",
+                    "answer": "",
+                    "analysis": "",
+                    "llmCall": {"status": "success", "cacheHit": False},
+                    "llmCalls": [{"status": "success", "cacheHit": False}],
+                },
+            )
+            forced = standardize_markdown_ai_response(markdown, structured_hints=hints, execution_mode="force-ai")
+
+        self.assertEqual("local", first["executionPath"])
+        self.assertEqual("cache", second["executionPath"])
+        self.assertEqual("local", second["cachedExecutionPath"])
+        standardize.assert_called_once()
+        self.assertEqual("force-ai", forced["executionPath"])
+        self.assertTrue(forced["modelInvoked"])
+        self.assertFalse(forced["cacheHit"])
+
+    def test_force_ai_bypasses_standardization_and_router_caches(self):
+        markdown = r"计算：$x + 1$。"
+        calls: list[bool] = []
+
+        def standardize(markdown_arg, **kwargs):
+            calls.append(bool(kwargs.get("bypass_cache")))
+            return (
+                f"{markdown_arg} force-call-{len(calls)}",
+                {
+                    "source": "ai",
+                    "provider": "mock",
+                    "model": "mock-model",
+                    "error": None,
+                    "corrections": [],
+                    "warnings": [],
+                    "confidence": "high",
+                    "answer": "",
+                    "analysis": "",
+                    "llmCall": {"status": "success", "cacheHit": False},
+                    "llmCalls": [{"status": "success", "cacheHit": False}],
+                },
+            )
+
+        with patch("app.import_services.standardize_markdown_with_llm", side_effect=standardize):
+            first = standardize_markdown_ai_response(markdown)
+            forced = standardize_markdown_ai_response(markdown, execution_mode="force-ai")
+
+        self.assertEqual([False, True], calls)
+        self.assertEqual("llm", first["executionPath"])
+        self.assertEqual("force-ai", forced["executionPath"])
+        self.assertTrue(forced["modelInvoked"])
+        self.assertFalse(forced["cacheHit"])
+        self.assertIn("force-call-2", forced["markdown"])
+
+    def test_force_ai_failure_is_blocked_and_never_returns_local_fallback(self):
+        markdown = r"计算：$x + 1$。"
+
+        with patch("app.import_services.standardize_markdown_with_llm") as standardize:
+            standardize.return_value = (
+                None,
+                {
+                    "source": "ai",
+                    "provider": "mock",
+                    "model": "mock-model",
+                    "error": "provider unavailable",
+                    "retryable": True,
+                    "llmCalls": [{"status": "failed", "error": "provider unavailable"}],
+                },
+            )
+            result = standardize_markdown_ai_response(markdown, execution_mode="force-ai")
+
+        standardizer = result["standardizer"]
+        self.assertEqual(markdown, result["markdown"])
+        self.assertEqual("force-ai", result["executionPath"])
+        self.assertTrue(result["modelInvoked"])
+        self.assertFalse(result["cacheHit"])
+        self.assertTrue(standardizer["forceAiFailed"])
+        self.assertFalse(standardizer["fallbackUsed"])
+        self.assertTrue(standardizer["applyBlocked"])
+        self.assertEqual("failed", standardizer["status"])
+        self.assertFalse(standardizer["changed"])
+        self.assertFalse(standardizer["renderValidation"]["valid"])
+        self.assertIn("force_ai_failed", standardizer["renderValidation"]["issues"])
+        self.assertNotEqual("rules-fallback", standardizer["source"])
+
     def test_standardize_llm_timeout_returns_local_fallback_candidate(self):
         markdown = r"计算：$x + 1$。"
 

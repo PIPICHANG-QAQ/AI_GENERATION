@@ -1177,6 +1177,10 @@ components:
         markdown:
           type: string
           description: OCR 或人工编辑后的题干 Markdown。
+        forceAi:
+          type: boolean
+          default: false
+          description: 导入题两阶段标准化开关；false 使用本地候选，true 强制调用 AI 且不回退本地候选。
         rawOcrText:
           type: string
           description: 可选 OCR 原文；导入题接口会优先使用 Java 已保存的 OCR 原文上下文。
@@ -1300,7 +1304,7 @@ components:
         completedItems: { type: integer }
         successItems: { type: integer }
         failedItems: { type: integer }
-        executionPath: { type: string, enum: [rules, ocr-fallback, cache, llm] }
+        executionPath: { type: string, enum: [rules, ocr-fallback, cache, llm, local, force-ai] }
         writeDecision: { type: string, enum: [candidate, applied, unchanged, review_required, failed] }
         modelInvoked: { type: boolean }
         cacheHit: { type: boolean }
