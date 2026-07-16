@@ -26,6 +26,7 @@ RUN apt-get update \
         libxcb1 \
         libxext6 \
         libxrender1 \
+        libreoffice-writer \
         nginx \
         openjdk-17-jre-headless \
         poppler-utils \

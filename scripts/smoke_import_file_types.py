@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -122,14 +123,33 @@ def make_doc(path: Path) -> None:
         r"1. x + 1 = 2, find x.\line A. 0   B. 1   C. 2   D. 3}",
         encoding="utf-8",
     )
-    result = subprocess.run(
-        ["textutil", "-convert", "doc", "-output", str(path), str(rtf)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0 or not path.exists():
-        path.write_bytes(rtf.read_bytes())
+    attempts: list[str] = []
+    textutil = shutil.which("textutil")
+    if textutil:
+        result = subprocess.run(
+            [textutil, "-convert", "doc", "-output", str(path), str(rtf)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and path.is_file() and path.stat().st_size > 0:
+            return
+        attempts.append(f"textutil exited with code {result.returncode}: {(result.stderr or result.stdout)[-500:]}")
+
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if office:
+        result = subprocess.run(
+            [office, "--headless", "--convert-to", "doc", "--outdir", str(path.parent), str(rtf)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0 and path.is_file() and path.stat().st_size > 0:
+            return
+        attempts.append(f"soffice exited with code {result.returncode}: {(result.stderr or result.stdout)[-500:]}")
+
+    detail = "; ".join(attempts) or "textutil and LibreOffice/soffice are unavailable"
+    raise RuntimeError(f"unable to generate a real .doc smoke sample: {detail}")
 
 
 def make_docx(path: Path) -> None:

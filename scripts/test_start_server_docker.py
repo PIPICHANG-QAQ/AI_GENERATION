@@ -300,6 +300,11 @@ class StartServerDockerTest(unittest.TestCase):
         self.assertIn(permission_command, dockerfile)
         self.assertLess(dockerfile.index(copy_command), dockerfile.index(permission_command))
 
+    def test_docker_image_installs_real_legacy_doc_converter(self) -> None:
+        dockerfile = DOCKERFILE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("libreoffice-writer", dockerfile)
+
         with tempfile.TemporaryDirectory() as temp_dir:
             html = Path(temp_dir) / "html"
             html.mkdir(mode=0o700)
