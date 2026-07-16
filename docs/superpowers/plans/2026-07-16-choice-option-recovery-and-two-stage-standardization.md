@@ -563,7 +563,7 @@ git commit -m "feat: force AI on second choice standardization"
 - Modify: `scripts/smoke_ai.py:118-187`
 - Modify: `scripts/test_smoke_ai.py`
 
-- [ ] **Step 1: 写 smoke 单元测试，约束两次请求载荷**
+- [x] **Step 1: 写 smoke 单元测试，约束两次请求载荷**
 
 ```python
 def test_choice_standardization_smoke_sends_local_then_force_ai(self):
@@ -578,7 +578,7 @@ def test_choice_standardization_smoke_sends_local_then_force_ai(self):
     self.assertEqual(True, request.call_args_list[1].args[2]["forceAi"])
 ```
 
-- [ ] **Step 2: 运行 smoke 单元测试，确认 RED**
+- [x] **Step 2: 运行 smoke 单元测试，确认 RED**
 
 Run:
 
@@ -588,7 +588,7 @@ python3 -m unittest scripts/test_smoke_ai.py -v
 
 Expected: `run_choice_standardization_smoke` 尚不存在。
 
-- [ ] **Step 3: 在 `smoke_ai.py` 加入两阶段运行态检查**
+- [x] **Step 3: 在 `smoke_ai.py` 加入两阶段运行态检查**
 
 ```python
 def run_choice_standardization_smoke(task_id: str, question_id: str, markdown: str) -> None:
@@ -604,7 +604,7 @@ def run_choice_standardization_smoke(task_id: str, question_id: str, markdown: s
 
 Call it after the imported task and first question have been created. Keep the existing analysis and global-standardization smoke unchanged.
 
-- [ ] **Step 4: 运行完整本地验证**
+- [x] **Step 4: 运行完整本地验证**
 
 Run:
 
@@ -626,7 +626,7 @@ git diff --check
 
 Expected: 所有命令退出码为 0；已有性能/受控基线边界仍按现有文档标记，不把工具测试误称为正式 benchmark compare。
 
-- [ ] **Step 5: 提交 smoke、更新计划勾选状态并生成交付包**
+- [x] **Step 5: 提交 smoke、更新计划勾选状态并生成交付包**
 
 ```bash
 git add scripts/smoke_ai.py scripts/test_smoke_ai.py docs/superpowers/plans/2026-07-16-choice-option-recovery-and-two-stage-standardization.md
