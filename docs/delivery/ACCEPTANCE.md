@@ -4,6 +4,8 @@
 
 本文件描述当前本期验收标准。项目不再按历史阶段口径拆分，统一验收 `question-engine` 能力服务、Java 主后端、Python worker 和 `local-platform` 本地小平台。
 
+2026-07-16 的生产恢复实际取证、版本、回滚资产和未覆盖范围见 [生产恢复验收记录](PRODUCTION_RECOVERY_ACCEPTANCE_20260715.md)；该记录不替代本文件中的受控真实语料、性能和平台集成门禁。
+
 ## 本地部署与启动
 
 - `./scripts/deploy_local.sh` 能在干净迁移目录中自动安装基础 worker 依赖和前端依赖、自动避让被其它项目占用的默认端口、启动 Python worker / Java backend / 前端、完成健康检查并通过 basic smoke。
@@ -64,6 +66,10 @@
 - `question-engine/sdk/examples` 只能作为旧手写 SDK 示例，不得作为平台正式集成主入口。
 
 ## OCR-Flow
+
+- 生产恢复发布必须同时验证 runtime 深度导入、MinerU API readiness、全部声明支持的文件类型、业务闭环和 AI smoke；一次单文件 OCR 成功不能替代该完整 smoke。
+- 运行时必须显示 `installed=true`、`runtimeProbeOk=true`；启用常驻 API 时还必须显示 `apiReady=true`。不满足时不得把容器健康状态视为 OCR 可用。
+- 既有失败任务的 retry 只可在根因修复和门禁通过后执行一次；retryCount 若为累计字段，验收须同时记录本次实际 retry 次数。保留同一 OCR job、题目数、源文件读取和错误清空证据。
 
 - `GET /api/capabilities/ocr-flow` 必须返回 provider 合约、默认 provider、配置键和 worker endpoints。
 - 能力描述必须声明 `providerContract.outputSchema=canonical-ocr-bundle.v1`、`postProcessContract.inputSchema=canonical-ocr-bundle.v1` 和兼容输出策略。

@@ -144,6 +144,23 @@ curl -fsS http://127.0.0.1:5173/api/capabilities/ocr-flow \
 
 期望包含 `canonical-ocr-bundle.v1` 和 `legacy-collect-outputs`。若缺失，表示服务器仍运行旧能力描述；这不等同于 OCR 失败，但需要按发布流程重建镜像后再做 provider 替换验收。
 
+## 发布后最终 smoke 与证据归档
+
+健康检查通过后，必须执行以下完整运行态验收；不能以 unit test 或单次 OCR 成功替代。命令中的任务会创建并清理专用 smoke 数据，既有用户任务不得作为清理对象。
+
+```bash
+cd /home/user/AI_GENERATION_DOCKER
+curl -fsS http://127.0.0.1:8018/api/capabilities/ocr-flow/runtime | python3 -m json.tool
+AI_GENERATION_BASE_URL=http://127.0.0.1:8018 vendor/mineru-venv/bin/python scripts/smoke_import_file_types.py
+AI_GENERATION_BASE_URL=http://127.0.0.1:8018 AI_GENERATION_FRONTEND_URL=http://127.0.0.1 vendor/mineru-venv/bin/python scripts/smoke_local_platform_business.py
+AI_GENERATION_BASE_URL=http://127.0.0.1:8018 vendor/mineru-venv/bin/python scripts/smoke_ai.py
+sudo docker compose -f docker-compose.server.yml logs --since=30m question-engine | grep -En 'Traceback|ERROR|Exception|cannot import|CUDA out of memory' || true
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits
+nvidia-smi pmon -c 1
+```
+
+验收记录必须注明镜像摘要、runtimeProbeOk/apiReady、13 类文件结果、业务/AI smoke、日志匹配数、GPU 分配和原任务 retry 结果。若任何一项失败，先保存任务 JSON、OCR job JSON、日志和 GPU 输出，再按根因修复；不得无依据重复 retry。
+
 ## 验证导入工作台 v15
 
 选择一个已存在导入任务 ID 后执行：

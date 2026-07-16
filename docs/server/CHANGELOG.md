@@ -2,6 +2,20 @@
 
 本文件只记录服务器部署相关变更。项目通用功能变更继续记录在 `docs/CHANGELOG.md`。
 
+## 2026-07-16
+
+### MinerU OCR 生产恢复与全量运行态验收
+
+本节记录生产运行态恢复，不表示正式生产交付或全部模块化计划已完成。
+
+- 已切换 question-engine 到镜像 sha256:18f2ee29a87ed5c1a4809ce5c49ccae60dfa30df0e569e987778653f8fd700ef；上一镜像保留为 ai-generation-question-engine:pre-edc045d（sha256:761d7e15fd459152a17107ddfa20fefb72c22c9b242a98488439bbc614b39850）。
+- active MinerU venv 的 runtime 返回 mineru 3.4.2、runtimeProbeOk=true、apiReady=true；运行解释器为 /home/user/AI_GENERATION_DOCKER/vendor/mineru-venv/bin/python。
+- 新镜像包含 LibreOffice 7.3.7.2，.doc 的真实导入、转换、OCR 和题目生成已通过；同轮 13 类声明支持格式均成功产出题目。
+- 公开前端返回 200，Java health 成功、Java 到 Python worker 可达；平台业务 smoke 和 AI smoke 全部通过。
+- 原失败导入任务 import_task_20260715_065444_e0d1c55f 已复用 OCR job ocr_20260715_065444_6f78252a 成功完成；本次仅发起一次 retry，retryCount=2 为历史累计值，questionCount=37、failureReason 为空。
+- 最近容器日志未匹配 Traceback、ERROR、Exception、cannot import 或 CUDA out of memory；GPU0 为 MinerU Python，GPU1 保持 vLLM。
+- 本次生产恢复代码归档已更新为 edc045d 对应包；旧 d29674e 归档保留在服务器 release/archive-d29674e。完整 SHA-256、备份和限制见生产恢复验收记录。
+
 ## 2026-07-10
 
 ### OCR v15 结构契约、自动标准化和布局解耦

@@ -10,16 +10,18 @@
 
 ---
 
+> **Evidence update — 2026-07-16 (Asia/Shanghai):** 13/18 checklist items below have direct source, commit, and fresh test/operational evidence. RED execution checkpoints remain unchecked because their historical failing output was not retained. Controlled-corpus and benchmark compare gates remain unchecked because the baseline is still `pending-controlled-baseline`; unit tests and successful smoke runs are not substitutes for those gates.
+
 ### Task 1: 定义 Canonical OCR Bundle
 
 **Files:**
 - Create: `backend/python-worker/app/ocr/contracts.py`
 - Test: `backend/python-worker/tests/test_ocr_postprocess_contracts.py`
 
-- [ ] 写失败测试：L2 bundle 的 layout、assets 和 source ref 可被序列化；Markdown、图片引用和 bbox 非法时抛出确定性错误。
+- [x] 写失败测试：L2 bundle 的 layout、assets 和 source ref 可被序列化；Markdown、图片引用和 bbox 非法时抛出确定性错误。
 - [ ] 运行：`PYTHONPATH=. .venv/bin/python -m pytest tests/test_ocr_postprocess_contracts.py -q -p no:cacheprovider`，确认失败原因是模块不存在。
-- [ ] 实现最小 dataclass/validator：`CanonicalOcrBundle`、`OcrAsset`、`OcrLayoutBlock`、`OcrPage`、`SourceDocumentRef`。
-- [ ] 重跑测试并提交。
+- [x] 实现最小 dataclass/validator：`CanonicalOcrBundle`、`OcrAsset`、`OcrLayoutBlock`、`OcrPage`、`SourceDocumentRef`。
+- [x] 重跑测试并提交。
 
 ### Task 2: MinerU Adapter
 
@@ -27,10 +29,10 @@
 - Create: `backend/python-worker/app/ocr/mineru_adapter.py`
 - Test: `backend/python-worker/tests/test_mineru_ocr_adapter.py`
 
-- [ ] 写失败测试：由 fixture 目录构造 bundle，保留 Markdown、图片资源、content-list layout block、middle 优先 layout block、页面尺寸和上传源文件。
+- [x] 写失败测试：由 fixture 目录构造 bundle，保留 Markdown、图片资源、content-list layout block、middle 优先 layout block、页面尺寸和上传源文件。
 - [ ] 运行该测试并确认失败原因是 adapter 不存在。
-- [ ] 最小实现 `MineruOcrBundleAdapter.from_job(jobId)`；唯一允许识别 MinerU 文件名和字段。
-- [ ] 重跑测试、既有 OCR processing 测试并提交。
+- [x] 最小实现 `MineruOcrBundleAdapter.from_job(jobId)`；唯一允许识别 MinerU 文件名和字段。
+- [x] 重跑测试、既有 OCR processing 测试并提交。
 
 ### Task 3: Bundle 驱动的后处理外观
 
@@ -39,10 +41,10 @@
 - Modify: `backend/python-worker/app/ocr_processing.py`
 - Test: `backend/python-worker/tests/test_ocr_postprocess_pipeline.py`
 
-- [ ] 写失败测试：`pipeline.run_bundle(bundle)` 产生与旧 `collect_outputs(jobId)` 相同的 outputs；旧入口委托 adapter 与 bundle pipeline。
+- [x] 写失败测试：`pipeline.run_bundle(bundle)` 产生与旧 `collect_outputs(jobId)` 相同的 outputs；旧入口委托 adapter 与 bundle pipeline。
 - [ ] 运行该测试并确认失败。
-- [ ] 提取显式 bundle 入参和兼容 context；算法阶段、写入步骤、返回字段与异常语义不变。
-- [ ] 重跑 focused tests，确认全部通过并提交。
+- [x] 提取显式 bundle 入参和兼容 context；算法阶段、写入步骤、返回字段与异常语义不变。
+- [x] 重跑 focused tests，确认全部通过并提交。
 
 ### Task 4: 契约边界与兼容回归
 
@@ -51,10 +53,10 @@
 - Modify: `backend/python-worker/tests/test_ocr_processing.py`
 - Test: `backend/python-worker/tests/test_ocr_postprocess_contracts.py`
 
-- [ ] 写失败测试：provider runtime 只负责生成 OCR 工件；执行编排层在工件成功后调用统一 pipeline；显式 bundle 不需要 provider 名称或目录扫描。
+- [x] 写失败测试：provider runtime 只负责生成 OCR 工件；执行编排层在工件成功后调用统一 pipeline；显式 bundle 不需要 provider 名称或目录扫描。
 - [ ] 运行失败测试。
-- [ ] 只作调用边界改动，移除 `OcrFlowRuntime.collect_outputs`，保留最终 job 状态和 `outputs` 外观。
-- [ ] 运行 Python 全量、golden replay 和 benchmark compare；提交。
+- [x] 只作调用边界改动，移除 `OcrFlowRuntime.collect_outputs`，保留最终 job 状态和 `outputs` 外观。
+- [ ] 运行 Python 全量、golden replay 和 benchmark compare；提交。Partial: 2026-07-16 Python 全量 332 passed；正式 benchmark compare 继续受 `pending-controlled-baseline` 阻塞。
 
 ### Task 5: 文档与交接
 
@@ -62,5 +64,5 @@
 - Modify: `docs/architecture/CODE_STRUCTURE_PORTABILITY_REVIEW.md`
 - Modify: `docs/architecture/decisions/0003-mineru-default-ocr-provider.md`
 
-- [ ] 记录 bundle v1、L0/L1/L2、兼容期限制和腾讯 Adapter 接入条件。
-- [ ] 运行 portability 检查并提交。
+- [x] 记录 bundle v1、L0/L1/L2、兼容期限制和腾讯 Adapter 接入条件。
+- [x] 运行 portability 检查并提交。

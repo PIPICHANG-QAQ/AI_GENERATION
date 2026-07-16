@@ -1,5 +1,12 @@
 # 变更记录
 
+## 2026-07-16
+
+- 完成生产运行态恢复：MinerU runtime/API 深度 readiness、前端、Java、Python worker、13 类已声明支持文件、平台业务闭环和 AI smoke 均有实际执行证据；详情见生产恢复验收记录。
+- 强化 OCR canonical 证据隔离：Markdown 与 JSON 派生证据使用内容寻址快照，并拒绝不受信任 symlink，避免后续原生工件变化改变已保存的 canonical 结果。
+- Linux Docker 镜像增加 LibreOffice Writer，确保 legacy .doc 在进入 MinerU 前能够转换为 .docx；服务器 .doc 真实上传—OCR—题目生成已通过。
+- 本次范围是生产运行态恢复，不表示 provider 解耦或 215 项模块化总计划全部完成。受控真实样卷、性能 baseline、权限、版本、审核、MQ、扫描器和正式 SDK 发布仍为后续独立交付。
+
 ## 2026-07-15
 
 - OCR provider 与题库后处理改为显式 `Provider -> Adapter -> CanonicalOcrBundle v1 -> Post Process` 边界；MinerU 私有字段收敛到 `MineruOcrBundleAdapter`，确定性工件测试验证两条入口的归一化 outputs 一致。受控真实语料与性能不回退 gate 仍待完成。

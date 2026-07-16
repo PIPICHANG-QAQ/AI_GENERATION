@@ -12,6 +12,8 @@
 
 ---
 
+> **Evidence update — 2026-07-16 (Asia/Shanghai):** 仅 3/215 项已有足够证据更新为完成，均属于 Task 7 的 Python 原地 pipeline 提取。其余事项继续保持未完成；尤其 Java 唯一事实源、SDK 正式发布、灰度/回滚、20 份真实样卷、性能 baseline、权限、题目版本、审核、MQ 和超时扫描器不在本次恢复范围内。
+
 ## 0. 执行范围与硬性底线
 
 本计划替换的是公司题库中的“题目采集和加工链路”，不是迁移整个 `local-platform`。
@@ -654,15 +656,15 @@ cd backend/python-worker
 PYTHONPATH=. .venv/bin/python -m pytest tests/test_ocr_postprocess_pipeline.py -q -p no:cacheprovider
 ```
 
-- [ ] **Step 3: 先整体迁入 `OcrPostProcessingPipeline.run()`**
+- [x] **Step 3: 先整体迁入 `OcrPostProcessingPipeline.run()`**
 
 第一提交只包裹现有 `collect_outputs()`，不拆 helper；第二提交再按上述节点抽到四个模块。每次抽取都保持参数、返回结构和异常传播不变。
 
-- [ ] **Step 4: 保留 `ocr_processing.py` façade**
+- [x] **Step 4: 保留 `ocr_processing.py` façade**
 
 `collect_outputs(job_id)` 继续存在并直接调用单例 pipeline，旧测试和调用方不改签名。
 
-- [ ] **Step 5: 验证**
+- [ ] **Step 5: 验证**（Partial: focused/full Python tests 和服务器 smoke 已通过；受控 golden compare 与 benchmark compare 尚不能通过 `pending-controlled-baseline` 证明。）
 
 ```bash
 PYTHONPATH=. .venv/bin/python -m pytest \
@@ -674,7 +676,7 @@ python3 scripts/ocrflow_golden.py compare --manifest tests/ocrflow-golden/manife
 python3 scripts/benchmark_ocrflow.py compare
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add backend/python-worker/app/ocr backend/python-worker/app/ocr_processing.py \
