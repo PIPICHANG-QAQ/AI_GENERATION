@@ -12,11 +12,13 @@ type StandardizerCorrection = {
 export type StandardizerResult = {
   corrections?: StandardizerCorrection[];
   warnings?: string[];
+  error?: string;
   severeIssues?: string[];
   candidateSevereIssues?: string[];
   rawOcrFallbackUsed?: boolean;
   rawOcrContextUsed?: boolean;
   fallbackUsed?: boolean;
+  forceAiFailed?: boolean;
   retryable?: boolean;
   confidence?: string;
   source?: string;
@@ -95,6 +97,14 @@ function hasSubQuestionCandidate(payload: any): boolean {
 }
 
 export function standardizeCandidateFromPayload(currentMarkdown: string, payload: { markdown?: unknown; standardizer?: StandardizerResult }) {
+  if (payload?.standardizer?.forceAiFailed) {
+    const warnings = stringList(payload.standardizer.warnings);
+    const detail = warnings[0] || payload.standardizer.error || "未返回可应用候选";
+    return {
+      candidate: null as StandardizeCandidate | null,
+      message: `强制 AI 标准化失败：${detail}`,
+    };
+  }
   const markdown = String(payload?.markdown ?? currentMarkdown);
   const message = standardizeNotice(payload?.standardizer, "AI 标准化完成");
   const candidateSevereIssues = stringList(payload?.standardizer?.candidateSevereIssues);

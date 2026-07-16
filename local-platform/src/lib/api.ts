@@ -146,10 +146,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ images }),
     }),
-  standardizeImportQuestionAi: (taskId: string, qid: string, markdown: string) =>
+  standardizeImportQuestionAi: (taskId: string, qid: string, markdown: string, forceAi = false) =>
     fetcher(`/api/import-tasks/${taskId}/questions/${qid}/standardize/ai`, {
       method: "POST",
-      body: JSON.stringify({ markdown }),
+      body: JSON.stringify({ markdown, forceAi }),
     }),
   generateImportQuestionAnalysis: (taskId: string, qid: string, data: unknown) =>
     fetcher(`/api/import-tasks/${taskId}/questions/${qid}/analysis`, {

@@ -1,5 +1,11 @@
 import React, { useState } from "react";
 import { api } from "@/lib/api";
+import {
+  afterLocalStandardization,
+  nextStandardizationStageAfterResult,
+  shouldForceAi,
+  type InteractiveStandardizationStage,
+} from "@/lib/interactive-standardization";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -103,6 +109,8 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   const [images, setImages] = useState<QuestionImage[]>(initialImages);
   const [imagePlacements, setImagePlacements] = useState(() => ensureImagePlacements(initialImages, question.imagePlacements || []));
   const [standardizeCandidate, setStandardizeCandidate] = useState<StandardizeCandidate | null>(null);
+  const [interactiveStandardizationStage, setInteractiveStandardizationStage] =
+    useState<InteractiveStandardizationStage>(null);
   const [subStandardizeCandidate, setSubStandardizeCandidate] = useState<{
     subIndex: number;
     candidate: StandardizeCandidate;
@@ -132,6 +140,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     setFormData(f => ({ ...f, ...p }));
     if (Object.prototype.hasOwnProperty.call(p, "markdown")) {
       setStandardizeCandidate(null);
+      setInteractiveStandardizationStage(null);
     }
     setDirty(true);
   };
@@ -159,6 +168,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     setImages(nextImages);
     setImagePlacements((current) => ensureImagePlacements(nextImages, current));
     setStandardizeCandidate(null);
+    setInteractiveStandardizationStage(null);
     setSubStandardizeCandidate(null);
     setDirty(true);
   };
@@ -182,6 +192,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     }));
     setSubForms(moved.subQuestions);
     setImagePlacements((current) => updateImagePlacementTarget(current, imageId, target));
+    setInteractiveStandardizationStage(null);
     setDirty(true);
   };
 
@@ -252,28 +263,52 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
   });
 
   const localStdMutation = useMutation({
-    mutationFn: (md: string) => api.standardizeImportQuestionAi(taskId, qid, md),
-    onSuccess: (res: any, md) => {
-      const result = standardizeCandidateFromPayload(md, res);
+    mutationFn: ({ markdown, forceAi }: { markdown: string; forceAi: boolean }) =>
+      api.standardizeImportQuestionAi(taskId, qid, markdown, forceAi),
+    onSuccess: (res: any, { markdown, forceAi }) => {
+      const result = standardizeCandidateFromPayload(markdown, res);
+      if (res?.standardizer?.forceAiFailed) {
+        setStandardizeCandidate(null);
+        setInteractiveStandardizationStage(nextStandardizationStageAfterResult({ forceAi, markdown, payload: res }));
+        toast({ title: "强制 AI 标准化失败", description: result.message, variant: "destructive" });
+        return;
+      }
       if (result.candidate?.applyBlocked) {
+        setInteractiveStandardizationStage(nextStandardizationStageAfterResult({ forceAi, markdown, payload: result.candidate.payload }));
         setStandardizeCandidate(result.candidate);
         toast({ title: "AI 标准化候选需人工复核", description: result.message });
         return;
       }
       if (result.candidate) {
         const { nextFormData, nextSubForms } = standardizedQuestionDraft(result.candidate);
+        setInteractiveStandardizationStage(nextStandardizationStageAfterResult({
+          forceAi,
+          markdown: nextFormData.markdown,
+          payload: result.candidate.payload,
+        }));
         saveStandardizedDraft(nextFormData, nextSubForms, "AI 标准化已应用并保存");
         return;
       }
       setStandardizeCandidate(null);
+      setInteractiveStandardizationStage(nextStandardizationStageAfterResult({ forceAi, markdown, payload: res }));
       toast({ title: "AI 标准化完成", description: result.message });
     },
-    onError: (err: any) => toast({ title: "标准化失败", description: err.message, variant: "destructive" }),
+    onError: (err: any, { markdown, forceAi }) => {
+      if (forceAi) {
+        setInteractiveStandardizationStage(afterLocalStandardization(markdown));
+      }
+      toast({ title: forceAi ? "强制 AI 标准化失败" : "标准化失败", description: err.message, variant: "destructive" });
+    },
   });
 
   const applyStandardizeCandidate = () => {
     if (!standardizeCandidate) return;
     const { nextFormData, nextSubForms } = standardizedQuestionDraft(standardizeCandidate);
+    setInteractiveStandardizationStage(nextStandardizationStageAfterResult({
+      forceAi: false,
+      markdown: nextFormData.markdown,
+      payload: standardizeCandidate.payload,
+    }));
     saveStandardizedDraft(nextFormData, nextSubForms, "AI 标准化候选已应用并保存");
   };
 
@@ -428,6 +463,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     setSubForms((prev) => prev.map((sub, i) => (i === subIndex ? { ...sub, ...patchValue } : sub)));
     if (Object.prototype.hasOwnProperty.call(patchValue, "markdown")) {
       setSubStandardizeCandidate((current) => (current?.subIndex === subIndex ? null : current));
+      setInteractiveStandardizationStage(null);
     }
     setDirty(true);
   };
@@ -437,6 +473,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
       current.map((sub, index) => (index === subIndex ? updateSubQuestionImages(sub, nextImages) : sub)),
     );
     setSubStandardizeCandidate(null);
+    setInteractiveStandardizationStage(null);
     setDirty(true);
   };
 
@@ -448,6 +485,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
       setFormData((f) => ({ ...f, answer: "", analysis: "" }));
     }
     setStandardizeCandidate(null);
+    setInteractiveStandardizationStage(null);
     setSubStandardizeCandidate(null);
     setDirty(true);
   };
@@ -456,6 +494,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     if (readOnly) return;
     setSubForms((prev) => removeSubQuestionForm(prev, subIndex));
     setStandardizeCandidate(null);
+    setInteractiveStandardizationStage(null);
     setSubStandardizeCandidate(null);
     setDirty(true);
   };
@@ -501,6 +540,7 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
     : isVerified
       ? "border-info/40"
       : "border-border";
+  const forceAiStandardization = shouldForceAi(interactiveStandardizationStage, formData.markdown);
 
   return (
     <div id={`import-q-${qid}`} className={`@container border ${cardTone} bg-card rounded-lg elevation-1 transition-all`}>
@@ -583,11 +623,11 @@ export function QuestionCard({ index, question, taskId }: { index: number; quest
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => localStdMutation.mutate(formData.markdown)}
+                onClick={() => localStdMutation.mutate({ markdown: formData.markdown, forceAi: forceAiStandardization })}
                 disabled={readOnly || localStdMutation.isPending || updateMutation.isPending || !formData.markdown}
                 className="h-8 gap-1.5 text-xs"
               >
-                <Code className="w-3.5 h-3.5" /> AI 标准化
+                <Code className="w-3.5 h-3.5" /> {forceAiStandardization ? "强制 AI 标准化" : "AI 标准化"}
               </Button>
               <Button
                 variant="outline"
